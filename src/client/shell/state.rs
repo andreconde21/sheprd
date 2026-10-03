@@ -93,6 +93,8 @@ pub(super) struct ShellHitMap {
     pub(super) sheprd_attention: Rect,
     /// Collapsed rail rows (rect, project key).
     pub(super) sheprd_rail: Vec<(Rect, String)>,
+    /// To-do progress bars on agent rows (rect, agent key): click expands.
+    pub(super) sheprd_todo_toggle: Vec<(Rect, String)>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
@@ -576,6 +578,9 @@ pub(super) enum ClientContextMenuAction {
     AgentMarkInactive,
     AgentToggleKeep,
     AgentPeek,
+    AgentTimeline,
+    AgentTasks,
+    TaskOpen(usize),
     NewOnMachine(usize),
     ProjectNewWorkspace,
     ProjectNewAgent,
@@ -643,7 +648,12 @@ pub(super) enum ClientContextMenuTarget {
         active: bool,
         groups: Vec<String>,
         grouped: bool,
+        /// From the agent-insights hook (claude-mods).
+        timeline: Vec<String>,
+        tasks: Vec<String>,
     },
+    /// Pick one of the task ids an agent mentioned.
+    TaskPicker { tasks: Vec<String> },
 }
 
 #[derive(Debug)]

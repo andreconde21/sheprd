@@ -49,6 +49,9 @@ enum Row {
         age: Option<String>,
         faded: bool,
         ctx: Option<String>,
+        todo: Option<(u32, u32)>,
+        todo_items: Vec<String>,
+        agent_key: String,
     },
     Workspace {
         endpoint: usize,
@@ -70,8 +73,19 @@ impl Row {
         match self {
             Row::Header { note: Some(_), .. } => 2,
             Row::Agent {
-                workspace, machine, ..
-            } if workspace.is_some() || machine.is_some() => 2,
+                workspace,
+                machine,
+                todo,
+                todo_items,
+                ..
+            } => {
+                let base = if workspace.is_some() || machine.is_some() || todo.is_some() {
+                    2
+                } else {
+                    1
+                };
+                base + todo_items.len().min(u16::MAX as usize - 2) as u16
+            }
             _ => 1,
         }
     }
@@ -91,6 +105,11 @@ struct AgentInfo {
     current: bool,
     /// Context size from the usage hook ("581k"), shown while peeking.
     ctx: Option<String>,
+    /// To-do progress from the agent-insights hook, and its items when the
+    /// list is expanded under the row.
+    todo: Option<(u32, u32)>,
+    todo_items: Vec<String>,
+    agent_key: String,
 }
 
 fn agent_title(agent: &crate::protocol::ClientShellAgent) -> String {
@@ -199,6 +218,15 @@ fn build_rows(
                 current: presence.is_active() || kept || recent,
                 ctx: projects::agent_context_tokens(row.agent)
                     .map(|tokens| format!("ctx {}", projects::format_tokens(tokens))),
+                todo: projects::agent_todo(row.agent).map(|(progress, _)| progress),
+                todo_items: if projects::todo_expanded(&key) {
+                    projects::agent_todo(row.agent)
+                        .map(|(_, items)| items)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                agent_key: key.clone(),
                 focused: row.agent.focused && &endpoint.endpoint_id == active_endpoint_id,
                 stale,
                 title: agent_title(row.agent),
@@ -345,6 +373,9 @@ fn build_rows(
                     age: agent.age,
                     faded: !agent.current,
                     ctx: agent.ctx,
+                    todo: agent.todo,
+                    todo_items: agent.todo_items,
+                    agent_key: agent.agent_key,
                 });
             }
         }
@@ -817,6 +848,9 @@ fn render_row(
             age,
             faded,
             ctx,
+            todo,
+            todo_items,
+            agent_key,
         } => {
             let endpoint = &endpoints[*endpoint];
             if *focused {
@@ -853,9 +887,55 @@ fn render_row(
                     .add_modifier(Modifier::BOLD),
             );
             put_right_text(buffer, rect, rect.y, &slot, slot_style);
+            // To-do progress bar at the right of line 2; click it to expand.
+            let mut right = rect.right();
+            if let (Some((done, total)), true) = (todo, rect.height > 1) {
+                let filled = ((*done as f32 / (*total).max(1) as f32) * 5.0).round() as usize;
+                let bar = format!(
+                    "{}{} {done}/{total} ",
+                    "▰".repeat(filled.min(5)),
+                    "▱".repeat(5 - filled.min(5))
+                );
+                let width = display_width(&bar);
+                let bar_rect = Rect::new(rect.right().saturating_sub(width), rect.y + 1, width, 1);
+                put_text(
+                    buffer,
+                    bar_rect.x,
+                    bar_rect.y,
+                    bar_rect.width,
+                    &bar,
+                    Style::default().fg(if done == total {
+                        palette.overlay0
+                    } else {
+                        palette.accent
+                    }),
+                );
+                hits.sheprd_todo_toggle.push((bar_rect, agent_key.clone()));
+                right = bar_rect.x.saturating_sub(1);
+            }
+            for (index, todo_item) in todo_items.iter().enumerate() {
+                let y = rect.y + 2 + index as u16;
+                if y >= rect.bottom() {
+                    break;
+                }
+                let style = if todo_item.starts_with('✓') {
+                    Style::default().fg(palette.overlay0)
+                } else if todo_item.starts_with('▸') {
+                    Style::default().fg(palette.accent)
+                } else {
+                    Style::default().fg(palette.subtext0)
+                };
+                put_text(
+                    buffer,
+                    rect.x + 4,
+                    y,
+                    rect.width.saturating_sub(5),
+                    todo_item,
+                    style,
+                );
+            }
             if rect.height > 1 {
                 let mut x = rect.x + 3;
-                let right = rect.right();
                 if let Some(workspace) = workspace {
                     put_text(
                         buffer,

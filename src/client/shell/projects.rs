@@ -769,12 +769,112 @@ fn usage_store() -> &'static std::sync::Mutex<UsageStore> {
     })
 }
 
-fn agent_token<'a>(agent: &'a crate::protocol::ClientShellAgent, name: &str) -> Option<&'a str> {
+pub(super) fn agent_token<'a>(
+    agent: &'a crate::protocol::ClientShellAgent,
+    name: &str,
+) -> Option<&'a str> {
     agent
         .tokens
         .iter()
         .find(|(token, _)| token == name || token.strip_prefix('$') == Some(name))
         .map(|(_, value)| value.as_str())
+}
+
+/// Numbered tokens `<prefix>1..`, in order, from the agent-insights hook.
+fn numbered_tokens(agent: &crate::protocol::ClientShellAgent, prefix: &str) -> Vec<String> {
+    let mut items = agent
+        .tokens
+        .iter()
+        .filter_map(|(name, value)| {
+            let index = name
+                .trim_start_matches('$')
+                .strip_prefix(prefix)?
+                .parse::<usize>()
+                .ok()?;
+            Some((index, value.clone()))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|(index, _)| *index);
+    items.into_iter().map(|(_, value)| value).collect()
+}
+
+/// To-do progress (done, total) and items, from the agent-insights hook.
+pub(super) fn agent_todo(
+    agent: &crate::protocol::ClientShellAgent,
+) -> Option<((u32, u32), Vec<String>)> {
+    let (done, total) = agent_token(agent, "sheprd_todo")?.split_once('/')?;
+    let progress = (done.trim().parse().ok()?, total.trim().parse().ok()?);
+    (progress.1 > 0).then(|| (progress, numbered_tokens(agent, "sheprd_todo_")))
+}
+
+/// Timeline lines ("09:12 fix the bar widget (+3 edits)"), oldest first.
+pub(super) fn agent_timeline(agent: &crate::protocol::ClientShellAgent) -> Vec<String> {
+    numbered_tokens(agent, "sheprd_tl_")
+}
+
+/// Task ids mentioned in the chat, newest first.
+pub(super) fn agent_tasks(agent: &crate::protocol::ClientShellAgent) -> Vec<String> {
+    agent_token(agent, "sheprd_tasks")
+        .map(|tasks| {
+            tasks
+                .split(',')
+                .map(str::trim)
+                .filter(|task| !task.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Agents whose to-do list is expanded under their row (session only).
+fn expanded_todos() -> &'static std::sync::Mutex<HashSet<String>> {
+    static EXPANDED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    EXPANDED.get_or_init(Default::default)
+}
+
+pub(super) fn todo_expanded(key: &str) -> bool {
+    expanded_todos()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(key)
+}
+
+pub(super) fn toggle_todo(key: &str) {
+    let mut expanded = expanded_todos().lock().unwrap_or_else(|e| e.into_inner());
+    if !expanded.remove(key) {
+        expanded.insert(key.to_owned());
+    }
+}
+
+/// The command that shows a task's body, from ~/.config/claude-mods/tasks.toml
+/// (`[[source]] pattern = "..." command = "... {id}"`), for the first source
+/// whose pattern matches the whole id.
+pub(super) fn task_command(id: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Source {
+        pattern: String,
+        command: String,
+    }
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        source: Vec<Source>,
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "#_-./".contains(c))
+    {
+        return None;
+    }
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".config/claude-mods/tasks.toml");
+    let config: Config = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    config.source.into_iter().find_map(|source| {
+        let pattern = regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok()?;
+        pattern
+            .is_match(id)
+            .then(|| source.command.replace("{id}", id))
+    })
 }
 
 /// Current context size of an agent, from the usage hook.
@@ -1134,6 +1234,26 @@ pub(super) fn filter_selected() -> usize {
 fn peek_results() -> &'static std::sync::Mutex<Vec<Option<String>>> {
     static RESULTS: OnceLock<std::sync::Mutex<Vec<Option<String>>>> = OnceLock::new();
     RESULTS.get_or_init(Default::default)
+}
+
+/// Finished task-body reads (claude-mods task sources), shown from the top.
+fn task_results() -> &'static std::sync::Mutex<Vec<(String, Option<String>)>> {
+    static RESULTS: OnceLock<std::sync::Mutex<Vec<(String, Option<String>)>>> = OnceLock::new();
+    RESULTS.get_or_init(Default::default)
+}
+
+pub(super) fn push_task_body(id: String, text: Option<String>) {
+    task_results()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, text));
+}
+
+pub(super) fn take_task_body() -> Option<(String, Option<String>)> {
+    task_results()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop()
 }
 
 pub(super) fn push_peek(text: Option<String>) {

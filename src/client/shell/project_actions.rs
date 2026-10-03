@@ -155,10 +155,17 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             .enumerate()
             .map(|(index, (_, label))| item(format!("on {label}"), Action::NewOnMachine(index)))
             .collect(),
+        ClientContextMenuTarget::TaskPicker { tasks } => tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| item(format!("→ {task}"), Action::TaskOpen(index)))
+            .collect(),
         ClientContextMenuTarget::Agent {
             unread_key,
             seq,
             status,
+            timeline,
+            tasks,
             workspace_key,
             hidden,
             active,
@@ -171,6 +178,15 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
                 item("Go to", Action::AgentFocus),
                 item("Peek last lines", Action::AgentPeek),
             ];
+            if !timeline.is_empty() {
+                items.push(item("Timeline", Action::AgentTimeline));
+            }
+            if !tasks.is_empty() {
+                items.push(item(
+                    format!("Tasks mentioned ({})", tasks.len()),
+                    Action::AgentTasks,
+                ));
+            }
             items.push(if presence.needs_attention() {
                 item("Mark inactive", Action::AgentMarkInactive)
             } else {
@@ -317,6 +333,8 @@ impl ClientShellState {
             agent.agent_status,
             agent.workspace_id.clone(),
         );
+        let timeline = projects::agent_timeline(agent);
+        let tasks = projects::agent_tasks(agent);
         let unread_key = projects::agent_key(endpoint, &pane_id);
         let workspace_key = self
             .workspace_label_and_paths(&endpoint_id, &workspace_id)
@@ -334,6 +352,8 @@ impl ClientShellState {
             active: endpoint_id == self.active_endpoint_id,
             endpoint_id,
             pane_id,
+            timeline,
+            tasks,
         })
     }
 
@@ -529,6 +549,17 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
+        if let Some(key) = self
+            .hits
+            .sheprd_todo_toggle
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .map(|(_, key)| key.clone())
+        {
+            projects::toggle_todo(&key);
+            outcome.repaint = true;
+            return true;
+        }
         if super::contains(self.hits.sheprd_attention, point) {
             self.focus_next_attention_agent(outcome);
             return true;
@@ -654,6 +685,31 @@ impl ClientShellState {
                     }
                 }
             }
+            ClientContextMenuTarget::TaskPicker { tasks } => {
+                if let Action::TaskOpen(index) = action {
+                    if let Some(id) = tasks.get(index).cloned() {
+                        match projects::task_command(&id) {
+                            Some(command) => {
+                                std::thread::spawn(move || {
+                                    let text = std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(&command)
+                                        .stdin(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .output()
+                                        .ok()
+                                        .filter(|output| output.status.success())
+                                        .map(|output| {
+                                            String::from_utf8_lossy(&output.stdout).into_owned()
+                                        });
+                                    projects::push_task_body(id, text);
+                                });
+                            }
+                            None => projects::push_task_body(id, None),
+                        }
+                    }
+                }
+            }
             ClientContextMenuTarget::TidyConfirm { targets, .. } => {
                 if action == Action::TidyConfirm {
                     for (endpoint_id, workspace_id) in targets {
@@ -761,6 +817,8 @@ impl ClientShellState {
                 seq,
                 workspace_key,
                 groups,
+                timeline,
+                tasks,
                 ..
             } => match action {
                 Action::AgentFocus => {
@@ -772,6 +830,14 @@ impl ClientShellState {
                 }
                 Action::AgentMarkUnread => {
                     projects::update(|layout| layout.mark(&unread_key, seq, true))
+                }
+                Action::AgentTimeline => {
+                    let (x, y) = projects::peek_anchor();
+                    self.open_menu(ClientContextMenuTarget::Info { lines: timeline }, x, y);
+                }
+                Action::AgentTasks => {
+                    let (x, y) = projects::peek_anchor();
+                    self.open_menu(ClientContextMenuTarget::TaskPicker { tasks }, x, y);
                 }
                 Action::AgentPeek => {
                     let lines = (PEEK_LINES * 3).to_string();
@@ -1144,6 +1210,39 @@ impl ClientShellState {
         Some(command)
     }
 
+    /// A task's body (from its claude-mods task source), wrapped, from the top.
+    fn show_task_body(&mut self, id: &str, text: Option<String>) {
+        let mut lines = vec![id.to_owned()];
+        match text {
+            Some(text) => {
+                for line in text.lines().map(str::trim_end) {
+                    let mut rest = line;
+                    loop {
+                        let cut = rest
+                            .char_indices()
+                            .nth(72)
+                            .map_or(rest.len(), |(index, _)| index);
+                        lines.push(rest[..cut].to_owned());
+                        rest = &rest[cut..];
+                        if rest.is_empty() {
+                            break;
+                        }
+                    }
+                    if lines.len() > 30 {
+                        lines.push("…".to_owned());
+                        break;
+                    }
+                }
+            }
+            None => lines.push(
+                "No task source matches this id, or its command failed. See ~/.config/claude-mods/tasks.toml."
+                    .to_owned(),
+            ),
+        }
+        let (x, y) = projects::peek_anchor();
+        self.open_menu(ClientContextMenuTarget::Info { lines }, x, y);
+    }
+
     /// A finished peek: show the agent's last lines where its menu was.
     fn show_peek(&mut self, text: Option<String>) {
         let lines = match text {
@@ -1257,6 +1356,10 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         outcome.repaint |= projects::expire_peek();
+        if let Some((id, text)) = projects::take_task_body() {
+            self.show_task_body(&id, text);
+            outcome.repaint = true;
+        }
         if let Some(text) = projects::take_peek() {
             self.show_peek(text);
             outcome.repaint = true;

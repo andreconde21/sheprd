@@ -356,6 +356,7 @@ pub(super) fn render_shell(
         hits.sheprd_filter_toggle = Rect::default();
         hits.sheprd_attention = Rect::default();
         hits.sheprd_rail.clear();
+        hits.sheprd_todo_toggle.clear();
         hits.workspaces.clear();
         hits.agents.clear();
         hits.endpoint_agents.clear();
