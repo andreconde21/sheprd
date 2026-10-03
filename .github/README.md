@@ -108,6 +108,12 @@ project to choose your own.
 - **Go To** (`prefix+g`) opens ready to type; arrows and Enter still pick, Left/
   Right still jump between workspaces while the search is empty.
 
+### Desktop status
+While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
+(who needs you, which projects, today's time and tokens). The
+[Omarchy Herdr widget](https://github.com/andreconde21/omarchy-herdr) reads it
+to show `● 3` in the bar; any other bar or script can too.
+
 ### Keys (defaults; no config needed)
 | Key | Action |
 |---|---|

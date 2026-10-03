@@ -840,6 +840,61 @@ fn observe_usage(endpoint: &ClientShellEndpoint, snapshot: &crate::protocol::Cli
     }
 }
 
+/// Usage across every project over the last `days` local days.
+pub(super) fn total_usage(days: i64) -> [u64; 5] {
+    let since = chrono_like_today_minus(days - 1).unwrap_or_default();
+    let store = usage_store().lock().unwrap_or_else(|e| e.into_inner());
+    let mut total = [0u64; 5];
+    for record in store.sessions.values() {
+        for totals in record.days.range(since.clone()..).map(|(_, totals)| totals) {
+            for (sum, value) in total.iter_mut().zip(totals) {
+                *sum += value;
+            }
+        }
+    }
+    total
+}
+
+/// True at most every 3s: gate for building the widget status at all.
+pub(super) fn status_due() -> bool {
+    static LAST: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+    let mut last = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed().as_secs() < 3) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
+}
+
+/// Status for desktop widgets (the Omarchy bar plugin): written to
+/// `<state_dir>/sheprd-status.json` only when it changes, at most every 3s.
+pub(super) fn write_status(status: &serde_json::Value) {
+    static LAST: OnceLock<std::sync::Mutex<(Option<Instant>, String)>> = OnceLock::new();
+    if cfg!(test) {
+        return;
+    }
+    let mut last = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let body = status.to_string();
+    // Rewrite unchanged content every 30s so readers can tell sheprd is alive.
+    let keepalive = last.0.is_none_or(|at| at.elapsed().as_secs() >= 30);
+    if body == last.1 && !keepalive {
+        return;
+    }
+    let mut stamped = status.clone();
+    stamped["updated"] = serde_json::json!(unix_now());
+    let path = crate::config::state_dir().join("sheprd-status.json");
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, stamped.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        *last = (Some(Instant::now()), body);
+    }
+}
+
 /// Usage of one project (`None` = Other) over the last `days` local days:
 /// [input, output, cache_read, cache_write, active_minutes].
 pub(super) fn project_usage(layout: &ProjectLayout, group: Option<&str>, days: i64) -> [u64; 5] {

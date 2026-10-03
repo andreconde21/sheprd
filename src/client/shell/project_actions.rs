@@ -1028,6 +1028,12 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         outcome.repaint |= projects::expire_peek();
+        if self.endpoints.len() > 1 && projects::status_due() {
+            projects::write_status(&super::sheprd_sidebar::status_json(
+                &self.endpoints,
+                &self.active_endpoint_id,
+            ));
+        }
     }
 
     /// Once the workspace created above shows up, type the agent command into
