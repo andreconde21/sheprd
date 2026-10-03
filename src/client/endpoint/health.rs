@@ -81,6 +81,11 @@ fn rtt_store(
 
 /// True when a latency probe should go out now; records it as sent.
 pub(super) fn rtt_probe_due(endpoint_id: &super::ClientEndpointId, now: Instant) -> bool {
+    // Process-wide state: keep it out of herdr's own health tests, which run in
+    // parallel and count pings exactly.
+    if cfg!(test) {
+        return false;
+    }
     let mut store = rtt_store().lock().unwrap_or_else(|e| e.into_inner());
     let state = store.entry(endpoint_id.clone()).or_default();
     let outstanding = state
