@@ -52,8 +52,9 @@ sidebar from any machine without syncing files. sheprd keeps the history in
 same rules as the sidebar. Right-click a project for *Today* and *Last 7 days*
 (active time · input + output + cache-write tokens; cache reads are excluded).
 
-Install the hook on every machine where agents run:
-`curl -fsSL https://raw.githubusercontent.com/andreconde21/sheprd/main/scripts/sheprd-install-hooks | bash`
+Install the hook on every machine where agents run. The claude-mods
+`agent-insights` hook supersedes `scripts/sheprd-usage-hook` and adds to-dos,
+timeline and task mentions.
 
 - **Two views** (click the right header label): *detailed*, one row per agent
   with its topic, and *compact*, one line per workspace.
@@ -120,6 +121,15 @@ project to choose your own.
   agent waits on you) or `none`; applies to toasts and sounds.
 - **Close idle workspaces** (right-click a project): lists the workspaces whose
   agents have been idle for 7+ days and closes them only when you confirm.
+
+### Agent insights (with claude-mods)
+With the [claude-mods](https://github.com/andreconde21/claude-mods)
+`agent-insights` hook installed, agent rows also show:
+- a **to-do progress bar** (`▰▰▱▱▱ 5/12`); click it to expand the list
+  under the agent;
+- right-click → **Timeline**: each of your prompts with what followed;
+- right-click → **Tasks mentioned**: ids from your own task sources (pattern +
+  command in `~/.config/claude-mods/tasks.toml`); pick one to read its body.
 
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
