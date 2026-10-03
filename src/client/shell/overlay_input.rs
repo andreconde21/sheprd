@@ -912,6 +912,23 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_mut() else {
             return;
         };
+        // andreconde fork (sheprd): the sidebar filter steers a highlight with the
+        // arrows and acts on it with alt+m / alt+k / alt+h.
+        if matches!(rename.target, ClientRenameTarget::SidebarFilter) {
+            match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    super::projects::filter_move(if key.code == KeyCode::Up { -1 } else { 1 });
+                    outcome.repaint = true;
+                    return;
+                }
+                KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
+                    self.sidebar_filter_action(c, outcome);
+                    outcome.repaint = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
         if key.code == KeyCode::Enter {
             self.save_rename_overlay(outcome);
             return;
@@ -927,6 +944,13 @@ impl ClientShellState {
             .is_some_and(|text| !text.is_empty())
         {
             outcome.repaint |= rename.input.handle_key(key).is_some();
+            // andreconde fork (sheprd): jump as soon as the number is unambiguous.
+            if matches!(rename.target, ClientRenameTarget::JumpAgent) {
+                let typed = rename.input.as_str().trim().parse::<usize>().ok();
+                if typed.is_some_and(|n| self.jump_number_is_final(n)) {
+                    self.save_rename_overlay(outcome);
+                }
+            }
             return;
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {

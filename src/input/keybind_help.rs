@@ -128,6 +128,10 @@ pub(crate) fn keybind_help_groups(
                     "peek: idle age, context, numbers, latency",
                 ),
                 entry(
+                    binding_label(&keybinds.sidebar_filter),
+                    "filter the sidebar",
+                ),
+                entry(
                     binding_label(&keybinds.project_menu),
                     "sidebar project menu",
                 ),

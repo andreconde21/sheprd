@@ -31,6 +31,8 @@ enum Row {
         count: usize,
         /// Today's active time and tokens ("37m · 1.2M"), shown while peeking.
         usage: Option<String>,
+        /// The project's note line, if any.
+        note: Option<String>,
     },
     Agent {
         endpoint: usize,
@@ -66,6 +68,7 @@ enum Row {
 impl Row {
     fn height(&self) -> u16 {
         match self {
+            Row::Header { note: Some(_), .. } => 2,
             Row::Agent {
                 workspace, machine, ..
             } if workspace.is_some() || machine.is_some() => 2,
@@ -242,8 +245,21 @@ fn build_rows(
         other,
     ));
 
+    // Filter prompt: keep rows whose project, workspace, machine or agent topic
+    // contains the query (case-insensitive).
+    let query = layout
+        .filter
+        .as_deref()
+        .map(str::to_lowercase)
+        .filter(|query| !query.is_empty());
+    let hit = |text: &str| {
+        query
+            .as_deref()
+            .is_none_or(|query| text.to_lowercase().contains(query))
+    };
     let mut rows = Vec::new();
     for (key, label, pinned, collapsed, members) in groups {
+        let group_hit = query.is_some() && hit(&label);
         let mut body = Vec::new();
         let mut presences = Vec::new();
         let mut count = 0usize;
@@ -276,6 +292,13 @@ fn build_rows(
             if layout.active_only && !current {
                 continue;
             }
+            let workspace_hit = query.is_none()
+                || group_hit
+                || hit(&workspace.label)
+                || machine.as_deref().is_some_and(|machine| hit(machine));
+            if !workspace_hit && !workspace_agents.iter().any(|agent| hit(&agent.title)) {
+                continue;
+            }
             presences.push(presence);
             count += 1;
             let focused = workspace.focused && &endpoint.endpoint_id == active_endpoint_id;
@@ -304,6 +327,9 @@ fn build_rows(
                 if layout.active_only && !agent.current {
                     continue;
                 }
+                if !workspace_hit && !hit(&agent.title) {
+                    continue;
+                }
                 body.push(Row::Agent {
                     endpoint: endpoint_index,
                     workspace_id: workspace.workspace_id.clone(),
@@ -322,7 +348,7 @@ fn build_rows(
                 });
             }
         }
-        if count == 0 && (layout.active_only || key == OTHER) {
+        if count == 0 && (layout.active_only || key == OTHER || query.is_some()) {
             continue;
         }
         let today = projects::project_usage(layout, (key != OTHER).then_some(key.as_str()), 1);
@@ -333,6 +359,12 @@ fn build_rows(
                 projects::format_tokens(today[0] + today[1] + today[3])
             )
         });
+        let note = layout
+            .groups
+            .iter()
+            .find(|group| group.name == key)
+            .and_then(|group| group.note.clone())
+            .filter(|note| !note.trim().is_empty());
         rows.push(Row::Header {
             key,
             label,
@@ -341,6 +373,7 @@ fn build_rows(
             presence: worst(presences),
             count,
             usage,
+            note,
         });
         if !collapsed {
             rows.extend(body);
@@ -488,6 +521,15 @@ pub(super) fn render_panel(
             .add_modifier(Modifier::BOLD),
     );
 
+    // While the filter prompt is open, show every match (expanded, all agents).
+    let filtering = projects::filter_query();
+    let layout = match filtering.as_deref() {
+        Some(query) => filter_layout(query),
+        None => layout,
+    };
+    let selected = filtering
+        .as_ref()
+        .and_then(|_| filter_selection(endpoints, active_endpoint_id));
     let rows = build_rows(endpoints, active_endpoint_id, &layout);
     let body = Rect::new(
         inner.x,
@@ -522,6 +564,21 @@ pub(super) fn render_panel(
             );
         }
     }
+    // Keep the filter's highlighted row on screen.
+    if let Some(target) = selected.as_ref() {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| row_matches(row, endpoints, target))
+        {
+            *workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+                &row_heights,
+                &gaps,
+                body.height,
+                *workspace_scroll,
+                index,
+            );
+        }
+    }
     let metrics =
         super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *workspace_scroll);
     hits.workspace_max_scroll = metrics.max_offset_from_bottom;
@@ -543,6 +600,18 @@ pub(super) fn render_panel(
         render_row(
             buffer, rect, row, &layout, endpoints, config, drag_point, hits,
         );
+        if selected
+            .as_ref()
+            .is_some_and(|target| row_matches(row, endpoints, target))
+        {
+            let palette = &config.palette;
+            let background = if palette.selection_bg == Color::Reset {
+                palette.accent
+            } else {
+                palette.selection_bg
+            };
+            buffer.set_style(rect, Style::default().bg(background));
+        }
         y = y.saturating_add(height).saturating_add(gaps[index]);
     }
     if show_scrollbar {
@@ -677,6 +746,7 @@ fn render_row(
             presence,
             count,
             usage,
+            note,
         } => {
             if drag_point.is_some_and(|point| super::contains(rect, point)) {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
@@ -716,6 +786,18 @@ fn render_row(
                     rect.y,
                     &format!("{icon} {count} "),
                     Style::default().fg(color),
+                );
+            }
+            if let (Some(note), true) = (note, rect.height > 1) {
+                put_text(
+                    buffer,
+                    rect.x + 3,
+                    rect.y + 1,
+                    rect.width.saturating_sub(4),
+                    note,
+                    Style::default()
+                        .fg(palette.overlay0)
+                        .add_modifier(Modifier::ITALIC),
                 );
             }
             hits.projects.push((rect, key.clone()));
@@ -1204,4 +1286,157 @@ pub(super) fn status_json(
         "today_minutes": today[4],
         "today_tokens": today[0] + today[1] + today[3],
     })
+}
+
+/// One selectable row: where Enter (or a filter action) goes.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RowTarget {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) workspace_id: String,
+    pub(super) pane_id: Option<String>,
+}
+
+/// The layout as the filter prompt sees it: everything expanded and unfiltered
+/// by the active view, narrowed by the typed query.
+fn filter_layout(query: &str) -> ProjectLayout {
+    let mut layout = projects::layout();
+    layout.filter = Some(query.to_owned());
+    layout.active_only = false;
+    layout.other_collapsed = false;
+    for group in &mut layout.groups {
+        group.collapsed = false;
+    }
+    layout
+}
+
+/// Rows matching the filter query, in sidebar order.
+pub(super) fn filter_targets(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    query: &str,
+) -> Vec<RowTarget> {
+    build_rows(endpoints, active_endpoint_id, &filter_layout(query))
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Agent {
+                endpoint,
+                workspace_id,
+                pane_id,
+                ..
+            } => Some(RowTarget {
+                endpoint_id: endpoints[endpoint].endpoint_id.clone(),
+                workspace_id,
+                pane_id: Some(pane_id),
+            }),
+            Row::Workspace {
+                endpoint,
+                workspace_id,
+                ..
+            } => Some(RowTarget {
+                endpoint_id: endpoints[endpoint].endpoint_id.clone(),
+                workspace_id,
+                pane_id: None,
+            }),
+            Row::Header { .. } => None,
+        })
+        .collect()
+}
+
+/// The highlighted target while filtering (selection clamped to the matches).
+pub(super) fn filter_selection(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Option<RowTarget> {
+    let query = projects::filter_query()?;
+    let targets = filter_targets(endpoints, active_endpoint_id, &query);
+    let index = projects::filter_selected().min(targets.len().checked_sub(1)?);
+    targets.into_iter().nth(index)
+}
+
+fn row_matches(row: &Row, endpoints: &[ClientShellEndpoint], target: &RowTarget) -> bool {
+    match row {
+        Row::Agent {
+            endpoint, pane_id, ..
+        } => {
+            endpoints[*endpoint].endpoint_id == target.endpoint_id
+                && target.pane_id.as_deref() == Some(pane_id.as_str())
+        }
+        Row::Workspace {
+            endpoint,
+            workspace_id,
+            ..
+        } => {
+            endpoints[*endpoint].endpoint_id == target.endpoint_id
+                && target.pane_id.is_none()
+                && &target.workspace_id == workspace_id
+        }
+        Row::Header { .. } => false,
+    }
+}
+
+/// Workspaces of one project (or Other) that have been idle for at least
+/// `min_secs`: every agent idle with a known age past the limit (or, with no
+/// agent, the workspace itself that old). Unknown ages never qualify.
+pub(super) fn idle_workspaces(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    project: &str,
+    min_secs: u64,
+) -> (Vec<(ClientEndpointId, String)>, Vec<String>) {
+    let mut layout = projects::layout();
+    layout.active_only = false;
+    layout.compact = true;
+    layout.other_collapsed = false;
+    for group in &mut layout.groups {
+        group.collapsed = false;
+    }
+    let mut in_project = false;
+    let mut targets = Vec::new();
+    let mut labels = Vec::new();
+    for row in build_rows(endpoints, active_endpoint_id, &layout) {
+        match row {
+            Row::Header { key, .. } => in_project = key == project,
+            Row::Workspace {
+                endpoint,
+                workspace_id,
+                label,
+                focused: false,
+                stale: false,
+                ..
+            } if in_project => {
+                let endpoint = &endpoints[endpoint];
+                let Some(snapshot) = endpoint.snapshot.as_deref() else {
+                    continue;
+                };
+                let agents = snapshot
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.workspace_id == workspace_id)
+                    .collect::<Vec<_>>();
+                let old_enough = if agents.is_empty() {
+                    projects::workspace_age_secs(endpoint, &workspace_id)
+                        .is_some_and(|secs| secs >= min_secs)
+                } else {
+                    agents.iter().all(|agent| {
+                        let key = projects::agent_key(endpoint, &agent.pane_id);
+                        layout.presence(&key, agent.state_change_seq, agent.agent_status)
+                            == Presence::Idle
+                            && !layout.is_kept(&key)
+                            && projects::idle_secs(&key).is_some_and(|secs| secs >= min_secs)
+                    })
+                };
+                if old_enough {
+                    let machine = if endpoint.endpoint_id.is_local() {
+                        String::new()
+                    } else {
+                        format!(" ({})", endpoint.label)
+                    };
+                    labels.push(format!("{label}{machine}"));
+                    targets.push((endpoint.endpoint_id.clone(), workspace_id));
+                }
+            }
+            _ => {}
+        }
+    }
+    (targets, labels)
 }

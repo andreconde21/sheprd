@@ -335,6 +335,11 @@ pub(super) enum ClientRenameTarget {
         name: String,
     },
     JumpAgent,
+    /// sheprd: live sidebar filter (prefix+/).
+    SidebarFilter,
+    ProjectNote {
+        name: String,
+    },
     NewWorkspaceOn {
         endpoint_id: ClientEndpointId,
         project: Option<String>,
@@ -562,10 +567,15 @@ pub(super) enum ClientContextMenuAction {
     ProjectToggleCollapse,
     ProjectRename,
     ProjectRules,
+    ProjectNote,
+    ProjectNotify,
+    ProjectTidy,
+    TidyConfirm,
     ProjectDelete,
     AgentMarkUnread,
     AgentMarkInactive,
     AgentToggleKeep,
+    AgentPeek,
     NewOnMachine(usize),
     ProjectNewWorkspace,
     ProjectNewAgent,
@@ -609,6 +619,13 @@ pub(super) enum ClientContextMenuTarget {
         pinned: bool,
         collapsed: bool,
     },
+    /// Confirm closing a project's long-idle workspaces (sheprd tidy-up).
+    TidyConfirm {
+        targets: Vec<(ClientEndpointId, String)>,
+        labels: Vec<String>,
+    },
+    /// Read-only lines (sheprd peek preview).
+    Info { lines: Vec<String> },
     /// Pick the machine for a new workspace (sheprd).
     NewWorkspacePicker {
         machines: Vec<(ClientEndpointId, String)>,
