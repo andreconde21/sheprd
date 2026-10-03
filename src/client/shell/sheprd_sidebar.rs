@@ -1160,3 +1160,48 @@ pub(super) fn project_target(
     }
     best.map(|(_, endpoint_id, target)| (endpoint_id, target))
 }
+
+/// Snapshot for desktop widgets: needs-you count, whether anything is blocked,
+/// which projects wait on you, and today's time/tokens.
+pub(super) fn status_json(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> serde_json::Value {
+    let layout = projects::layout();
+    let (needs_you, blocked) = attention_count(endpoints, &layout);
+    let mut view = layout.clone();
+    view.active_only = false;
+    view.compact = false;
+    view.other_collapsed = false;
+    for group in &mut view.groups {
+        group.collapsed = false;
+    }
+    let mut waiting: Vec<(String, usize)> = Vec::new();
+    for row in build_rows(endpoints, active_endpoint_id, &view) {
+        match row {
+            Row::Header { label, .. } => waiting.push((label, 0)),
+            Row::Agent {
+                presence,
+                stale: false,
+                ..
+            } if presence.needs_attention() => {
+                if let Some(last) = waiting.last_mut() {
+                    last.1 += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let today = projects::total_usage(1);
+    serde_json::json!({
+        "needs_you": needs_you,
+        "blocked": blocked,
+        "projects": waiting
+            .into_iter()
+            .filter(|(_, needs)| *needs > 0)
+            .map(|(name, needs)| serde_json::json!({"name": name, "needs": needs}))
+            .collect::<Vec<_>>(),
+        "today_minutes": today[4],
+        "today_tokens": today[0] + today[1] + today[3],
+    })
+}
