@@ -5,7 +5,8 @@
 # Leaves any existing herdr install untouched.
 set -euo pipefail
 repo=andreconde21/sheprd
-tag=${1:-$(curl -fsSL "https://api.github.com/repos/$repo/releases" | grep -o '"tag_name": *"sheprd-v[^"]*"' | head -1 | sed 's/.*"\(sheprd-v[^"]*\)"/\1/')}
+# /releases/latest is the newest published release (the plain list is not date-ordered).
+tag=${1:-$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": *"sheprd-v[^"]*"' | head -1 | sed 's/.*"\(sheprd-v[^"]*\)"/\1/')}
 [ -n "$tag" ] || { echo "no sheprd-v* release found" >&2; exit 1; }
 dir="$HOME/.local/share/sheprd"
 mkdir -p "$dir" "$HOME/.local/bin"
