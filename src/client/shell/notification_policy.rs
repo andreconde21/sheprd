@@ -191,6 +191,10 @@ impl ClientShellState {
                     }
                 }
             }
+            // andreconde fork (sheprd): per-project notification mode.
+            if self.sheprd_notification_muted(&pending.endpoint_id, &pending.event) {
+                continue;
+            }
             let target_active =
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
             let suppress_external = target_active && self.outer_focused != Some(false);

@@ -42,6 +42,13 @@ pub(super) struct ProjectGroup {
     pub(super) members: Vec<String>,
     #[serde(default, rename = "match", skip_serializing_if = "Vec::is_empty")]
     pub(super) rules: Vec<String>,
+    /// One-line note shown under the project header ("waiting on client reply").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) note: Option<String>,
+    /// Notifications for this project's agents: "all" (default), "blocked"
+    /// (only when one waits on you) or "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) notify: Option<String>,
     /// Two-letter tag for the collapsed rail (default: derived from the name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) short: Option<String>,
@@ -110,6 +117,9 @@ pub(super) struct ProjectLayout {
     /// How long an idle agent still counts as active (default 24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) recent_hours: Option<u64>,
+    /// Live sidebar filter while the filter prompt is open (never saved).
+    #[serde(skip)]
+    pub(super) filter: Option<String>,
     /// Workspaces dragged to "Other": never auto-matched into a project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) ungrouped: Vec<String>,
@@ -1076,6 +1086,86 @@ pub(crate) fn request_focus(endpoint_id: super::ClientEndpointId, pane_id: Strin
 
 pub(super) fn take_focus_requests() -> Vec<(super::ClientEndpointId, String)> {
     std::mem::take(&mut *focus_queue().lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Sidebar filter prompt (prefix+/): the typed query and the highlighted row.
+#[derive(Default)]
+struct FilterState {
+    query: Option<String>,
+    selected: usize,
+}
+
+fn filter_store() -> &'static std::sync::Mutex<FilterState> {
+    static FILTER: OnceLock<std::sync::Mutex<FilterState>> = OnceLock::new();
+    FILTER.get_or_init(Default::default)
+}
+
+/// Called every frame with the prompt's text (None when the prompt is closed);
+/// a changed query puts the highlight back on the first match.
+pub(super) fn set_filter(query: Option<String>) {
+    let mut state = filter_store().lock().unwrap_or_else(|e| e.into_inner());
+    if state.query != query {
+        state.selected = 0;
+        state.query = query;
+    }
+}
+
+pub(super) fn filter_query() -> Option<String> {
+    filter_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .query
+        .clone()
+}
+
+pub(super) fn filter_move(delta: isize) {
+    let mut state = filter_store().lock().unwrap_or_else(|e| e.into_inner());
+    state.selected = state.selected.saturating_add_signed(delta);
+}
+
+pub(super) fn filter_selected() -> usize {
+    filter_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .selected
+}
+
+/// Finished peek reads, waiting for the tick to show them (None = failed).
+fn peek_results() -> &'static std::sync::Mutex<Vec<Option<String>>> {
+    static RESULTS: OnceLock<std::sync::Mutex<Vec<Option<String>>>> = OnceLock::new();
+    RESULTS.get_or_init(Default::default)
+}
+
+pub(super) fn push_peek(text: Option<String>) {
+    peek_results()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(text);
+}
+
+pub(super) fn take_peek() -> Option<Option<String>> {
+    peek_results()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop()
+}
+
+fn peek_anchor_store() -> &'static std::sync::Mutex<(u16, u16)> {
+    static ANCHOR: OnceLock<std::sync::Mutex<(u16, u16)>> = OnceLock::new();
+    ANCHOR.get_or_init(|| std::sync::Mutex::new((2, 2)))
+}
+
+/// Where the last sheprd menu opened; the peek preview pops up there.
+pub(super) fn set_peek_anchor(anchor: (u16, u16)) {
+    *peek_anchor_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = anchor;
+}
+
+pub(super) fn peek_anchor() -> (u16, u16) {
+    *peek_anchor_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 static HINTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

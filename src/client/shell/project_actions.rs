@@ -9,6 +9,9 @@ use super::*;
 
 type Action = ClientContextMenuAction;
 
+/// How many lines the agent peek preview shows.
+const PEEK_LINES: usize = 12;
+
 fn item(label: impl Into<Cow<'static, str>>, action: Action) -> ClientContextMenuItem {
     ClientContextMenuItem {
         label: label.into(),
@@ -24,6 +27,17 @@ fn move_items(items: &mut Vec<ClientContextMenuItem>, groups: &[String], grouped
         items.push(item("→ Other", Action::ProjectRemove));
     }
     items.push(item("→ New project…", Action::ProjectAssignNew));
+}
+
+/// A project's notification mode: "all" (default), "blocked" or "none".
+fn notify_mode(name: &str) -> String {
+    projects::layout()
+        .groups
+        .iter()
+        .find(|group| group.name == name)
+        .and_then(|group| group.notify.clone())
+        .filter(|mode| mode == "blocked" || mode == "none")
+        .unwrap_or_else(|| "all".to_owned())
 }
 
 /// Read-only usage lines for a project's menu (from the sheprd usage hook).
@@ -103,6 +117,12 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
                 ),
                 item("Move up", Action::ProjectMoveUp),
                 item("Move down", Action::ProjectMoveDown),
+                item("Note…", Action::ProjectNote),
+                item("Close idle workspaces…", Action::ProjectTidy),
+                item(
+                    format!("Notify: {} (click to change)", notify_mode(name)),
+                    Action::ProjectNotify,
+                ),
                 item("Rename…", Action::ProjectRename),
                 item("Auto-match rules…", Action::ProjectRules),
                 item("Delete project", Action::ProjectDelete),
@@ -110,6 +130,26 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             items.extend(usage);
             items
         }
+        ClientContextMenuTarget::TidyConfirm { targets, labels } => {
+            let mut items = if targets.is_empty() {
+                vec![item("Nothing idle for 7+ days here", Action::Info)]
+            } else {
+                vec![item(
+                    format!("Close these {} (idle 7+ days)", targets.len()),
+                    Action::TidyConfirm,
+                )]
+            };
+            items.extend(
+                labels
+                    .iter()
+                    .map(|label| item(format!("  {label}"), Action::Info)),
+            );
+            items
+        }
+        ClientContextMenuTarget::Info { lines } => lines
+            .iter()
+            .map(|line| item(line.clone(), Action::Info))
+            .collect(),
         ClientContextMenuTarget::NewWorkspacePicker { machines, .. } => machines
             .iter()
             .enumerate()
@@ -127,7 +167,10 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             ..
         } => {
             let presence = projects::layout().presence(unread_key, *seq, *status);
-            let mut items = vec![item("Go to", Action::AgentFocus)];
+            let mut items = vec![
+                item("Go to", Action::AgentFocus),
+                item("Peek last lines", Action::AgentPeek),
+            ];
             items.push(if presence.needs_attention() {
                 item("Mark inactive", Action::AgentMarkInactive)
             } else {
@@ -295,6 +338,7 @@ impl ClientShellState {
     }
 
     fn open_menu(&mut self, target: ClientContextMenuTarget, x: u16, y: u16) {
+        projects::set_peek_anchor((x, y));
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target,
             x,
@@ -610,6 +654,21 @@ impl ClientShellState {
                     }
                 }
             }
+            ClientContextMenuTarget::TidyConfirm { targets, .. } => {
+                if action == Action::TidyConfirm {
+                    for (endpoint_id, workspace_id) in targets {
+                        let method = crate::api::schema::Method::WorkspaceClose(
+                            crate::api::schema::WorkspaceCloseParams {
+                                workspace_id,
+                                close_group: false,
+                            },
+                        );
+                        if let Some(action) = self.endpoint_request(&endpoint_id, method) {
+                            outcome.actions.push(action);
+                        }
+                    }
+                }
+            }
             ClientContextMenuTarget::Project { name, .. } => match action {
                 Action::ProjectNewAgent | Action::ProjectNewWorkspace => self
                     .open_new_workspace_picker(
@@ -651,6 +710,45 @@ impl ClientShellState {
                         ClientRenameTarget::ProjectRules { name },
                     )
                 }
+                Action::ProjectNotify => {
+                    let next = match notify_mode(&name).as_str() {
+                        "all" => Some("blocked".to_owned()),
+                        "blocked" => Some("none".to_owned()),
+                        _ => None,
+                    };
+                    projects::update(|layout| {
+                        if let Some(group) = layout.group_mut(&name) {
+                            group.notify = next;
+                        }
+                    })
+                }
+                Action::ProjectTidy => {
+                    let (targets, labels) = super::sheprd_sidebar::idle_workspaces(
+                        &self.endpoints,
+                        &self.active_endpoint_id,
+                        &name,
+                        7 * 24 * 3600,
+                    );
+                    let (x, y) = projects::peek_anchor();
+                    self.open_menu(
+                        ClientContextMenuTarget::TidyConfirm { targets, labels },
+                        x,
+                        y,
+                    );
+                }
+                Action::ProjectNote => {
+                    let note = projects::layout()
+                        .groups
+                        .iter()
+                        .find(|group| group.name == name)
+                        .and_then(|group| group.note.clone())
+                        .unwrap_or_default();
+                    self.prompt(
+                        "project note (empty removes it)",
+                        &note,
+                        ClientRenameTarget::ProjectNote { name },
+                    )
+                }
                 Action::ProjectDelete => {
                     projects::update(|layout| layout.groups.retain(|group| group.name != name))
                 }
@@ -674,6 +772,24 @@ impl ClientShellState {
                 }
                 Action::AgentMarkUnread => {
                     projects::update(|layout| layout.mark(&unread_key, seq, true))
+                }
+                Action::AgentPeek => {
+                    let lines = (PEEK_LINES * 3).to_string();
+                    if let Some(mut command) = self.herdr_cli(
+                        &endpoint_id,
+                        &[
+                            "pane", "read", &pane_id, "--source", "recent", "--lines", &lines,
+                        ],
+                    ) {
+                        std::thread::spawn(move || {
+                            let text = command
+                                .output()
+                                .ok()
+                                .filter(|output| output.status.success())
+                                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+                            projects::push_peek(text);
+                        });
+                    }
                 }
                 Action::AgentToggleKeep => {
                     projects::update(|layout| layout.toggle_kept(&unread_key))
@@ -757,6 +873,27 @@ impl ClientShellState {
                     }
                 })
             }
+            ClientRenameTarget::ProjectNote { name } => {
+                let note = text.trim().to_owned();
+                projects::update(|layout| {
+                    if let Some(group) = layout.group_mut(&name) {
+                        group.note = (!note.is_empty()).then_some(note);
+                    }
+                })
+            }
+            ClientRenameTarget::SidebarFilter => {
+                if let Some(target) = super::sheprd_sidebar::filter_selection(
+                    &self.endpoints,
+                    &self.active_endpoint_id,
+                ) {
+                    let focus = match target.pane_id {
+                        Some(pane_id) => ClientEndpointFocusTarget::Pane(pane_id),
+                        None => ClientEndpointFocusTarget::Workspace(target.workspace_id),
+                    };
+                    self.focus_or_activate(target.endpoint_id, focus, outcome);
+                }
+                projects::set_filter(None);
+            }
             ClientRenameTarget::JumpAgent => {
                 if let Some(number) = text
                     .trim()
@@ -825,6 +962,57 @@ impl ClientShellState {
         )
         .len();
         n > 0 && n.saturating_mul(10) > total
+    }
+
+    /// prefix+/: filter the sidebar as you type.
+    pub(super) fn open_sidebar_filter(&mut self) {
+        self.prompt(
+            "filter · ↑↓ pick · enter go · alt+m mark · alt+k keep · alt+h hide",
+            "",
+            ClientRenameTarget::SidebarFilter,
+        );
+    }
+
+    /// alt+m / alt+k / alt+h on the filter's highlighted row.
+    pub(super) fn sidebar_filter_action(&mut self, key: char, _outcome: &mut ClientShellInput) {
+        let Some(target) =
+            super::sheprd_sidebar::filter_selection(&self.endpoints, &self.active_endpoint_id)
+        else {
+            return;
+        };
+        let Some(endpoint) = self.endpoint_by_id(&target.endpoint_id) else {
+            return;
+        };
+        match (key, target.pane_id.as_deref()) {
+            ('m', Some(pane_id)) | ('k', Some(pane_id)) => {
+                let Some(agent) = endpoint.snapshot.as_deref().and_then(|snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .find(|agent| agent.pane_id == pane_id)
+                }) else {
+                    return;
+                };
+                let agent_key = projects::agent_key(endpoint, pane_id);
+                let (seq, status) = (agent.state_change_seq, agent.agent_status);
+                if key == 'k' {
+                    projects::update(|layout| layout.toggle_kept(&agent_key));
+                } else {
+                    projects::update(|layout| {
+                        let unread = !layout.presence(&agent_key, seq, status).needs_attention();
+                        layout.mark(&agent_key, seq, unread);
+                    });
+                }
+            }
+            ('h', _) => {
+                if let Some((key, _, _)) =
+                    self.workspace_label_and_paths(&target.endpoint_id, &target.workspace_id)
+                {
+                    projects::update(|layout| layout.toggle_hidden(&key));
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn open_jump_agent_prompt(&mut self) {
@@ -934,6 +1122,47 @@ impl ClientShellState {
         );
     }
 
+    /// herdr's own CLI (this binary), aimed at one machine. The client
+    /// connection only carries a fixed set of methods, so reading a pane or
+    /// typing into one goes through the CLI, which reaches any saved machine.
+    fn herdr_cli(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        args: &[&str],
+    ) -> Option<std::process::Command> {
+        let exe = std::env::current_exe().ok()?;
+        let mut command = std::process::Command::new(exe);
+        if !endpoint_id.is_local() {
+            command
+                .arg("--machine")
+                .arg(&self.endpoint_by_id(endpoint_id)?.label);
+        }
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        Some(command)
+    }
+
+    /// A finished peek: show the agent's last lines where its menu was.
+    fn show_peek(&mut self, text: Option<String>) {
+        let lines = match text {
+            Some(text) => {
+                let lines = text
+                    .lines()
+                    .map(str::trim_end)
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| line.chars().take(72).collect::<String>())
+                    .collect::<Vec<_>>();
+                let start = lines.len().saturating_sub(PEEK_LINES);
+                lines[start..].to_vec()
+            }
+            None => vec!["(could not read this agent)".to_owned()],
+        };
+        let (x, y) = projects::peek_anchor();
+        self.open_menu(ClientContextMenuTarget::Info { lines }, x, y);
+    }
+
     /// Send one API request to a specific machine (not just the active one).
     fn endpoint_request(
         &mut self,
@@ -1028,6 +1257,10 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         outcome.repaint |= projects::expire_peek();
+        if let Some(text) = projects::take_peek() {
+            self.show_peek(text);
+            outcome.repaint = true;
+        }
         if self.endpoints.len() > 1 && projects::status_due() {
             projects::write_status(&super::sheprd_sidebar::status_json(
                 &self.endpoints,
@@ -1067,19 +1300,34 @@ impl ClientShellState {
         let Some(command) = launch.command else {
             return Vec::new();
         };
-        let mut actions = Vec::new();
-        let text =
-            crate::api::schema::Method::PaneSendText(crate::api::schema::PaneSendTextParams {
-                pane_id: pane_id.clone(),
-                text: command,
+        if let Some(mut run) =
+            self.herdr_cli(&launch.endpoint_id, &["pane", "run", &pane_id, &command])
+        {
+            run.stdout(std::process::Stdio::null());
+            std::thread::spawn(move || {
+                let _ = run.status();
             });
-        let enter =
-            crate::api::schema::Method::PaneSendKeys(crate::api::schema::PaneSendKeysParams {
-                pane_id,
-                keys: vec!["Enter".to_owned()],
-            });
-        actions.extend(self.endpoint_request(&launch.endpoint_id, text));
-        actions.extend(self.endpoint_request(&launch.endpoint_id, enter));
-        actions
+        }
+        Vec::new()
+    }
+
+    /// Quiet projects: drop a notification (toast and sound) when the agent's
+    /// project is set to "none", or to "blocked" and the agent merely finished.
+    pub(super) fn sheprd_notification_muted(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        event: &crate::protocol::SemanticNotification,
+    ) -> bool {
+        let Some(workspace_id) = event.workspace_id.as_deref() else {
+            return false;
+        };
+        let Some(project) = self.workspace_group(endpoint_id, workspace_id) else {
+            return false;
+        };
+        match notify_mode(&project).as_str() {
+            "none" => true,
+            "blocked" => event.kind != crate::protocol::SemanticNotificationKind::NeedsAttention,
+            _ => false,
+        }
     }
 }

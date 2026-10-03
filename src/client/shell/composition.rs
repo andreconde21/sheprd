@@ -62,6 +62,14 @@ impl ClientShellState {
                 ..
             }))
         ));
+        super::projects::set_filter(match &self.overlay {
+            Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                target: ClientRenameTarget::SidebarFilter,
+                input,
+                ..
+            })) => Some(input.as_str().to_owned()),
+            _ => None,
+        });
         let mut render_state = render::ShellRenderState {
             machine_diagnostics: &self.machine_diagnostics,
             endpoints: &self.endpoints,
@@ -219,6 +227,14 @@ impl ClientShellState {
                 ..
             }))
         ));
+        super::projects::set_filter(match &self.overlay {
+            Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                target: ClientRenameTarget::SidebarFilter,
+                input,
+                ..
+            })) => Some(input.as_str().to_owned()),
+            _ => None,
+        });
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,

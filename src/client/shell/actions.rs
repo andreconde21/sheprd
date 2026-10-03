@@ -59,6 +59,11 @@ impl ClientShellState {
                         outcome.repaint = true;
                         return;
                     }
+                    crate::input::KeybindAction::SidebarFilter => {
+                        self.open_sidebar_filter();
+                        outcome.repaint = true;
+                        return;
+                    }
                     crate::input::KeybindAction::ProjectMenu => {
                         self.open_focused_project_menu();
                         outcome.repaint = true;

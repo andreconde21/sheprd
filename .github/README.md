@@ -108,6 +108,19 @@ project to choose your own.
 - **Go To** (`prefix+g`) opens ready to type; arrows and Enter still pick, Left/
   Right still jump between workspaces while the search is empty.
 
+### Find, peek, tidy
+- **Filter** (`prefix+/`): type to narrow the sidebar to matching projects,
+  workspaces, machines and agent topics; ↑↓ pick, Enter goes there;
+  `alt+m` marks unread/inactive, `alt+k` keeps, `alt+h` hides the highlighted row.
+- **Peek last lines** (right-click an agent): an agent's last 12 lines in a
+  popup, from any machine, without switching to it.
+- **Project note** (right-click a project → Note…): a dim line under the header,
+  e.g. "waiting on client reply".
+- **Quiet projects** (right-click → Notify): `all`, `blocked` (only when an
+  agent waits on you) or `none`; applies to toasts and sounds.
+- **Close idle workspaces** (right-click a project): lists the workspaces whose
+  agents have been idle for 7+ days and closes them only when you confirm.
+
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
 (who needs you, which projects, today's time and tokens). The
@@ -121,6 +134,7 @@ to show `● 3` in the bar; any other bar or script can too.
 | `prefix+u` | next agent that needs you |
 | `prefix+#` | show jump numbers, type one to jump |
 | `prefix+alt+c` | new workspace on a machine you pick |
+| `prefix+/` | filter the sidebar |
 | `prefix+.` | project menu for the focused workspace |
 | `prefix+alt+h` | show / conceal hidden workspaces |
 
