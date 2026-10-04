@@ -975,6 +975,7 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
         body,
         scroll: 0,
         preview: true,
+        reader: None,
     };
     let metrics = crate::ui::release_notes_scroll_metrics(
         &notes,

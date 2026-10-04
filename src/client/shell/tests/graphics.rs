@@ -248,6 +248,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             body: "body".into(),
             scroll: 0,
             preview: false,
+            reader: None,
         }),
         ClientShellOverlay::Rename(ClientRenameOverlay {
             title: "rename",
