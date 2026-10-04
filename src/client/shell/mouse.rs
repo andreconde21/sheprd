@@ -426,6 +426,29 @@ impl ClientShellState {
         outcome
     }
 
+    /// andreconde fork (sheprd): the word under (row, col) of a pane's visible text, when a task
+    /// source in claude-mods' tasks.toml claims it.
+    fn task_id_at(&self, pane_id: &str, row: u16, col: u16) -> Option<String> {
+        let surface = self.pane_surface.as_ref()?;
+        let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
+        let frame = &surface.frame;
+        let (x, y) = (
+            usize::from(pane.inner_rect.x),
+            usize::from(pane.inner_rect.y + row),
+        );
+        let width = usize::from(pane.inner_rect.width);
+        if usize::from(col) >= width || y >= usize::from(frame.height) {
+            return None;
+        }
+        let start = y * usize::from(frame.width) + x;
+        let cells = frame.cells.get(start..start + width)?;
+        let id = super::projects::word_at(
+            cells.iter().map(|cell| cell.symbol.as_str()),
+            usize::from(col),
+        )?;
+        super::projects::task_command(&id).is_some().then_some(id)
+    }
+
     fn pane_split_target_is_current(&self, hit: &PaneSplitHit, tab_id: &str) -> Option<bool> {
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
@@ -933,6 +956,13 @@ impl ClientShellState {
             {
                 let viewport_row = mouse.row.saturating_sub(hit.inner_rect.y);
                 let col = mouse.column.saturating_sub(hit.inner_rect.x);
+                // andreconde fork (sheprd): ctrl+click on a task id in the output opens the task.
+                if let Some(id) = self.task_id_at(&hit.pane_id, viewport_row, col) {
+                    self.last_pane_click = None;
+                    super::projects::open_task(id);
+                    outcome.repaint = true;
+                    return;
+                }
                 let content_revision = self
                     .pane_surface
                     .as_ref()
