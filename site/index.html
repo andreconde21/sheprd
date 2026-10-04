@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="sheprd: one sidebar for every coding agent, on every machine. A client-side fork of herdr.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27%3E%3Crect x=%274%27 y=%274%27 width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%231f2a24%27/%3E%3Cpath d=%27M46 108 V52 a22 22 0 1 1 44 0 v4%27 fill=%27none%27 stroke=%27%23e8d9a8%27 stroke-width=%279%27 stroke-linecap=%27round%27/%3E%3Ccircle cx=%2782%27 cy=%2775%27 r=%278%27 fill=%27%23f2c14e%27/%3E%3C/svg%3E">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>sheprd</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112..125,600..800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: left-aligned hero beside a live replica of the sidebar; sections below stack on a
+     single 1080px column, each one a plain heading + content, the terminal look kept to the replicas. */
+  :root {
+    --bg: #eef1ea;          /* overcast pasture */
+    --surface: #e2e7dc;
+    --ink: #1f2a24;         /* logo tile green */
+    --muted: #55645a;
+    --line: #c9d1c2;
+    --wool: #1f2a24;        /* headline ink in light */
+    --sage: #3f8a4a;        /* working */
+    --amber: #b57d07;       /* needs you */
+    --term-bg: #1f2a24;
+    --term-fg: #e8d9a8;
+    --term-dim: #8d9a8f;
+    --term-sage: #8fd694;
+    --term-amber: #f2c14e;
+    --term-sel: #2c3a32;
+    --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+    --font-body: "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141c17; --surface: #1b2620; --ink: #e8e3cf; --muted: #a3ad9f; --line: #2d3a31;
+      --wool: #e8d9a8; --sage: #8fd694; --amber: #f2c14e;
+      --term-bg: #0f1612; --term-sel: #213028; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141c17; --surface: #1b2620; --ink: #e8e3cf; --muted: #a3ad9f; --line: #2d3a31;
+    --wool: #e8d9a8; --sage: #8fd694; --amber: #f2c14e;
+    --term-bg: #0f1612; --term-sel: #213028; color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: var(--font-body); font-size: 1.06rem; line-height: 1.6;
+    padding-inline: 20px; padding-block: 0 64px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 88px; }
+  a { color: inherit; text-underline-offset: 3px; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+  code, pre, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+  h1, h2, h3 { font-family: var(--font-display); font-stretch: 125%; text-wrap: balance; margin: 0; color: var(--wool); }
+  h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); font-weight: 800; letter-spacing: -0.01em; line-height: 1.1; }
+  h3 { font-size: 1.05rem; font-weight: 700; font-stretch: 112%; }
+  p { margin: 0; max-width: 64ch; }
+  .lede { color: var(--muted); }
+  .eyebrow { font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+
+  /* top bar */
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px; max-width: 1080px; margin: 0 auto; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-stretch: 125%; font-weight: 800; font-size: 1.2rem; text-decoration: none; color: var(--wool); }
+  .brand svg { width: 34px; height: 34px; }
+  .top nav { display: flex; gap: 20px; font-size: 0.95rem; flex-wrap: wrap; }
+  .top nav a { text-decoration: none; color: var(--muted); }
+  .top nav a:hover { color: var(--ink); }
+
+  /* hero */
+  .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 48px; align-items: center; padding-top: 24px; }
+  .hero h1 { font-size: clamp(2.3rem, 5.4vw, 3.9rem); font-weight: 800; line-height: 1.02; letter-spacing: -0.02em; }
+  .hero h1 em { font-style: normal; color: var(--sage); }
+  .hero-copy { display: grid; gap: 22px; min-width: 0; }
+  .install { display: flex; align-items: stretch; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; overflow: hidden; min-width: 0; }
+  .install code { flex: 1; min-width: 0; padding: 12px 14px; overflow-x: auto; white-space: nowrap; font-size: 0.8rem; color: var(--ink); }
+  .install button {
+    border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--ink);
+    font: 600 0.85rem var(--font-body); padding: 0 16px; cursor: pointer;
+  }
+  .install button:hover { background: var(--line); }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.92rem; color: var(--muted); }
+
+  /* terminal replica */
+  .term {
+    background: var(--term-bg); color: var(--term-fg); border-radius: 10px;
+    font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.55;
+    box-shadow: 0 1px 0 rgba(0,0,0,.05), 0 24px 48px -24px rgba(15, 30, 20, .55);
+    overflow: hidden; min-width: 0;
+  }
+  .term-bar { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid rgba(232,217,168,.08); }
+  .term-bar span { width: 9px; height: 9px; border-radius: 50%; background: rgba(232,217,168,.18); }
+  .term-body { display: grid; grid-template-columns: 30ch minmax(0, 1fr); min-height: 330px; }
+  .side { border-right: 1px solid rgba(232,217,168,.1); padding: 10px 0; overflow: hidden; }
+  .side .r { padding: 0 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side .sel { background: var(--term-sel); }
+  .d { color: var(--term-dim); }
+  .g { color: var(--term-sage); }
+  .a { color: var(--term-amber); }
+  .w { color: var(--term-fg); font-weight: 600; }
+  .pane { padding: 12px 14px; overflow: hidden; display: grid; align-content: start; gap: 2px; }
+  .pane .r { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .link { text-decoration: underline; text-decoration-color: var(--term-amber); text-underline-offset: 3px; }
+
+  /* features */
+  .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 36px 40px; }
+  .feature { display: grid; gap: 8px; align-content: start; padding-top: 16px; border-top: 2px solid var(--line); }
+  .feature p { color: var(--muted); font-size: 0.98rem; }
+  .feature .glyph { font-family: var(--font-mono); color: var(--sage); font-size: 0.9rem; }
+
+  .section { display: grid; gap: 28px; }
+  .split { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 44px; align-items: start; }
+  .split > div { min-width: 0; display: grid; gap: 16px; }
+
+  /* message flow */
+  .flow { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 0 14px; align-items: center; }
+  .node { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+  .node .mono { color: var(--muted); font-size: 0.8rem; overflow-wrap: anywhere; }
+  .arrows { display: grid; gap: 18px; font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); text-align: center; }
+  .arrows b { display: block; color: var(--sage); font-size: 1.1rem; font-weight: 600; }
+  .arrows .back b { color: var(--amber); }
+  .notes { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; }
+  .notes li { padding-left: 18px; position: relative; color: var(--muted); }
+  .notes li::before { content: "·"; position: absolute; left: 4px; color: var(--sage); font-weight: 700; }
+  .notes b { color: var(--ink); font-weight: 600; }
+
+  pre.cfg { margin: 0; background: var(--term-bg); color: var(--term-fg); border-radius: 10px; padding: 16px 18px; overflow-x: auto; font-size: 0.8rem; line-height: 1.6; }
+  pre.cfg .c { color: var(--term-dim); }
+  pre.cfg .k { color: var(--term-sage); }
+  pre.cfg .s { color: var(--term-amber); }
+
+  /* keys */
+  .keys { width: 100%; border-collapse: collapse; font-size: 0.96rem; }
+  .keys td { padding: 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .keys td:first-child { width: 34%; padding-right: 16px; }
+  .keys kbd { font-family: var(--font-mono); font-size: 0.8rem; background: var(--surface); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+
+  footer { display: flex; flex-wrap: wrap; gap: 10px 28px; justify-content: space-between; color: var(--muted); font-size: 0.92rem; border-top: 1px solid var(--line); padding-top: 22px; }
+
+  @media (max-width: 900px) {
+    .hero, .split { grid-template-columns: minmax(0, 1fr); }
+    .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 600px) {
+    .wrap { gap: 64px; }
+    .features { grid-template-columns: minmax(0, 1fr); }
+    .term-body { grid-template-columns: minmax(0, 1fr); }
+    .pane { display: none; }
+    .flow { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .arrows { grid-template-columns: 1fr 1fr; }
+    .top nav { gap: 14px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .blink { animation: blink 1.1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#top" aria-label="sheprd home">
+    <svg viewBox="0 0 128 128" aria-hidden="true">
+      <rect x="4" y="4" width="120" height="120" rx="28" fill="#1f2a24"/>
+      <path d="M46 108 V52 a22 22 0 1 1 44 0 v4" fill="none" stroke="#e8d9a8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="72" cy="92" r="8" fill="#8fd694"/>
+      <circle cx="92" cy="92" r="8" fill="#8fd694"/>
+      <circle cx="82" cy="75" r="8" fill="#f2c14e"/>
+    </svg>
+    sheprd
+  </a>
+  <nav aria-label="Sections">
+    <a href="#features">What it adds</a>
+    <a href="#messaging">Agents talking</a>
+    <a href="#refs">Your tracker</a>
+    <a href="https://github.com/andreconde21/sheprd">GitHub</a>
+  </nav>
+</header>
+
+<main class="wrap" id="top">
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">A client-side fork of herdr</span>
+      <h1>One sidebar for every coding agent, on <em>every machine</em>.</h1>
+      <p class="lede">You run agents on your laptop and on a server or two. sheprd groups them by project across machines, shows who needs you, and lets agents message each other. Your servers keep running stock herdr.</p>
+      <div class="install">
+        <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/andreconde21/sheprd/main/scripts/sheprd-install | bash</code>
+        <button type="button" id="copy-install">Copy</button>
+      </div>
+      <div class="meta">
+        <span>Linux x86_64 · static binary</span>
+        <span>Apache-2.0</span>
+        <a href="https://github.com/andreconde21/sheprd">Source on GitHub</a>
+      </div>
+    </div>
+
+    <figure class="term" aria-label="sheprd with its sidebar: projects grouping agents from two machines">
+      <div class="term-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="term-body">
+        <div class="side">
+          <div class="r"><span class="d">○ active</span> <span class="a">● 2</span>  <span class="d">detailed</span></div>
+          <div class="r w">▾ ★ storefront</div>
+          <div class="r sel"><span class="a">●</span> Fix checkout rounding</div>
+          <div class="r d">  gpu-box  <span class="g">▰▰▰▱▱ 3/5</span></div>
+          <div class="r"><span class="g">◐</span> Product image cache</div>
+          <div class="r d">  laptop · ctx 212k</div>
+          <div class="r w">▾ ★ billing</div>
+          <div class="r"><span class="d">○ ⚑</span> Invoice PDF layout</div>
+          <div class="r d">  billing-web</div>
+          <div class="r"><span class="a">●</span> Retry failed webhooks</div>
+          <div class="r d">  billing-web · gpu-box</div>
+          <div class="r w">▸ infra            <span class="d">○ 3</span></div>
+          <div class="r w">▾ Other</div>
+          <div class="r"><span class="d">○</span> Weekly notes      <span class="d">4</span></div>
+          <div class="r d"> </div>
+          <div class="r d">new · laptop        menu</div>
+        </div>
+        <div class="pane" aria-hidden="true">
+          <div class="r d">storefront · gpu-box</div>
+          <div class="r"> </div>
+          <div class="r"><span class="g">●</span> Rounding happens per line, so a</div>
+          <div class="r">  3-item cart can be off by 0.01.</div>
+          <div class="r">  Moving it to the order total, as</div>
+          <div class="r">  agreed in <span class="link">SHOP-212</span>.</div>
+          <div class="r"> </div>
+          <div class="r"><span class="g">●</span> Asked the billing agent on laptop</div>
+          <div class="r">  to hold its invoice changes:</div>
+          <div class="r d">  sheprd-msg send laptop/billing "…"</div>
+          <div class="r"> </div>
+          <div class="r a">  Needs you: apply the migration? (y/n)</div>
+          <div class="r"> </div>
+          <div class="r">› <span class="blink">▍</span></div>
+        </div>
+      </div>
+    </figure>
+  </section>
+
+  <section class="section" id="features">
+    <div style="display:grid;gap:12px">
+      <span class="eyebrow">What sheprd adds to herdr</span>
+      <h2>Organised by project, not by machine.</h2>
+    </div>
+    <div class="features">
+      <article class="feature">
+        <span class="glyph">▾ ★</span>
+        <h3>One list across machines</h3>
+        <p>Projects collect their agents from every machine in one place. Drag a workspace in or out, or let a name rule place it. Everything else lands in <em>Other</em>.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">● ○ ⚑</span>
+        <h3>Attention you control</h3>
+        <p>Agents that finished or are waiting stay unread until you look. Keep one active on purpose, dismiss the rest, and jump to the next that needs you with <kbd>prefix+u</kbd>.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">ctx 581k</span>
+        <h3>Peek, don't clutter</h3>
+        <p>Hold the peek key to see idle time, context size, today's tokens per project and each machine's latency. The rest of the time the sidebar shows status and topic only.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">▰▰▰▱▱ 3/5</span>
+        <h3>What each agent is doing</h3>
+        <p>With the bundled Claude Code hook: a to-do progress bar on the row, a timeline of each prompt and what followed, and the references the agent talked about.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">laptop ⇄ server</span>
+        <h3>Agents talking to agents</h3>
+        <p><code>sheprd msg</code> lets an agent on one machine ask an agent on another, even when the server can't reach your laptop.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">SHOP-212</span>
+        <h3>Your tracker, one click away</h3>
+        <p>Teach sheprd what your issue ids look like. Ctrl+click one in any agent's output and it opens in a scrollable markdown reader.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" id="messaging">
+    <div class="split">
+      <div>
+        <span class="eyebrow">sheprd msg</span>
+        <h2>Ask the agent on the server. Tell the one on your laptop.</h2>
+        <p class="lede">Any agent that can run a shell command can take part. Every message says who sent it and how to reply.</p>
+        <ul class="notes">
+          <li><b>Laptop to server</b> goes direct, over the SSH link sheprd already uses.</li>
+          <li><b>Server to laptop</b> waits in a small queue on the server. sheprd collects it while it's open, so the server never gets access to your machine.</li>
+          <li><b>Guardrails:</b> the receiver is told the message comes from another agent, and to ask you before anything destructive or public. A rate limit stops two agents from ping-ponging.</li>
+        </ul>
+      </div>
+      <div>
+        <div class="flow" role="img" aria-label="Messages go from laptop to server directly, and from server to laptop through a queue the laptop collects">
+          <div class="node">
+            <h3>laptop</h3>
+            <span class="mono">runs sheprd + relay</span>
+          </div>
+          <div class="arrows" aria-hidden="true">
+            <span><b>→</b>direct</span>
+            <span class="back"><b>←</b>queue, collected</span>
+          </div>
+          <div class="node">
+            <h3>server</h3>
+            <span class="mono">stock herdr + sheprd-msg</span>
+          </div>
+        </div>
+<pre class="cfg"><span class="c">$</span> sheprd msg list
+<span class="k">laptop</span>/billing        w3:p1   idle
+<span class="k">server</span>/api            w8:p1   working  321k
+<span class="c">$</span> sheprd msg send server/api <span class="s">"Is the webhook retry merged?"</span>
+delivered to server/api (w8:p1, was working)</pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="refs">
+    <div class="split">
+      <div>
+        <span class="eyebrow">References</span>
+        <h2>Plug in your own tracker.</h2>
+        <p class="lede">sheprd doesn't know your tracker. You describe what a reference looks like and the command that prints one. GitHub issues, Linear, a folder of markdown: anything with a command line works.</p>
+        <ul class="notes">
+          <li><b>Ctrl+click</b> a reference in any agent's output to read it.</li>
+          <li><b>The reader</b> turns front matter into a header and renders the markdown. Scroll with the wheel, arrows or PgUp/PgDn; Esc closes.</li>
+          <li><b>Mentioned:</b> right-click an agent to see the references it talked about.</li>
+        </ul>
+      </div>
+<pre class="cfg"><span class="c"># ~/.config/herdr/sheprd-refs.toml</span>
+<span class="k">[[refs]]</span>
+name    = <span class="s">"issues"</span>
+pattern = <span class="s">"#\\d+"</span>
+command = <span class="s">"gh issue view {id}"</span>
+
+<span class="k">[[refs]]</span>
+name     = <span class="s">"shop"</span>
+pattern  = <span class="s">"SHOP-\\d+"</span>
+ids_from = <span class="s">"~/notes/tasks"</span>   <span class="c"># only ids that exist</span>
+command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
+    </div>
+  </section>
+
+  <section class="section" id="keys">
+    <div style="display:grid;gap:12px">
+      <span class="eyebrow">Defaults, no config needed</span>
+      <h2>Keys</h2>
+    </div>
+    <div class="table-wrap">
+      <table class="keys">
+        <tbody>
+          <tr><td><kbd>prefix+space</kbd></td><td>Peek: idle age, context, jump numbers, usage, latency</td></tr>
+          <tr><td><kbd>prefix+u</kbd></td><td>Next agent that needs you</td></tr>
+          <tr><td><kbd>prefix+#</kbd></td><td>Show jump numbers, type one to jump</td></tr>
+          <tr><td><kbd>prefix+alt+c</kbd></td><td>New workspace on a machine you pick</td></tr>
+          <tr><td><kbd>prefix+/</kbd></td><td>Filter the sidebar</td></tr>
+          <tr><td><kbd>prefix+.</kbd></td><td>Project menu for the focused workspace</td></tr>
+          <tr><td><kbd>prefix+alt+h</kbd></td><td>Show or conceal hidden workspaces</td></tr>
+          <tr><td><kbd>ctrl+click</kbd></td><td>Open the reference under the mouse</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <span>sheprd is a client-side fork of <a href="https://github.com/herdrdev/herdr">herdr</a> by herdrdev. Please report sheprd issues to sheprd, not to herdr.</span>
+    <span>Apache-2.0 · <a href="https://github.com/andreconde21/sheprd">github.com/andreconde21/sheprd</a></span>
+  </footer>
+</main>
+
+<script>
+  (function () {
+    var button = document.getElementById("copy-install");
+    var code = document.getElementById("install-cmd");
+    function selectCode() {
+      var range = document.createRange();
+      range.selectNodeContents(code);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    button.addEventListener("click", function () {
+      var done = function () { button.textContent = "Copied"; setTimeout(function () { button.textContent = "Copy"; }, 1600); };
+      try {
+        navigator.clipboard.writeText(code.textContent).then(done, function () { selectCode(); button.textContent = "Press Ctrl+C"; });
+      } catch (e) { selectCode(); button.textContent = "Press Ctrl+C"; }
+    });
+  })();
+</script>
+</body>
+</html>
