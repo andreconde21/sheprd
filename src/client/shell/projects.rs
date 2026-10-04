@@ -812,9 +812,11 @@ pub(super) fn agent_timeline(agent: &crate::protocol::ClientShellAgent) -> Vec<S
     numbered_tokens(agent, "sheprd_tl_")
 }
 
-/// Task ids mentioned in the chat, newest first.
+/// References (task ids, issues…) mentioned in the chat, newest first. `sheprd_tasks` is the
+/// token's name before 0.9.3-13, still reported by older hooks.
 pub(super) fn agent_tasks(agent: &crate::protocol::ClientShellAgent) -> Vec<String> {
-    agent_token(agent, "sheprd_tasks")
+    agent_token(agent, "sheprd_refs")
+        .or_else(|| agent_token(agent, "sheprd_tasks"))
         .map(|tasks| {
             tasks
                 .split(',')
@@ -846,10 +848,7 @@ pub(super) fn toggle_todo(key: &str) {
     }
 }
 
-/// The command that shows a task's body, from ~/.config/claude-mods/tasks.toml
-/// (`[[source]] pattern = "..." command = "... {id}"`), for the first source
-/// whose pattern matches the whole id.
-/// Runs the task source's command for `id` off the UI thread; the body arrives via
+/// Runs the reference source's command for `id` off the UI thread; the body arrives via
 /// `take_task_body` (shown as a peek).
 pub(super) fn open_task(id: String) {
     match task_command(&id) {
@@ -977,6 +976,10 @@ pub(super) fn word_at<'a>(
     (!word.is_empty()).then(|| word.to_owned())
 }
 
+/// The command that shows a reference's body (a task, an issue…), from the user's reference
+/// sources in `<config_dir>/sheprd-refs.toml`:
+/// `[[refs]] name = "issues" pattern = "#\\d+" command = "gh issue view {id}"`.
+/// The first source whose pattern matches the whole id wins.
 pub(super) fn task_command(id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Source {
@@ -986,7 +989,7 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Config {
         #[serde(default)]
-        source: Vec<Source>,
+        refs: Vec<Source>,
     }
     if !id
         .chars()
@@ -994,10 +997,9 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     {
         return None;
     }
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home).join(".config/claude-mods/tasks.toml");
+    let path = crate::config::config_dir().join("sheprd-refs.toml");
     let config: Config = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    config.source.into_iter().find_map(|source| {
+    config.refs.into_iter().find_map(|source| {
         let pattern = regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok()?;
         pattern
             .is_match(id)
@@ -1364,7 +1366,7 @@ fn peek_results() -> &'static std::sync::Mutex<Vec<Option<String>>> {
     RESULTS.get_or_init(Default::default)
 }
 
-/// Finished task-body reads (claude-mods task sources), shown from the top.
+/// Finished reference-body reads (sheprd-refs.toml sources), shown in the reader.
 fn task_results() -> &'static std::sync::Mutex<Vec<(String, Option<String>)>> {
     static RESULTS: OnceLock<std::sync::Mutex<Vec<(String, Option<String>)>>> = OnceLock::new();
     RESULTS.get_or_init(Default::default)

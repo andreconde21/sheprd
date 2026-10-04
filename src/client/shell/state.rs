@@ -648,7 +648,7 @@ pub(super) enum ClientContextMenuTarget {
         active: bool,
         groups: Vec<String>,
         grouped: bool,
-        /// From the agent-insights hook (claude-mods).
+        /// From the agent hook (sheprd-claude-hook).
         timeline: Vec<String>,
         tasks: Vec<String>,
     },

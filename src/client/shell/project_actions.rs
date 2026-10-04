@@ -183,7 +183,7 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             }
             if !tasks.is_empty() {
                 items.push(item(
-                    format!("Tasks mentioned ({})", tasks.len()),
+                    format!("Mentioned ({})", tasks.len()),
                     Action::AgentTasks,
                 ));
             }
@@ -1192,7 +1192,6 @@ impl ClientShellState {
         Some(command)
     }
 
-    /// A task's body (from its claude-mods task source), wrapped, from the top.
     /// A reference body opens in the markdown reader (scrollable, esc closes).
     fn show_task_body(&mut self, id: &str, text: Option<String>) {
         let (version, reader, body) = match text {

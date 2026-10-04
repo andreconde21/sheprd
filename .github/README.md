@@ -44,7 +44,7 @@ reveals, for ten seconds (press again to hide): idle age, context size
 and each machine's latency.
 
 ### Time and tokens per project
-A small Claude Code hook (`scripts/sheprd-usage-hook`, a Stop hook) reads each
+sheprd's Claude Code hook (`scripts/sheprd-claude-hook`) reads each
 session's transcript incrementally after every turn and attaches the session's
 context size and per-day usage to its pane as herdr metadata, so it reaches the
 sidebar from any machine without syncing files. sheprd keeps the history in
@@ -52,9 +52,7 @@ sidebar from any machine without syncing files. sheprd keeps the history in
 same rules as the sidebar. Right-click a project for *Today* and *Last 7 days*
 (active time · input + output + cache-write tokens; cache reads are excluded).
 
-Install the hook on every machine where agents run. The claude-mods
-`agent-insights` hook supersedes `scripts/sheprd-usage-hook` and adds to-dos,
-timeline and task mentions.
+`sheprd setup` installs the hook on this machine and every saved herdr machine.
 
 - **Two views** (click the right header label): *detailed*, one row per agent
   with its topic, and *compact*, one line per workspace.
@@ -122,17 +120,52 @@ project to choose your own.
 - **Close idle workspaces** (right-click a project): lists the workspaces whose
   agents have been idle for 7+ days and closes them only when you confirm.
 
-### Agent insights (with claude-mods)
-With the [claude-mods](https://github.com/andreconde21/claude-mods)
-`agent-insights` hook installed, agent rows also show:
+### Agent insights
+With the Claude Code hook installed (`sheprd setup`), agent rows also show:
 - a **to-do progress bar** (`▰▰▱▱▱ 5/12`); click it to expand the list
   under the agent;
 - right-click → **Timeline**: each of your prompts with what followed;
-- right-click → **Tasks mentioned**: ids from your own task sources (pattern +
-  command in `~/.config/claude-mods/tasks.toml`); pick one to read its body.
+- right-click → **Mentioned**: references the agent talked about (task ids,
+  issue numbers…, see below); pick one to read it.
 
-Ctrl+click a task id in any agent's output (e.g. `HZ-018`) to read that task in a peek, using the
-same `tasks.toml` sources. Anything else falls through to normal link handling.
+### References: plug in your tracker
+Tell sheprd what your references look like and how to show one, in
+`~/.config/herdr/sheprd-refs.toml`:
+
+```toml
+[[refs]]
+name = "issues"
+pattern = "#\\d+"                     # a whole reference, as a regex
+command = "gh issue view {id}"         # prints its body (markdown works best)
+
+[[refs]]
+name = "tasks"
+pattern = "[A-Z]{2,5}-\\d+"
+ids_from = "~/notes/tasks"             # optional: only ids that exist as <ID>.md here
+command = "cat ~/notes/tasks/{id}.md"
+```
+
+- **Ctrl+click** a reference in any agent's output to read it. Anything else
+  falls through to normal link handling.
+- It opens in a **reader**: front matter becomes the header (title, status…),
+  markdown is rendered, wheel / arrows / PgUp-PgDn scroll, esc closes.
+- The hook uses the same patterns (and `ids_from`) to list what an agent
+  mentioned.
+
+### Token format (for other agent integrations)
+Any integration can feed the sidebar by reporting herdr pane metadata tokens
+(`herdr pane report-metadata <pane> --source sheprd --token name=value`; values
+≤ 80 chars, ≤ 16 tokens per report):
+
+| Token | Value |
+|---|---|
+| `sheprd_ctx` | current context size in tokens |
+| `sheprd_session` | the agent's session id |
+| `sheprd_u_YYYYMMDD` | `input,output,cache_read,cache_write,active_minutes` for that day |
+| `sheprd_todo` | `done/total` of the agent's to-do list |
+| `sheprd_todo_1..12` | `✓ item` / `▸ item` (in progress) / `○ item` |
+| `sheprd_tl_1..10` | timeline, oldest first: `09:12 the prompt (+3 edits, 2 cmds)` |
+| `sheprd_refs` | references mentioned, comma-separated, newest first |
 
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
@@ -193,8 +226,8 @@ sheprd msg read dev/api -n 80            # its recent output
   ask you before anything destructive, outward-facing or involving secrets. A per-target rate
   limit stops two agents ping-ponging.
 
-Run `sheprd msg setup` once: it installs `sheprd-msg` (python3 only, no sheprd needed) and the
-skill on this machine and on every saved herdr machine.
+Run `sheprd setup` once: it installs `sheprd-msg` (python3 only, no sheprd needed), the
+skill and the Claude Code hook on this machine and on every saved herdr machine.
 
 ## Install
 Linux x86_64, static binary:
