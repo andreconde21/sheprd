@@ -8,15 +8,20 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const SCRIPT: &str = include_str!("../scripts/sheprd-msg");
+/// The Claude Code integration; `setup` installs it from next to the script.
+const CLAUDE_HOOK: &str = include_str!("../scripts/sheprd-claude-hook");
 
-/// Writes the bundled script next to the sheprd binary (only when it changed) and returns its path.
+/// Writes the bundled scripts next to the sheprd binary (only when they changed) and returns
+/// the messaging script's path.
 fn script_path() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let path = exe.with_file_name("sheprd-msg");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
-        std::fs::write(&path, SCRIPT)?;
+    for (name, content) in [("sheprd-claude-hook", CLAUDE_HOOK), ("sheprd-msg", SCRIPT)] {
+        let path = exe.with_file_name(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(content) {
+            std::fs::write(&path, content)?;
+        }
     }
-    Ok(path)
+    Ok(exe.with_file_name("sheprd-msg"))
 }
 
 fn command(args: &[String]) -> std::io::Result<Command> {
