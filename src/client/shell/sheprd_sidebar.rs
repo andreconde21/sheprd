@@ -206,7 +206,9 @@ fn build_rows(
         let idle = (presence == Presence::Idle)
             .then(|| projects::idle_secs(&key))
             .flatten();
-        let recent = idle.is_some_and(|secs| secs < layout.recent_secs());
+        // Marking an agent read takes it out of the active view until its next state change.
+        let recent = idle.is_some_and(|secs| secs < layout.recent_secs())
+            && !layout.is_dismissed(&key, row.agent.state_change_seq);
         agents
             .entry((row.endpoint.endpoint_index, row.agent.workspace_id.clone()))
             .or_default()
