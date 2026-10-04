@@ -51,6 +51,8 @@ mod render_signal;
 mod selection;
 mod server;
 mod session;
+// andreconde fork (sheprd): agents messaging agents across machines.
+mod sheprd_msg;
 mod sound;
 mod terminal;
 mod terminal_effects;
@@ -566,6 +568,11 @@ fn main() -> io::Result<()> {
         let loaded_config = config::Config::load();
         exit_if_nested_disabled(&loaded_config.config);
         return client::run_client();
+    }
+
+    // andreconde fork (sheprd): `sheprd msg …` (agents messaging agents across machines).
+    if args.get(1).map(|s| s.as_str()) == Some("msg") {
+        sheprd_msg::run_cli(&args[2..]);
     }
 
     // andreconde fork (sheprd): `sheprd update` installs the latest sheprd

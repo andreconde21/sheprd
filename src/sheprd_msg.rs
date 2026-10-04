@@ -1,0 +1,62 @@
+//! andreconde fork (sheprd): agents messaging agents across machines.
+//!
+//! The logic is one Python script (`scripts/sheprd-msg`) so the exact same tool runs on machines
+//! that only have stock herdr: `sheprd msg setup` copies it there. sheprd carries it inside the
+//! binary, runs it for `sheprd msg …`, and keeps its relay running while the client is open.
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+const SCRIPT: &str = include_str!("../scripts/sheprd-msg");
+
+/// Writes the bundled script next to the sheprd binary (only when it changed) and returns its path.
+fn script_path() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let path = exe.with_file_name("sheprd-msg");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::write(&path, SCRIPT)?;
+    }
+    Ok(path)
+}
+
+fn command(args: &[String]) -> std::io::Result<Command> {
+    let mut cmd = Command::new("python3");
+    cmd.arg(script_path()?).args(args);
+    // The script drives herdr through this binary, so it reaches the servers sheprd talks to.
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("HERDR_BIN_PATH", exe);
+    }
+    Ok(cmd)
+}
+
+/// `sheprd msg <args>`: runs the script and exits with its status.
+pub fn run_cli(args: &[String]) -> ! {
+    match command(args).and_then(|mut cmd| cmd.status()) {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!("sheprd msg: could not run python3: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Starts the relay once per client process. It delivers messages queued on machines that cannot
+/// reach this one, holds its own lock (a second window's relay exits at once) and stops when this
+/// process exits.
+pub fn ensure_relay() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if cfg!(test) {
+        return;
+    }
+    STARTED.call_once(|| {
+        let spawned = command(&["relay".to_owned()]).and_then(|mut cmd| {
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        });
+        if let Err(err) = spawned {
+            tracing::warn!("sheprd msg relay not started: {err}");
+        }
+    });
+}
