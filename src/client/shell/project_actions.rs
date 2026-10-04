@@ -688,25 +688,7 @@ impl ClientShellState {
             ClientContextMenuTarget::TaskPicker { tasks } => {
                 if let Action::TaskOpen(index) = action {
                     if let Some(id) = tasks.get(index).cloned() {
-                        match projects::task_command(&id) {
-                            Some(command) => {
-                                std::thread::spawn(move || {
-                                    let text = std::process::Command::new("sh")
-                                        .arg("-c")
-                                        .arg(&command)
-                                        .stdin(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .output()
-                                        .ok()
-                                        .filter(|output| output.status.success())
-                                        .map(|output| {
-                                            String::from_utf8_lossy(&output.stdout).into_owned()
-                                        });
-                                    projects::push_task_body(id, text);
-                                });
-                            }
-                            None => projects::push_task_body(id, None),
-                        }
+                        projects::open_task(id);
                     }
                 }
             }

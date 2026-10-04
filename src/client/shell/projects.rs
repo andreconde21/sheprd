@@ -849,6 +849,53 @@ pub(super) fn toggle_todo(key: &str) {
 /// The command that shows a task's body, from ~/.config/claude-mods/tasks.toml
 /// (`[[source]] pattern = "..." command = "... {id}"`), for the first source
 /// whose pattern matches the whole id.
+/// Runs the task source's command for `id` off the UI thread; the body arrives via
+/// `take_task_body` (shown as a peek).
+pub(super) fn open_task(id: String) {
+    match task_command(&id) {
+        Some(command) => {
+            std::thread::spawn(move || {
+                let text = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+                push_task_body(id, text);
+            });
+        }
+        None => push_task_body(id, None),
+    }
+}
+
+/// The task-id-shaped word at `col` in a row of cell symbols ("…see HZ-018, then…" → "HZ-018"),
+/// trimmed of surrounding punctuation. Whether it is a task is up to `task_command`.
+pub(super) fn word_at<'a>(
+    symbols: impl IntoIterator<Item = &'a str>,
+    col: usize,
+) -> Option<String> {
+    let chars: Vec<char> = symbols
+        .into_iter()
+        .map(|symbol| symbol.chars().next().unwrap_or(' '))
+        .collect();
+    let part = |c: char| c.is_ascii_alphanumeric() || "#_-./".contains(c);
+    if !chars.get(col).copied().is_some_and(part) {
+        return None;
+    }
+    let start = (0..col)
+        .rev()
+        .take_while(|&i| part(chars[i]))
+        .last()
+        .unwrap_or(col);
+    let end = (col..chars.len()).take_while(|&i| part(chars[i])).last()? + 1;
+    let word: String = chars[start..end].iter().collect();
+    let word = word.trim_matches(|c: char| ".-/".contains(c));
+    (!word.is_empty()).then(|| word.to_owned())
+}
+
 pub(super) fn task_command(id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Source {
@@ -1509,5 +1556,24 @@ mod tests {
         let text = toml::to_string_pretty(&layout).unwrap();
         assert!(text.contains("[[group]]"));
         assert_eq!(toml::from_str::<ProjectLayout>(&text).unwrap(), layout);
+    }
+}
+
+#[cfg(test)]
+mod word_at_tests {
+    use super::word_at;
+
+    fn row(text: &str) -> Vec<String> {
+        text.chars().map(String::from).collect()
+    }
+
+    #[test]
+    fn finds_the_task_id_under_the_column_without_punctuation() {
+        let cells = row("see HZ-018, then (CAL-1090).");
+        let symbols = || cells.iter().map(String::as_str);
+        assert_eq!(word_at(symbols(), 6).as_deref(), Some("HZ-018"));
+        assert_eq!(word_at(symbols(), 4).as_deref(), Some("HZ-018"));
+        assert_eq!(word_at(symbols(), 20).as_deref(), Some("CAL-1090"));
+        assert_eq!(word_at(symbols(), 3), None);
     }
 }
