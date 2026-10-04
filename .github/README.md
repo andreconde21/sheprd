@@ -131,6 +131,9 @@ With the [claude-mods](https://github.com/andreconde21/claude-mods)
 - right-click → **Tasks mentioned**: ids from your own task sources (pattern +
   command in `~/.config/claude-mods/tasks.toml`); pick one to read its body.
 
+Ctrl+click a task id in any agent's output (e.g. `HZ-018`) to read that task in a peek, using the
+same `tasks.toml` sources. Anything else falls through to normal link handling.
+
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
 (who needs you, which projects, today's time and tokens). The
