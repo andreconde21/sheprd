@@ -89,6 +89,11 @@ impl ClientShellState {
         } else {
             ClientShellMode::Navigate
         };
+        // andreconde fork (sheprd): the reader is client-only; nothing to tell the server.
+        if notes.reader.is_some() {
+            outcome.repaint = true;
+            return;
+        }
         self.push_endpoint_method_with_kind(
             crate::api::schema::Method::ReleaseNotesDismiss(
                 crate::api::schema::ReleaseNotesDismissParams {
@@ -109,11 +114,8 @@ impl ClientShellState {
             _ => return None,
         };
         let (cols, rows) = self.last_composed_size?;
-        let outer = crate::ui::centered_popup_rect(
-            Rect::new(0, 0, cols, rows),
-            crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
-            crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
-        )?;
+        let size = crate::ui::release_notes_modal_size(notes);
+        let outer = crate::ui::centered_popup_rect(Rect::new(0, 0, cols, rows), size.0, size.1)?;
         let inner = Rect::new(
             outer.x.saturating_add(1),
             outer.y.saturating_add(1),

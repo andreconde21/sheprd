@@ -812,9 +812,11 @@ pub(super) fn agent_timeline(agent: &crate::protocol::ClientShellAgent) -> Vec<S
     numbered_tokens(agent, "sheprd_tl_")
 }
 
-/// Task ids mentioned in the chat, newest first.
+/// References (task ids, issues…) mentioned in the chat, newest first. `sheprd_tasks` is the
+/// token's name before 0.9.3-13, still reported by older hooks.
 pub(super) fn agent_tasks(agent: &crate::protocol::ClientShellAgent) -> Vec<String> {
-    agent_token(agent, "sheprd_tasks")
+    agent_token(agent, "sheprd_refs")
+        .or_else(|| agent_token(agent, "sheprd_tasks"))
         .map(|tasks| {
             tasks
                 .split(',')
@@ -846,10 +848,7 @@ pub(super) fn toggle_todo(key: &str) {
     }
 }
 
-/// The command that shows a task's body, from ~/.config/claude-mods/tasks.toml
-/// (`[[source]] pattern = "..." command = "... {id}"`), for the first source
-/// whose pattern matches the whole id.
-/// Runs the task source's command for `id` off the UI thread; the body arrives via
+/// Runs the reference source's command for `id` off the UI thread; the body arrives via
 /// `take_task_body` (shown as a peek).
 pub(super) fn open_task(id: String) {
     match task_command(&id) {
@@ -869,6 +868,87 @@ pub(super) fn open_task(id: String) {
         }
         None => push_task_body(id, None),
     }
+}
+
+/// A reference body (usually markdown with YAML front matter) prepared for the reader:
+/// (title line, subtitle, body). Front matter becomes the title/subtitle; headings, bullets,
+/// checkboxes and emphasis are mapped to what herdr's notes renderer draws.
+pub(super) fn reader_document(id: &str, text: &str) -> (String, String, String) {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut body = text;
+    if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---") {
+            for line in rest[..end].lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    if !key.starts_with(' ') && !value.is_empty() {
+                        fields.push((key.trim().to_owned(), value.to_owned()));
+                    }
+                }
+            }
+            body = rest[end + 4..].trim_start_matches(|c| c == '-' || c == '\n');
+        }
+    }
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let title = match field("title") {
+        Some(title) if !title.is_empty() => format!("{id}  {title}"),
+        _ => id.to_owned(),
+    };
+    let subtitle = ["status", "priority", "project", "assignee", "type"]
+        .iter()
+        .filter_map(|name| field(name).map(|value| format!("{name} {value}")))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            out.push_str(trimmed);
+        } else if in_code {
+            out.push_str(line);
+        } else if let Some(heading) = trimmed
+            .strip_prefix("# ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("#### "))
+        {
+            out.push_str("### ");
+            out.push_str(heading);
+        } else {
+            let indent = (line.len() - trimmed.len()) / 2;
+            let bullet = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+                .or_else(|| trimmed.strip_prefix("+ "));
+            let line = match bullet {
+                Some(item) => {
+                    let item = item
+                        .strip_prefix("[ ] ")
+                        .map(|rest| format!("☐ {rest}"))
+                        .or_else(|| {
+                            item.strip_prefix("[x] ")
+                                .or_else(|| item.strip_prefix("[X] "))
+                                .map(|rest| format!("☑ {rest}"))
+                        })
+                        .unwrap_or_else(|| item.to_owned());
+                    format!("- {}{item}", "  ".repeat(indent))
+                }
+                None if trimmed.starts_with('>') => {
+                    format!("│ {}", trimmed.trim_start_matches('>').trim_start())
+                }
+                None => line.to_owned(),
+            };
+            out.push_str(&line.replace("**", "").replace("__", ""));
+        }
+        out.push('\n');
+    }
+    (title, subtitle, out)
 }
 
 /// The task-id-shaped word at `col` in a row of cell symbols ("…see HZ-018, then…" → "HZ-018"),
@@ -896,6 +976,10 @@ pub(super) fn word_at<'a>(
     (!word.is_empty()).then(|| word.to_owned())
 }
 
+/// The command that shows a reference's body (a task, an issue…), from the user's reference
+/// sources in `<config_dir>/sheprd-refs.toml`:
+/// `[[refs]] name = "issues" pattern = "#\\d+" command = "gh issue view {id}"`.
+/// The first source whose pattern matches the whole id wins.
 pub(super) fn task_command(id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Source {
@@ -905,7 +989,7 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Config {
         #[serde(default)]
-        source: Vec<Source>,
+        refs: Vec<Source>,
     }
     if !id
         .chars()
@@ -913,10 +997,9 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     {
         return None;
     }
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home).join(".config/claude-mods/tasks.toml");
+    let path = crate::config::config_dir().join("sheprd-refs.toml");
     let config: Config = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    config.source.into_iter().find_map(|source| {
+    config.refs.into_iter().find_map(|source| {
         let pattern = regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok()?;
         pattern
             .is_match(id)
@@ -1283,7 +1366,7 @@ fn peek_results() -> &'static std::sync::Mutex<Vec<Option<String>>> {
     RESULTS.get_or_init(Default::default)
 }
 
-/// Finished task-body reads (claude-mods task sources), shown from the top.
+/// Finished reference-body reads (sheprd-refs.toml sources), shown in the reader.
 fn task_results() -> &'static std::sync::Mutex<Vec<(String, Option<String>)>> {
     static RESULTS: OnceLock<std::sync::Mutex<Vec<(String, Option<String>)>>> = OnceLock::new();
     RESULTS.get_or_init(Default::default)
@@ -1575,5 +1658,24 @@ mod word_at_tests {
         assert_eq!(word_at(symbols(), 4).as_deref(), Some("HZ-018"));
         assert_eq!(word_at(symbols(), 20).as_deref(), Some("CAL-1090"));
         assert_eq!(word_at(symbols(), 3), None);
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::reader_document;
+
+    #[test]
+    fn front_matter_becomes_title_and_subtitle_and_markdown_is_mapped() {
+        let text = "---\nid: HZ-018\ntitle: \"Rotate the token\"\nstatus: todo\nproject: hetzner\nbadges:\n  - x\n---\n\n## Description\n\n**Bold** text\n- [ ] open item\n  - nested\n> quoted\n";
+        let (title, subtitle, body) = reader_document("HZ-018", text);
+        assert_eq!(title, "HZ-018  Rotate the token");
+        assert_eq!(subtitle, "status todo · project hetzner");
+        assert!(body.contains("### Description"));
+        assert!(body.contains("Bold text"));
+        assert!(body.contains("- ☐ open item"));
+        assert!(body.contains("-   nested"));
+        assert!(body.contains("│ quoted"));
+        assert!(!body.contains("badges"));
     }
 }

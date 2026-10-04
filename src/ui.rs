@@ -23,9 +23,13 @@ pub(crate) use self::panes::{
 };
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, product_announcement_scroll_metrics,
-    release_notes_close_button_rect, release_notes_display_lines, release_notes_scroll_metrics,
-    PRODUCT_ANNOUNCEMENT_MODAL_SIZE, RELEASE_NOTES_MODAL_SIZE,
+    release_notes_close_button_rect, release_notes_display_lines, release_notes_modal_size,
+    release_notes_scroll_metrics, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
 };
+// andreconde fork (sheprd): production code sizes the modal via release_notes_modal_size; the
+// constant stays exported for herdr's own tests.
+#[cfg(test)]
+pub(crate) use self::release_notes::RELEASE_NOTES_MODAL_SIZE;
 pub(crate) use self::scrollbar::{
     release_notes_scrollbar_rect, render_pane_scrollbar_buffer, render_scrollbar_buffer,
     scrollbar_offset_from_drag_row, scrollbar_offset_from_row, scrollbar_thumb,

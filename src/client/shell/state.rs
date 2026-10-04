@@ -648,7 +648,7 @@ pub(super) enum ClientContextMenuTarget {
         active: bool,
         groups: Vec<String>,
         grouped: bool,
-        /// From the agent-insights hook (claude-mods).
+        /// From the agent hook (sheprd-claude-hook).
         timeline: Vec<String>,
         tasks: Vec<String>,
     },
@@ -1069,6 +1069,7 @@ pub(super) fn release_notes_state(
         body: notes.body.clone(),
         scroll: 0,
         preview: notes.preview,
+        reader: None,
     }
 }
 

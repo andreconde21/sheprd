@@ -427,7 +427,7 @@ impl ClientShellState {
     }
 
     /// andreconde fork (sheprd): the word under (row, col) of a pane's visible text, when a task
-    /// source in claude-mods' tasks.toml claims it.
+    /// source in sheprd-refs.toml claims it.
     fn task_id_at(&self, pane_id: &str, row: u16, col: u16) -> Option<String> {
         let surface = self.pane_surface.as_ref()?;
         let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;

@@ -10,6 +10,15 @@ use crate::app::state::{Palette, ProductAnnouncementState, ReleaseNotesState};
 pub(crate) const RELEASE_NOTES_MODAL_SIZE: (u16, u16) = (80, 24);
 pub(crate) const PRODUCT_ANNOUNCEMENT_MODAL_SIZE: (u16, u16) = (88, 24);
 
+/// andreconde fork (sheprd): the reader gets a larger modal than release notes.
+pub(crate) fn release_notes_modal_size(notes: &ReleaseNotesState) -> (u16, u16) {
+    if notes.reader.is_some() {
+        (100, 40)
+    } else {
+        RELEASE_NOTES_MODAL_SIZE
+    }
+}
+
 fn release_notes_inline_spans<'a>(
     text: &str,
     base_style: Style,
@@ -324,6 +333,7 @@ mod tests {
             body: "### Added\n- One".into(),
             scroll: 0,
             preview: true,
+            reader: None,
         };
 
         let lines = release_notes_display_lines(&notes, "herdr update", &palette);

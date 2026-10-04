@@ -574,6 +574,10 @@ fn main() -> io::Result<()> {
     if args.get(1).map(|s| s.as_str()) == Some("msg") {
         sheprd_msg::run_cli(&args[2..]);
     }
+    // `sheprd setup`: messaging, its skill and the Claude Code hook, here and on saved machines.
+    if args.get(1).map(|s| s.as_str()) == Some("setup") {
+        sheprd_msg::run_cli(&["setup".to_owned()]);
+    }
 
     // andreconde fork (sheprd): `sheprd update` installs the latest sheprd
     // release; herdr's own updater would replace sheprd with stock herdr.

@@ -183,7 +183,7 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             }
             if !tasks.is_empty() {
                 items.push(item(
-                    format!("Tasks mentioned ({})", tasks.len()),
+                    format!("Mentioned ({})", tasks.len()),
                     Action::AgentTasks,
                 ));
             }
@@ -1192,37 +1192,29 @@ impl ClientShellState {
         Some(command)
     }
 
-    /// A task's body (from its claude-mods task source), wrapped, from the top.
+    /// A reference body opens in the markdown reader (scrollable, esc closes).
     fn show_task_body(&mut self, id: &str, text: Option<String>) {
-        let mut lines = vec![id.to_owned()];
-        match text {
+        let (version, reader, body) = match text {
             Some(text) => {
-                for line in text.lines().map(str::trim_end) {
-                    let mut rest = line;
-                    loop {
-                        let cut = rest
-                            .char_indices()
-                            .nth(72)
-                            .map_or(rest.len(), |(index, _)| index);
-                        lines.push(rest[..cut].to_owned());
-                        rest = &rest[cut..];
-                        if rest.is_empty() {
-                            break;
-                        }
-                    }
-                    if lines.len() > 30 {
-                        lines.push("…".to_owned());
-                        break;
-                    }
-                }
+                let (title, subtitle, body) = projects::reader_document(id, &text);
+                (title, subtitle, body)
             }
-            None => lines.push(
-                "No task source matches this id, or its command failed. See ~/.config/claude-mods/tasks.toml."
-                    .to_owned(),
+            None => (
+                id.to_owned(),
+                "not found".to_owned(),
+                "No reference source matches this id, or its command failed.".to_owned(),
             ),
-        }
-        let (x, y) = projects::peek_anchor();
-        self.open_menu(ClientContextMenuTarget::Info { lines }, x, y);
+        };
+        self.overlay = Some(ClientShellOverlay::ReleaseNotes(
+            crate::app::state::ReleaseNotesState {
+                version,
+                body,
+                scroll: 0,
+                preview: false,
+                reader: Some(reader),
+            },
+        ));
+        self.chrome_drag = None;
     }
 
     /// A finished peek: show the agent's last lines where its menu was.
