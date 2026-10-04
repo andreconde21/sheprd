@@ -1069,6 +1069,7 @@ pub(super) fn release_notes_state(
         body: notes.body.clone(),
         scroll: 0,
         preview: notes.preview,
+        reader: None,
     }
 }
 

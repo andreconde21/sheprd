@@ -760,6 +760,9 @@ pub struct ReleaseNotesState {
     pub body: String,
     pub scroll: u16,
     pub preview: bool,
+    /// andreconde fork (sheprd): Some(subtitle) when this modal is sheprd's markdown reader
+    /// (a task or reference body), not herdr's release notes.
+    pub reader: Option<String>,
 }
 
 #[derive(Debug)]

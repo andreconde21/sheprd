@@ -307,11 +307,8 @@ fn render_release_notes_overlay(
     install_command: &str,
     p: &Palette,
 ) -> Option<OverlayRender> {
-    let outer = popup(
-        b.area,
-        crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
-        crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
-    )?;
+    let size = crate::ui::release_notes_modal_size(notes);
+    let outer = popup(b.area, size.0, size.1)?;
     let inner = panel(b, outer, p.accent, p.panel_bg)?;
     if inner.height < 8 || inner.width < 20 {
         return Some(OverlayRender {
@@ -341,7 +338,11 @@ fn render_release_notes_overlay(
         title_area.x,
         title_area.y,
         title_area.width,
-        &format!("v{}", notes.version),
+        &if notes.reader.is_some() {
+            notes.version.clone()
+        } else {
+            format!("v{}", notes.version)
+        },
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
     put_text(
@@ -349,7 +350,9 @@ fn render_release_notes_overlay(
         subtitle_area.x,
         subtitle_area.y,
         subtitle_area.width,
-        if notes.preview {
+        if let Some(subtitle) = notes.reader.as_deref() {
+            subtitle
+        } else if notes.preview {
             "update ready"
         } else {
             "what's new in this release"
