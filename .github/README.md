@@ -168,6 +168,31 @@ members = ["local/notes"]              # explicit members, in display order
 The combined sidebar appears when the client is connected to 2+ machines. With
 a single machine sheprd looks like herdr. Stock herdr ignores this file.
 
+## Agents talking to agents, across machines
+
+herdr lets an agent drive panes on its own machine. sheprd adds `sheprd msg`, so an agent on one
+machine can talk to an agent on another, for example "ask the agent on the server what it found and
+tell the one on my laptop to wait for it".
+
+```bash
+sheprd msg list                          # every agent on every machine: machine/workspace, status, context
+sheprd msg send dev/api "text"           # submit a prompt to that agent, marked as from another agent
+sheprd msg read dev/api -n 80            # its recent output
+```
+
+- **Laptop → server** goes direct, over the SSH link sheprd already uses.
+- **Server → laptop** works even when the server can't reach your laptop: the message waits in a
+  queue on the server, and sheprd collects and delivers it while it's open. The server never gets
+  access to your machine.
+- **Any agent.** It's a shell command, and every delivered message carries the command to reply.
+  A Claude skill is included.
+- **Guardrails.** Messages tell the receiver they come from another agent, not from you, and to
+  ask you before anything destructive, outward-facing or involving secrets. A per-target rate
+  limit stops two agents ping-ponging.
+
+Run `sheprd msg setup` once: it installs `sheprd-msg` (python3 only, no sheprd needed) and the
+skill on this machine and on every saved herdr machine.
+
 ## Install
 Linux x86_64, static binary:
 
