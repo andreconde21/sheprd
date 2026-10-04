@@ -596,6 +596,12 @@ impl ProjectLayout {
 }
 
 impl ProjectLayout {
+    /// Marked read (or inactive) since the agent's last state change.
+    pub(super) fn is_dismissed(&self, key: &str, seq: u64) -> bool {
+        let entry = Self::dismissed_key(key, seq);
+        self.dismissed.iter().any(|dismissed| *dismissed == entry)
+    }
+
     pub(super) fn is_kept(&self, key: &str) -> bool {
         self.kept.iter().any(|kept| kept == key)
     }

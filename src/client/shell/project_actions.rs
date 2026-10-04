@@ -187,11 +187,16 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
                     Action::AgentTasks,
                 ));
             }
-            items.push(if presence.needs_attention() {
-                item("Mark inactive", Action::AgentMarkInactive)
-            } else {
-                item("Mark unread", Action::AgentMarkUnread)
-            });
+            let layout = projects::layout();
+            let lingering = presence == projects::Presence::Idle
+                && !layout.is_dismissed(unread_key, *seq)
+                && projects::idle_secs(unread_key).is_some_and(|secs| secs < layout.recent_secs());
+            if presence.needs_attention() || lingering {
+                items.push(item("Mark read", Action::AgentMarkInactive));
+            }
+            if presence != projects::Presence::Unread {
+                items.push(item("Mark unread", Action::AgentMarkUnread));
+            }
             items.push(item(
                 if projects::layout().is_kept(unread_key) {
                     "Stop keeping active"
