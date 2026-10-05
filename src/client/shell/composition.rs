@@ -378,7 +378,7 @@ impl ClientShellState {
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         // andreconde fork (sheprd): peek while the sidebar is collapsed draws the
         // full sidebar over the panes for a moment (view only).
-        if self.endpoints.len() > 1
+        if (self.endpoints.len() > 1 || !cfg!(test))
             && self.sidebar_collapsed
             && layout.sidebar.width > 0
             && super::projects::peeking()

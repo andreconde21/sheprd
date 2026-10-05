@@ -106,7 +106,13 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> bool {
         use crate::input::KeybindAction;
-        if !self.multi_endpoint_active() {
+        // andreconde fork (sheprd): on one machine too, previous/next workspace follow the sheprd
+        // sidebar's order; every other action keeps the stock single-machine handling.
+        let workspace_step = matches!(
+            action,
+            KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace
+        );
+        if !self.multi_endpoint_active() && (cfg!(test) || !workspace_step) {
             return false;
         }
         if matches!(

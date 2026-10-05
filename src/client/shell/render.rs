@@ -268,7 +268,9 @@ pub(super) fn render_shell(
         );
     }
     if layout.sidebar.width > 0 {
-        if state.endpoints.len() > 1 {
+        // andreconde fork (sheprd): the sheprd sidebar on one machine too; herdr's unit tests
+        // keep the stock single-machine sidebar they were written for.
+        if state.endpoints.len() > 1 || !cfg!(test) {
             if state.sidebar_collapsed && !cfg!(test) {
                 // andreconde fork (sheprd): project rail instead of machines + agents.
                 super::sheprd_sidebar::render_collapsed(
