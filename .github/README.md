@@ -247,7 +247,7 @@ Run `sheprd setup` once: it installs `sheprd-msg` (python3 only, no sheprd neede
 skill and the Claude Code hook on this machine and on every saved herdr machine.
 
 ## Install
-Linux x86_64, static binary:
+Linux (x86_64, aarch64; static) and macOS (Apple Silicon, Intel):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/andreconde21/sheprd/main/scripts/sheprd-install | bash
@@ -255,6 +255,8 @@ sheprd            # instead of `herdr`
 ```
 
 It installs to `~/.local/share/sheprd/sheprd` and leaves your `herdr` install alone.
+The macOS builds are not signed yet; installed this way (with `curl`) macOS runs them without a
+Gatekeeper prompt.
 Update later with `sheprd update`.
 The server keeps running stock herdr; use the matching herdr version on each machine.
 

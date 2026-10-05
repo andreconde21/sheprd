@@ -31,11 +31,19 @@ fn hub_name() -> String {
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
         .and_then(|table| table.get("name")?.as_str().map(str::to_owned));
+    // /etc/hostname is Linux-only; `hostname` covers macOS.
     configured
         .or_else(|| {
             std::fs::read_to_string("/etc/hostname")
                 .ok()
                 .map(|name| name.trim().to_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "hub".to_owned())
