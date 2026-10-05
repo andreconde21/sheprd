@@ -1355,7 +1355,7 @@ impl ClientShellState {
             self.show_peek(text);
             outcome.repaint = true;
         }
-        if self.endpoints.len() > 1 && projects::status_due() {
+        if projects::status_due() {
             projects::write_status(&super::sheprd_sidebar::status_json(
                 &self.endpoints,
                 &self.active_endpoint_id,
