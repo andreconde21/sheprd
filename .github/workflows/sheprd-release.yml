@@ -85,7 +85,7 @@ jobs:
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
           file ${{ matrix.name }}
           if [ "$RUNNER_OS" = Linux ]; then
-            file ${{ matrix.name }} | grep -q "statically linked"
+            file ${{ matrix.name }} | grep -qE "statically linked|static-pie linked"
           fi
           python3 -c "import hashlib, pathlib; p = pathlib.Path('${{ matrix.name }}'); print(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}')" > ${{ matrix.name }}.sha256
           cat ${{ matrix.name }}.sha256
