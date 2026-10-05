@@ -87,11 +87,16 @@ project to choose your own.
   not looked at yet, or marked unread, in sidebar order. The `● 2` counter in
   the header shows how many there are; clicking it does the same.
 - **Click a desktop notification** to raise the terminal and land on that agent.
-- Right-click an agent → **Mark unread** (a yellow `●` status that counts as
-  needing you until you visit it) or **Mark inactive** (drops a finished or
-  blocked agent out of the queue until its state changes again).
-- **Keep active** (right-click an agent): pins it to the active view (⚑) until
-  you unpin it, for the thing you're still working on.
+- Two separate controls per agent (right-click it):
+  - **status**: **Mark unread** (a yellow `●` that counts as needing you until
+    you visit it) or **Mark read** (clears a finished or blocked agent from the
+    queue until its state changes again);
+  - **the active view**: **Remove from active** (only under *all agents* until
+    the agent does something new), **Keep active** (pinned there, ⚑) or
+    **Stop keeping active**.
+- **Hiding** is separate and per workspace. When something is hidden the header
+  shows **N hidden**; click it (or `prefix+alt+h`) to show them, then
+  right-click → **Unhide workspace**.
 - **Jump numbers only when you want them**: `prefix+#` shows a number on every
   row; type it and sheprd jumps as soon as the number is unambiguous.
 
