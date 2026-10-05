@@ -187,24 +187,24 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
                     Action::AgentTasks,
                 ));
             }
+            // Status and active-view membership are separate controls; hiding is per workspace.
             let layout = projects::layout();
-            let lingering = presence == projects::Presence::Idle
-                && !layout.is_dismissed(unread_key, *seq)
-                && projects::idle_secs(unread_key).is_some_and(|secs| secs < layout.recent_secs());
-            if presence.needs_attention() || lingering {
+            if presence.needs_attention() {
                 items.push(item("Mark read", Action::AgentMarkInactive));
-            }
-            if presence != projects::Presence::Unread {
+            } else {
                 items.push(item("Mark unread", Action::AgentMarkUnread));
             }
-            items.push(item(
-                if projects::layout().is_kept(unread_key) {
-                    "Stop keeping active"
-                } else {
-                    "Keep active"
-                },
-                Action::AgentToggleKeep,
-            ));
+            let in_active = presence.is_active()
+                || (!layout.is_idled(unread_key, *seq)
+                    && projects::idle_secs(unread_key)
+                        .is_some_and(|secs| secs < layout.recent_secs()));
+            items.push(if layout.is_kept(unread_key) {
+                item("Stop keeping active", Action::AgentToggleKeep)
+            } else if in_active {
+                item("Remove from active", Action::AgentRemoveFromActive)
+            } else {
+                item("Keep active", Action::AgentKeepActive)
+            });
             if *active {
                 items.push(item("Rename pane…", Action::AgentRename));
             }
@@ -569,7 +569,9 @@ impl ClientShellState {
             self.focus_next_attention_agent(outcome);
             return true;
         }
-        if super::contains(self.hits.sheprd_view_toggle, point) {
+        if super::contains(self.hits.sheprd_hidden_toggle, point) {
+            self.toggle_show_hidden_workspaces();
+        } else if super::contains(self.hits.sheprd_view_toggle, point) {
             projects::update(|layout| layout.compact = !layout.compact);
         } else if super::contains(self.hits.sheprd_filter_toggle, point) {
             projects::update(|layout| layout.active_only = !layout.active_only);
@@ -849,6 +851,12 @@ impl ClientShellState {
                 }
                 Action::AgentMarkInactive => {
                     projects::update(|layout| layout.mark(&unread_key, seq, false))
+                }
+                Action::AgentRemoveFromActive => {
+                    projects::update(|layout| layout.remove_from_active(&unread_key, seq))
+                }
+                Action::AgentKeepActive => {
+                    projects::update(|layout| layout.keep_active(&unread_key))
                 }
                 Action::AgentRename => {
                     let label = self

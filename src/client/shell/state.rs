@@ -91,6 +91,8 @@ pub(super) struct ShellHitMap {
     pub(super) sheprd_view_toggle: Rect,
     pub(super) sheprd_filter_toggle: Rect,
     pub(super) sheprd_attention: Rect,
+    /// "N hidden" in the sidebar header: shows or conceals hidden workspaces.
+    pub(super) sheprd_hidden_toggle: Rect,
     /// Collapsed rail rows (rect, project key).
     pub(super) sheprd_rail: Vec<(Rect, String)>,
     /// To-do progress bars on agent rows (rect, agent key): click expands.
@@ -577,6 +579,8 @@ pub(super) enum ClientContextMenuAction {
     AgentMarkUnread,
     AgentMarkInactive,
     AgentToggleKeep,
+    AgentRemoveFromActive,
+    AgentKeepActive,
     AgentPeek,
     AgentTimeline,
     AgentTasks,

@@ -86,6 +86,8 @@ pub(super) fn view_json(
                     "unread": layout.is_unread(&key),
                     "dismissed": layout.is_dismissed(&key, seq),
                     "kept": layout.is_kept(&key),
+                    // Extra v1 key (readers ignore unknown keys): taken out of the active view.
+                    "removed": layout.is_idled(&key, seq),
                 }),
             );
         }
