@@ -1328,6 +1328,7 @@ impl ClientShellState {
         if self.endpoints.len() > 1 {
             crate::sheprd_msg::ensure_relay();
         }
+        super::view_sync::tick(&self.endpoints, &self.active_endpoint_id);
         outcome.actions.extend(self.tick_sheprd_launch());
         for (endpoint_id, pane_id) in projects::take_focus_requests() {
             self.focus_or_activate(
