@@ -111,6 +111,10 @@ pub(super) struct ProjectLayout {
     /// mark lapses as soon as the agent changes state again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) dismissed: Vec<String>,
+    /// Agents taken out of the active view by hand, as `machine/pane@state_change_seq`: they
+    /// show under "all agents" only, until the agent changes state again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) idled: Vec<String>,
     /// Agents pinned to the active view by hand (`machine/pane`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) kept: Vec<String>,
@@ -125,6 +129,9 @@ pub(super) struct ProjectLayout {
     pub(super) ungrouped: Vec<String>,
     #[serde(default, rename = "group", skip_serializing_if = "Vec::is_empty")]
     pub(super) groups: Vec<ProjectGroup>,
+    /// Share this view with apps that mirror sheprd (~/.local/state/sheprd/view.json).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) share_view: bool,
 }
 
 struct Store {
@@ -596,6 +603,32 @@ impl ProjectLayout {
 }
 
 impl ProjectLayout {
+    /// Taken out of the active view since the agent's last state change.
+    pub(super) fn is_idled(&self, key: &str, seq: u64) -> bool {
+        let entry = Self::dismissed_key(key, seq);
+        self.idled.iter().any(|idled| *idled == entry)
+    }
+
+    /// Takes an agent out of the active view until its next state change (and marks it read).
+    pub(super) fn remove_from_active(&mut self, key: &str, seq: u64) {
+        self.mark(key, seq, false);
+        self.kept.retain(|kept| kept != key);
+        let prefix = format!("{key}@");
+        self.idled.retain(|entry| !entry.starts_with(&prefix));
+        self.idled.push(Self::dismissed_key(key, seq));
+        let excess = self.idled.len().saturating_sub(200);
+        self.idled.drain(..excess);
+    }
+
+    /// Puts an agent back in the active view: keeps it there, and drops a "removed" mark.
+    pub(super) fn keep_active(&mut self, key: &str) {
+        let prefix = format!("{key}@");
+        self.idled.retain(|entry| !entry.starts_with(&prefix));
+        if !self.is_kept(key) {
+            self.kept.push(key.to_owned());
+        }
+    }
+
     /// Marked read (or inactive) since the agent's last state change.
     pub(super) fn is_dismissed(&self, key: &str, seq: u64) -> bool {
         let entry = Self::dismissed_key(key, seq);
@@ -1683,5 +1716,30 @@ mod reader_tests {
         assert!(body.contains("-   nested"));
         assert!(body.contains("│ quoted"));
         assert!(!body.contains("badges"));
+    }
+}
+
+#[cfg(test)]
+mod active_membership_tests {
+    use super::ProjectLayout;
+
+    #[test]
+    fn remove_from_active_lapses_at_the_next_state_change_and_keep_undoes_it() {
+        let mut layout = ProjectLayout::default();
+        layout.kept.push("dev/w1:p1".into());
+        layout.remove_from_active("dev/w1:p1", 7);
+        assert!(layout.is_idled("dev/w1:p1", 7));
+        assert!(
+            layout.is_dismissed("dev/w1:p1", 7),
+            "removing also marks it read"
+        );
+        assert!(!layout.is_kept("dev/w1:p1"), "removing drops a keep");
+        assert!(
+            !layout.is_idled("dev/w1:p1", 8),
+            "a new state brings it back"
+        );
+        layout.keep_active("dev/w1:p1");
+        assert!(!layout.is_idled("dev/w1:p1", 7));
+        assert!(layout.is_kept("dev/w1:p1"));
     }
 }

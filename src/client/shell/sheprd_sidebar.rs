@@ -206,9 +206,10 @@ fn build_rows(
         let idle = (presence == Presence::Idle)
             .then(|| projects::idle_secs(&key))
             .flatten();
-        // Marking an agent read takes it out of the active view until its next state change.
+        // "Remove from active" keeps a recently idle agent out of the active view until its
+        // next state change; "Mark read" only clears its status.
         let recent = idle.is_some_and(|secs| secs < layout.recent_secs())
-            && !layout.is_dismissed(&key, row.agent.state_change_seq);
+            && !layout.is_idled(&key, row.agent.state_change_seq);
         agents
             .entry((row.endpoint.endpoint_index, row.agent.workspace_id.clone()))
             .or_default()
@@ -315,9 +316,10 @@ fn build_rows(
             let focused_here = workspace.focused && &endpoint.endpoint_id == active_endpoint_id;
             let new_workspace = projects::workspace_age_secs(endpoint, &workspace.workspace_id)
                 .is_some_and(|secs| secs < layout.recent_secs());
+            // A new workspace shows before its first agent starts; once it has agents, they decide.
             let current = presence.is_active()
                 || focused_here
-                || new_workspace
+                || (new_workspace && workspace_agents.is_empty())
                 || workspace_agents.iter().any(|agent| agent.current);
             if layout.active_only && !current {
                 continue;
@@ -442,6 +444,43 @@ pub(super) fn ordered_workspaces(
         .collect()
 }
 
+/// Workspace keys in display order with hidden ones included, for the shared view.
+pub(super) fn ordered_workspace_keys(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Vec<String> {
+    let mut layout = projects::layout();
+    layout.compact = true;
+    layout.other_collapsed = false;
+    layout.active_only = false;
+    layout.show_hidden = true;
+    layout.filter = None;
+    for group in &mut layout.groups {
+        group.collapsed = false;
+    }
+    build_rows(endpoints, active_endpoint_id, &layout)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Workspace {
+                endpoint,
+                workspace_id,
+                stale: false,
+                ..
+            } => {
+                let endpoint = &endpoints[endpoint];
+                let workspace = endpoint
+                    .snapshot
+                    .as_deref()?
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)?;
+                Some(projects::workspace_key(endpoint, workspace))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn render(
     buffer: &mut Buffer,
     area: Rect,
@@ -538,6 +577,39 @@ pub(super) fn render_panel(
         "detailed "
     };
     let view_width = display_width(view);
+    // Hidden workspaces: a visible way back without knowing prefix+alt+h.
+    hits.sheprd_hidden_toggle = Rect::default();
+    if !layout.hidden.is_empty() {
+        let label = if layout.show_hidden {
+            format!("showing {} hidden ", layout.hidden.len())
+        } else {
+            format!("{} hidden ", layout.hidden.len())
+        };
+        let left = inner.x
+            + display_width(filter)
+            + if needing > 0 {
+                display_width(&format!(" ● {needing}"))
+            } else {
+                0
+            };
+        let width = display_width(&label);
+        let x = inner.right().saturating_sub(view_width + width + 1);
+        if x > left {
+            hits.sheprd_hidden_toggle = Rect::new(x, inner.y, width, 1);
+            put_text(
+                buffer,
+                x,
+                inner.y,
+                width,
+                &label,
+                Style::default().fg(if layout.show_hidden {
+                    palette.accent
+                } else {
+                    palette.overlay0
+                }),
+            );
+        }
+    }
     hits.sheprd_view_toggle = Rect::new(
         inner.right().saturating_sub(view_width),
         inner.y,

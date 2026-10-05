@@ -87,11 +87,16 @@ project to choose your own.
   not looked at yet, or marked unread, in sidebar order. The `● 2` counter in
   the header shows how many there are; clicking it does the same.
 - **Click a desktop notification** to raise the terminal and land on that agent.
-- Right-click an agent → **Mark unread** (a yellow `●` status that counts as
-  needing you until you visit it) or **Mark inactive** (drops a finished or
-  blocked agent out of the queue until its state changes again).
-- **Keep active** (right-click an agent): pins it to the active view (⚑) until
-  you unpin it, for the thing you're still working on.
+- Two separate controls per agent (right-click it):
+  - **status**: **Mark unread** (a yellow `●` that counts as needing you until
+    you visit it) or **Mark read** (clears a finished or blocked agent from the
+    queue until its state changes again);
+  - **the active view**: **Remove from active** (only under *all agents* until
+    the agent does something new), **Keep active** (pinned there, ⚑) or
+    **Stop keeping active**.
+- **Hiding** is separate and per workspace. When something is hidden the header
+  shows **N hidden**; click it (or `prefix+alt+h`) to show them, then
+  right-click → **Unhide workspace**.
 - **Jump numbers only when you want them**: `prefix+#` shows a number on every
   row; type it and sheprd jumps as soon as the number is unambiguous.
 
@@ -151,6 +156,18 @@ command = "cat ~/notes/tasks/{id}.md"
   markdown is rendered, wheel / arrows / PgUp-PgDn scroll, esc closes.
 - The hook uses the same patterns (and `ids_from`) to list what an agent
   mentioned.
+
+### Sharing the sidebar with other apps
+Apps that mirror sheprd (Conductore Mobile, for one) can show your projects and
+which agents need you, and mark agents read or unread from there. It's off until
+you add `share_view = true` to `sidebar.toml`. Then sheprd:
+- writes `~/.local/state/sheprd/view.json` (layout, each agent's presence and
+  marks, order, focus) when it changes and every 30 s;
+- copies it to every saved machine over the relay's SSH connection;
+- applies marks those apps queue in `view-updates.jsonl` on any machine.
+
+The file format is a small versioned contract (v1); see `docs/sheprd-view-sync.md`
+in conductore-mobile.
 
 ### Token format (for other agent integrations)
 Any integration can feed the sidebar by reporting herdr pane metadata tokens
