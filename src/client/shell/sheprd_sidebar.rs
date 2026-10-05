@@ -442,6 +442,43 @@ pub(super) fn ordered_workspaces(
         .collect()
 }
 
+/// Workspace keys in display order with hidden ones included, for the shared view.
+pub(super) fn ordered_workspace_keys(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Vec<String> {
+    let mut layout = projects::layout();
+    layout.compact = true;
+    layout.other_collapsed = false;
+    layout.active_only = false;
+    layout.show_hidden = true;
+    layout.filter = None;
+    for group in &mut layout.groups {
+        group.collapsed = false;
+    }
+    build_rows(endpoints, active_endpoint_id, &layout)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Workspace {
+                endpoint,
+                workspace_id,
+                stale: false,
+                ..
+            } => {
+                let endpoint = &endpoints[endpoint];
+                let workspace = endpoint
+                    .snapshot
+                    .as_deref()?
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)?;
+                Some(projects::workspace_key(endpoint, workspace))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn render(
     buffer: &mut Buffer,
     area: Rect,

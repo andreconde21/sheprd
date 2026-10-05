@@ -152,6 +152,18 @@ command = "cat ~/notes/tasks/{id}.md"
 - The hook uses the same patterns (and `ids_from`) to list what an agent
   mentioned.
 
+### Sharing the sidebar with other apps
+Apps that mirror sheprd (Conductore Mobile, for one) can show your projects and
+which agents need you, and mark agents read or unread from there. It's off until
+you add `share_view = true` to `sidebar.toml`. Then sheprd:
+- writes `~/.local/state/sheprd/view.json` (layout, each agent's presence and
+  marks, order, focus) when it changes and every 30 s;
+- copies it to every saved machine over the relay's SSH connection;
+- applies marks those apps queue in `view-updates.jsonl` on any machine.
+
+The file format is a small versioned contract (v1); see `docs/sheprd-view-sync.md`
+in conductore-mobile.
+
 ### Token format (for other agent integrations)
 Any integration can feed the sidebar by reporting herdr pane metadata tokens
 (`herdr pane report-metadata <pane> --source sheprd --token name=value`; values

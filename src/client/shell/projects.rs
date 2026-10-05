@@ -125,6 +125,9 @@ pub(super) struct ProjectLayout {
     pub(super) ungrouped: Vec<String>,
     #[serde(default, rename = "group", skip_serializing_if = "Vec::is_empty")]
     pub(super) groups: Vec<ProjectGroup>,
+    /// Share this view with apps that mirror sheprd (~/.local/state/sheprd/view.json).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) share_view: bool,
 }
 
 struct Store {

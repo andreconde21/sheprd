@@ -34,9 +34,11 @@ mod render;
 mod scroll;
 mod settings;
 mod sheprd_sidebar;
+// andreconde fork (sheprd): shared sidebar view for apps that mirror sheprd.
 mod state;
 mod surface_patch;
 mod text_editor;
+mod view_sync;
 mod word_selection;
 mod worktrees;
 use text_editor::TextEditor;

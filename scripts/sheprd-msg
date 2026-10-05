@@ -296,19 +296,78 @@ def cmd_whoami(_args):
 
 # Runs on the remote machine over the relay's SSH connection: stores the hub's agent list sent on
 # stdin, and hands back queued messages on stdout. flock keeps a sender's append from being lost.
+# Runs on the remote machine over the relay's SSH connection. Lines in (from the hub):
+#   {"kind":"peers", ...}  the hub's agent list, for `sheprd-msg list` there
+#   {"kind":"view", "view": {...}}  sheprd's shared view, written to ~/.local/state/sheprd/view.json
+# Lines out (to the hub):
+#   {"kind":"msg", ...}  a queued sheprd-msg message (flock keeps an append from being lost)
+#   {"kind":"view-update", "line": "..."}  a write-back line from apps that mirror sheprd,
+#   drained under the O_EXCL lock file of the view-sync contract v1
 REMOTE = r"""
-import fcntl, json, os, select, sys
+import fcntl, json, os, select, sys, time
 d = os.path.expanduser('~/.local/state/sheprd-msg'); os.makedirs(d + '/peers', exist_ok=True)
+v = os.path.expanduser('~/.local/state/sheprd')
 outbox, hub = d + '/outbox.jsonl', sys.argv[1]
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + '\n')
+
+def take_lock():
+    lock = v + '/view-updates.lock'
+    for _ in range(20):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, str(os.getpid()).encode()); os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > 10:
+                    os.unlink(lock); continue
+            except OSError:
+                pass
+            time.sleep(0.1)
+    return None
+
+def drain_view_updates():
+    path = v + '/view-updates.jsonl'
+    try:
+        if os.path.getsize(path) == 0:
+            return
+    except OSError:
+        return
+    lock = take_lock()
+    if not lock:
+        return
+    try:
+        with open(path, 'r+') as f:
+            data = f.read(); f.truncate(0)
+    except OSError:
+        data = ''
+    finally:
+        os.unlink(lock)
+    for line in data.splitlines():
+        if line.strip():
+            emit({'kind': 'view-update', 'line': line})
+
 while True:
     ready, _, _ = select.select([sys.stdin], [], [], 1.0)
     if ready:
         line = sys.stdin.readline()
         if not line:
             break
-        tmp = d + '/peers/.' + hub
-        open(tmp, 'w').write(line)
-        os.replace(tmp, d + '/peers/' + hub + '.json')
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            msg = {}
+        if msg.get('kind') == 'view':
+            os.makedirs(v, mode=0o700, exist_ok=True)
+            tmp = v + '/.view.json.tmp'
+            open(tmp, 'w').write(json.dumps(msg.get('view')))
+            os.replace(tmp, v + '/view.json')
+        elif msg.get('kind') == 'peers':
+            tmp = d + '/peers/.' + hub
+            open(tmp, 'w').write(json.dumps(msg))
+            os.replace(tmp, d + '/peers/' + hub + '.json')
     try:
         with open(outbox, 'a+') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
@@ -318,9 +377,14 @@ while True:
                 f.truncate(0)
     except OSError:
         data = ''
-    if data:
-        sys.stdout.write(data)
-        sys.stdout.flush()
+    for line in data.splitlines():
+        if line.strip():
+            try:
+                emit(dict(json.loads(line), kind='msg'))
+            except ValueError:
+                pass
+    drain_view_updates()
+    sys.stdout.flush()
 """
 
 
@@ -352,6 +416,51 @@ def deliver(machine, message):
                 pass
 
 
+VIEW_DIR = os.path.expanduser("~/.local/state/sheprd")
+
+
+def shared_view():
+    """The hub's view.json (contract v1), or None when sheprd doesn't share one."""
+    try:
+        with open(os.path.join(VIEW_DIR, "view.json")) as handle:
+            view = json.load(handle)
+        return view if view.get("version") == 1 else None
+    except (OSError, ValueError):
+        return None
+
+
+def append_view_update(line):
+    """Queues a write-back line from another machine into the hub's view-updates.jsonl, for the
+    sheprd client to apply. Same O_EXCL lock as the contract's writers."""
+    if not line or len(line) > 1024:
+        return
+    os.makedirs(VIEW_DIR, mode=0o700, exist_ok=True)
+    lock = os.path.join(VIEW_DIR, "view-updates.lock")
+    for _ in range(20):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > 10:
+                    os.unlink(lock)
+                    continue
+            except OSError:
+                pass
+            time.sleep(0.1)
+    else:
+        log("view update dropped: lock busy")
+        return
+    try:
+        fd = os.open(os.path.join(VIEW_DIR, "view-updates.jsonl"), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.write(fd, (line.rstrip("\n") + "\n").encode())
+        os.close(fd)
+    finally:
+        os.unlink(lock)
+
+
 def relay_one(label, host):
     me = my_name()
     while True:
@@ -361,15 +470,26 @@ def relay_one(label, host):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         log(f"relay connected to {label} ({host})")
 
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
         def publish():
+            last_peers, last_view = 0.0, None
             while proc.poll() is None:
                 try:
-                    snap = {"machine": me, "at": time.time(), "agents": local_agents()}
-                    proc.stdin.write(json.dumps(snap) + "\n")
-                    proc.stdin.flush()
+                    if time.time() - last_peers >= SNAPSHOT_EVERY:
+                        send({"kind": "peers", "machine": me, "at": time.time(), "agents": local_agents()})
+                        last_peers = time.time()
+                    # sheprd's shared view (written by the client when share_view is on), re-keyed so
+                    # "self" names that machine as this hub sees it.
+                    view = shared_view()
+                    if view is not None and view.get("updated") != last_view:
+                        send({"kind": "view", "view": dict(view, self=label)})
+                        last_view = view.get("updated")
                 except (BridgeError, OSError, subprocess.TimeoutExpired, ValueError):
                     pass
-                time.sleep(SNAPSHOT_EVERY)
+                time.sleep(2)
 
         threading.Thread(target=publish, daemon=True).start()
         for line in proc.stdout:
@@ -377,9 +497,14 @@ def relay_one(label, host):
             if not line:
                 continue
             try:
-                deliver(label, json.loads(line))
+                message = json.loads(line)
             except ValueError:
-                log(f"bad outbox line from {label}: {line[:200]}")
+                log(f"bad line from {label}: {line[:200]}")
+                continue
+            if message.get("kind") == "view-update":
+                append_view_update(message.get("line", ""))
+            else:
+                deliver(label, message)
         proc.wait()
         log(f"relay to {label} closed (exit {proc.returncode}); retrying in 10s")
         time.sleep(10)
