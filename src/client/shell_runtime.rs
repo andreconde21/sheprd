@@ -148,6 +148,70 @@ pub(super) fn apply_client_shell_input_source_changes(
     }
 }
 
+/// andreconde fork (sheprd): when a same-machine workspace switch was requested, for timing logs
+/// (SHE-100003); cleared by the next full pane surface.
+pub(super) fn focus_switch_started() -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
+    static STARTED: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    STARTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// andreconde fork (sheprd): the last screen of recently left workspaces (SHE-100003), newest last.
+fn kept_screens() -> std::sync::MutexGuard<'static, Vec<(String, crate::protocol::FrameData)>> {
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<Vec<(String, crate::protocol::FrameData)>>> =
+        std::sync::OnceLock::new();
+    KEPT.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+const KEPT_SCREENS: usize = 24;
+
+/// Which workspace a switch leaves and which it heads to, as kept-screen keys.
+fn switch_keys(
+    state: &ClientState,
+    endpoint_id: &endpoint::ClientEndpointId,
+    target: Option<&shell::ClientEndpointFocusTarget>,
+) -> (Option<String>, Option<String>) {
+    let Some(shell) = state.shell.as_ref() else {
+        return (None, None);
+    };
+    (
+        shell.focused_workspace_key(),
+        target.and_then(|target| shell.target_workspace_key(endpoint_id, target)),
+    )
+}
+
+/// andreconde fork (sheprd): keeps the screen of the workspace being left and, when the target
+/// workspace's last screen is kept at the current size, shows it right away; the live screen
+/// replaces it when the server answers. Switching to another machine takes several round trips
+/// (~0.6 s at 64 ms), so without this the old screen stays frozen until then.
+fn keep_and_preview(state: &mut ClientState, (source, target): (Option<String>, Option<String>)) {
+    if source == target {
+        return;
+    }
+    let mut kept = kept_screens();
+    if let (Some(source), Some(frame)) = (source, state.blit_encoder.last_frame()) {
+        kept.retain(|(key, _)| *key != source);
+        kept.push((source, frame.clone()));
+        let excess = kept.len().saturating_sub(KEPT_SCREENS);
+        kept.drain(..excess);
+    }
+    let (cols, rows) = state.reported_size;
+    let preview = target.and_then(|target| {
+        kept.iter()
+            .find(|(key, frame)| *key == target && frame.width == cols && frame.height == rows)
+            .map(|(_, frame)| frame.clone())
+    });
+    drop(kept);
+    if let Some(frame) = preview {
+        state.present_frame(frame);
+    }
+}
+
 fn install_pending_activation(
     state: &mut ClientState,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
@@ -229,6 +293,7 @@ pub(super) fn begin_endpoint_activation(
         }
         return Ok(());
     }
+    let keys = switch_keys(state, &endpoint_id, target.as_ref());
     let replace_pending = endpoint_id.is_local()
         && pending
             .as_ref()
@@ -259,6 +324,10 @@ pub(super) fn begin_endpoint_activation(
             .connection(&endpoint_id)
             .is_some_and(|connection| connection.surface_active);
     if already_active {
+        if target.is_some() {
+            *focus_switch_started() = Some(std::time::Instant::now());
+            keep_and_preview(state, keys);
+        }
         if let (Some(shell), Some(target)) = (state.shell.as_mut(), target) {
             let actions = shell.focus_endpoint_target(target);
             let (_, repaint) = dispatch_client_shell_actions(
@@ -307,13 +376,16 @@ pub(super) fn begin_endpoint_activation(
         }
         activation.start(endpoints)
     }) {
-        Ok(activation) => install_pending_activation(
-            state,
-            endpoint_commands,
-            pending,
-            next_surface_serial,
-            activation,
-        ),
+        Ok(activation) => {
+            keep_and_preview(state, keys);
+            install_pending_activation(
+                state,
+                endpoint_commands,
+                pending,
+                next_surface_serial,
+                activation,
+            );
+        }
         Err(endpoint::ActivationBeginError::Preflight(error)) => {
             if let Some(shell) = state.shell.as_mut() {
                 shell.receive_endpoint_unavailable(format!(

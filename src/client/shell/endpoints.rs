@@ -39,6 +39,59 @@ pub(crate) enum ClientEndpointFocusTarget {
 }
 
 impl ClientShellState {
+    /// andreconde fork (sheprd): `endpoint/workspace_id` of the focused workspace on the active
+    /// endpoint, the key under which its last screen is kept for instant switches (SHE-100003).
+    pub(crate) fn focused_workspace_key(&self) -> Option<String> {
+        // A screen with a menu or prompt open is not what the workspace looks like.
+        if self.overlay.is_some() {
+            return None;
+        }
+        let endpoint = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)?;
+        let snapshot = endpoint.snapshot.as_deref()?;
+        let workspace = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.focused)?;
+        Some(format!(
+            "{}/{}",
+            endpoint.endpoint_id.storage_key(),
+            workspace.workspace_id
+        ))
+    }
+
+    /// andreconde fork (sheprd): the same key for the workspace a switch is heading to.
+    pub(crate) fn target_workspace_key(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        target: &ClientEndpointFocusTarget,
+    ) -> Option<String> {
+        let snapshot = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == *endpoint_id)?
+            .snapshot
+            .as_deref()?;
+        let workspace_id = match target {
+            ClientEndpointFocusTarget::Workspace(id) => id.clone(),
+            ClientEndpointFocusTarget::Tab(id) => snapshot
+                .tabs
+                .iter()
+                .find(|tab| tab.tab_id == *id)?
+                .workspace_id
+                .clone(),
+            ClientEndpointFocusTarget::Pane(id) => snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == *id)?
+                .workspace_id
+                .clone(),
+        };
+        Some(format!("{}/{}", endpoint_id.storage_key(), workspace_id))
+    }
+
     pub(crate) fn set_endpoint_catalog(&mut self, profiles: &[SavedSshEndpoint]) {
         let mut next = Vec::with_capacity(profiles.len().saturating_add(1));
         let local = self

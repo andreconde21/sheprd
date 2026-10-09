@@ -35,6 +35,18 @@ fn release_surface_best_effort(
 }
 
 impl PendingEndpointActivation {
+    /// andreconde fork (sheprd): the current step's name, for switch timing logs.
+    pub(crate) fn phase_name(&self) -> &'static str {
+        match self.phase {
+            ActivationPhase::ReleasingSource { .. } => "releasing source",
+            ActivationPhase::ActivatingTarget { .. } => "activating target",
+            ActivationPhase::ReleasingTargetForRollback { .. } => "releasing target (rollback)",
+            ActivationPhase::RestoringSource { .. } => "restoring source",
+            ActivationPhase::SynchronizingPresentation { .. } => "synchronizing presentation",
+            ActivationPhase::AwaitingPresentationEffects { .. } => "awaiting presentation effects",
+        }
+    }
+
     pub(crate) fn prepare(
         shell: &crate::client::shell::ClientShellState,
         endpoints: &EndpointRegistry,

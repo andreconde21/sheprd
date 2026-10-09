@@ -9,7 +9,9 @@ use crate::protocol::{ClientSurfaceSize, RenderEncoding};
 use interprocess::TryClone as _;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(120);
+// andreconde fork (sheprd): 10 s instead of 120 s, so a machine is back soon after the network
+// is (SHE-100003); a failed SSH attempt is cheap.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 const MAX_LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_PERIOD: Duration = Duration::from_secs(60);
 
@@ -239,6 +241,18 @@ impl EndpointSupervisors {
             }
         }
         true
+    }
+
+    /// andreconde fork (sheprd): try every machine that is not online right away, with the backoff
+    /// reset. Called when the laptop wakes from sleep: the network is usually back by then.
+    pub(crate) fn retry_now(&mut self, now: Instant) {
+        for state in self.endpoints.values_mut() {
+            if state.in_flight || state.online_since.is_some() || state.next_attempt.is_none() {
+                continue;
+            }
+            state.attempts = 0;
+            state.next_attempt = Some(now);
+        }
     }
 
     pub(crate) fn disconnected(
@@ -478,6 +492,27 @@ mod tests {
             supervisors.endpoints[&id].next_attempt,
             Some(failed + INITIAL_RETRY_DELAY)
         );
+    }
+
+    #[test]
+    fn retry_now_resets_waiting_machines_only() {
+        let now = Instant::now();
+        let mut supervisors = EndpointSupervisors::new(&[profile()], now);
+        let (_, state) = supervisors.endpoints.iter_mut().next().unwrap();
+        state.attempts = 7;
+        state.next_attempt = Some(now + MAX_RETRY_DELAY);
+        let later = now + Duration::from_secs(1);
+        supervisors.retry_now(later);
+        let (_, state) = supervisors.endpoints.iter().next().unwrap();
+        assert_eq!((state.attempts, state.next_attempt), (0, Some(later)));
+
+        // Online and disabled machines are left alone.
+        let (_, state) = supervisors.endpoints.iter_mut().next().unwrap();
+        state.online_since = Some(now);
+        state.next_attempt = None;
+        supervisors.retry_now(later);
+        let (_, state) = supervisors.endpoints.iter().next().unwrap();
+        assert_eq!(state.next_attempt, None);
     }
 
     #[test]
