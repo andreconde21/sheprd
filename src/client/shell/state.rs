@@ -99,6 +99,8 @@ pub(super) struct ShellHitMap {
     pub(super) sheprd_rail: Vec<(Rect, String)>,
     /// To-do progress bars on agent rows (rect, agent key): click expands.
     pub(super) sheprd_todo_toggle: Vec<(Rect, String)>,
+    /// "board" in the sidebar footer: opens the status board.
+    pub(super) sheprd_board: Rect,
     /// Work panel: card ids, stages and page links.
     pub(super) work_panel: Vec<(Rect, super::work_panel::WorkHit)>,
     pub(super) workspaces: Vec<WorkspaceHit>,
