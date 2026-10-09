@@ -75,6 +75,7 @@ pub(crate) enum KeybindAction {
     PeekDetails,
     NewWorkspaceOn,
     NextAttentionAgent,
+    ToggleWorkPanel,
     JumpAgent,
     ToggleHiddenWorkspaces,
 }
@@ -169,6 +170,7 @@ pub(crate) fn resolve_non_indexed_action(
             &keybinds.next_attention_agent,
             KeybindAction::NextAttentionAgent,
         ),
+        (&keybinds.toggle_work_panel, KeybindAction::ToggleWorkPanel),
         (&keybinds.jump_agent, KeybindAction::JumpAgent),
         (
             &keybinds.toggle_hidden_workspaces,

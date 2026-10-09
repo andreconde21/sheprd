@@ -69,6 +69,28 @@ project's most urgent agent. Peek (`prefix+space`) shows the full sidebar over
 the panes for a moment. Tags are derived from the name; set `short = "OP"` on a
 project to choose your own.
 
+`prefix+b` cycles the sidebar through full, the rail, and hidden (zero columns);
+the menu also has "mini sidebar" and "hide sidebar". While it is hidden, agents
+that need you show as ` ● 2 ` at the right end of the tab bar.
+
+### Work panel: each task's pipeline
+When an agent hands tasks to subagents (dev, adversarial review, a browser
+check…), `prefix+shift+b` opens a panel on the right with, for the focused agent,
+one entry per task, grouped by the reference id in the subagent's description:
+
+```
+CAL-1133 reference lists
+  dev ✓  adv ●  chr ·
+CAL-1120 orphan payslip
+  dev ✓  adv ✓  chr ✓ ↗
+```
+
+Click the id to read the card (your `[[refs]]` command), a stage to read its
+final report, `↗` to open the page a browser stage last visited. The same key
+switches to a mini column (one mark per task) and hides it. It reads the
+`sheprd_w_*` tokens of the Claude Code hook; run `sheprd setup` again after
+updating so the hook also runs when a subagent finishes.
+
 ### Projects across machines
 - **Drag** any row onto a project header to move its workspace there. Drop it on
   **Other** to take it out, or on another row to place it just above that row.
@@ -183,6 +205,8 @@ Any integration can feed the sidebar by reporting herdr pane metadata tokens
 | `sheprd_todo_1..12` | `✓ item` / `▸ item` (in progress) / `○ item` |
 | `sheprd_tl_1..10` | timeline, oldest first: `09:12 the prompt (+3 edits, 2 cmds)` |
 | `sheprd_refs` | references mentioned, comma-separated, newest first |
+| `sheprd_w_1..10` | work panel tasks: `id|label|stage:s,stage:s` (s: `r` running, `d` done, `s` stopped, `f` failed; id may be empty) |
+| `sheprd_wf` | path of a JSON details file on the agent's machine (`tasks[].stages[]` with `report`, `urls`) |
 
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
@@ -195,6 +219,8 @@ to show `● 3` in the bar; any other bar or script can too.
 |---|---|
 | `prefix+space` | peek: idle age, context, numbers, usage, latency |
 | `prefix+u` | next agent that needs you |
+| `prefix+b` | sidebar: full / rail / hidden |
+| `prefix+shift+b` | work panel: full / mini / hidden |
 | `prefix+#` | show jump numbers, type one to jump |
 | `prefix+alt+c` | new workspace on a machine you pick |
 | `prefix+/` | filter the sidebar |

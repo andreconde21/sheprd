@@ -57,6 +57,7 @@ impl ClientShellState {
                 .sidebar_collapsed_manual
                 .then_some(self.sidebar_collapsed),
             sidebar_hidden: self.sidebar_hidden,
+            work_panel: self.work_panel,
             agent_panel_sort: self
                 .agent_panel_sort_manual
                 .then_some(self.config.agent_panel_sort),
@@ -374,6 +375,7 @@ impl ClientShellConfig {
                 tab_bar: Rect::default(),
                 mobile_header: Rect::new(0, 0, cols, header_height),
                 pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                work_panel: Rect::default(),
             };
         }
 
@@ -422,6 +424,7 @@ impl ClientShellConfig {
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
+            work_panel: Rect::default(),
         }
     }
 

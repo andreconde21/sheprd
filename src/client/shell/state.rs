@@ -59,6 +59,8 @@ pub(super) struct ClientShellLayout {
     pub tab_bar: Rect,
     pub mobile_header: Rect,
     pub pane_surface: Rect,
+    /// andreconde fork (sheprd): the work panel on the right (SHE-100004); empty when hidden.
+    pub work_panel: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,8 @@ pub(super) struct ShellHitMap {
     pub(super) sheprd_rail: Vec<(Rect, String)>,
     /// To-do progress bars on agent rows (rect, agent key): click expands.
     pub(super) sheprd_todo_toggle: Vec<(Rect, String)>,
+    /// Work panel: card ids, stages and page links.
+    pub(super) work_panel: Vec<(Rect, super::work_panel::WorkHit)>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
@@ -973,6 +977,8 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_collapsed_manual: bool,
     /// andreconde fork (sheprd): full -> mini rail -> hidden (zero columns), SHE-100005.
     pub(super) sidebar_hidden: bool,
+    /// andreconde fork (sheprd): work panel state (work_panel::HIDDEN / MINI / FULL).
+    pub(super) work_panel: u8,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
@@ -1140,6 +1146,7 @@ impl ClientShellState {
             sidebar_collapsed,
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_hidden: preferences.sidebar_hidden,
+            work_panel: preferences.work_panel,
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,
@@ -1311,14 +1318,32 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
-        self.config.layout(
+        let mut layout = self.config.layout(
             cols,
             rows,
             self.sidebar_collapsed,
             self.sidebar_hidden,
             self.focused_tab_count(),
             self.sidebar_width,
-        )
+        );
+        // andreconde fork (sheprd): the work panel takes columns on the right of the panes, when
+        // they stay at least 40 columns wide (full falls back to mini first).
+        if layout.mobile_header.height == 0 && self.work_panel != super::work_panel::HIDDEN {
+            let wanted = if self.work_panel == super::work_panel::FULL {
+                super::work_panel::FULL_WIDTH
+            } else {
+                super::work_panel::MINI_WIDTH
+            };
+            let width = [wanted, super::work_panel::MINI_WIDTH]
+                .into_iter()
+                .find(|width| layout.pane_surface.width >= width + 40);
+            if let Some(width) = width {
+                layout.pane_surface.width -= width;
+                layout.tab_bar.width = layout.tab_bar.width.saturating_sub(width);
+                layout.work_panel = Rect::new(layout.pane_surface.right(), 0, width, rows);
+            }
+        }
+        layout
     }
 
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
