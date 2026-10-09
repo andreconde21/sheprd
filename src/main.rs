@@ -629,93 +629,98 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
-        println!("herdr — terminal workspace manager for AI coding agents");
+        println!("sheprd — terminal workspace manager for AI coding agents (built on herdr)");
         println!();
-        println!("Usage: herdr [options]");
-        println!("       herdr --session <name> [options]");
-        println!("       herdr --machine <label-or-id> <command>");
-        println!("       herdr --remote <ssh-target> [--session <name>]");
-        println!("       herdr session attach <name>");
-        println!("       herdr completion zsh");
-        println!("       herdr update [--handoff]");
-        println!("       herdr channel set <stable|preview>");
-        println!("       herdr machine <subcommand> ...");
-        println!("       herdr server stop");
-        println!("       herdr server reload-config");
-        println!("       herdr api <subcommand> ...");
-        println!("       herdr completion <shell>");
-        println!("       herdr config <subcommand> ...");
-        println!("       herdr channel <subcommand> ...");
-        println!("       herdr workspace <subcommand> ...");
-        println!("       herdr worktree <subcommand> ...");
-        println!("       herdr tab <subcommand> ...");
-        println!("       herdr notification <subcommand> ...");
-        println!("       herdr agent <subcommand> ...");
-        println!("       herdr pane <subcommand> ...");
-        println!("       herdr session <subcommand> ...");
-        println!("       herdr integration <subcommand> ...");
+        println!("Usage: sheprd [options]");
+        println!("       sheprd --session <name> [options]");
+        println!("       sheprd --machine <label-or-id> <command>");
+        println!("       sheprd --remote <ssh-target> [--session <name>]");
+        println!("       sheprd session attach <name>");
+        println!("       sheprd completion zsh");
+        println!("       sheprd update");
+        println!("       sheprd channel set <stable|preview>");
+        println!("       sheprd machine <subcommand> ...");
+        println!("       sheprd server stop");
+        println!("       sheprd server reload-config");
+        println!("       sheprd api <subcommand> ...");
+        println!("       sheprd completion <shell>");
+        println!("       sheprd config <subcommand> ...");
+        println!("       sheprd channel <subcommand> ...");
+        println!("       sheprd workspace <subcommand> ...");
+        println!("       sheprd worktree <subcommand> ...");
+        println!("       sheprd tab <subcommand> ...");
+        println!("       sheprd notification <subcommand> ...");
+        println!("       sheprd agent <subcommand> ...");
+        println!("       sheprd pane <subcommand> ...");
+        println!("       sheprd session <subcommand> ...");
+        println!("       sheprd integration <subcommand> ...");
+        println!("       sheprd msg <list|send|read|whoami|setup> ...");
+        println!("       sheprd setup");
         println!();
         println!("Common commands:");
         for (command, description) in [
-            ("herdr", "Launch or attach to the persistent session"),
+            ("sheprd", "Launch or attach to the persistent session"),
             (
-                "herdr status [server|client]",
+                "sheprd status [server|client]",
                 "Show local client and running server status",
             ),
-            ("herdr update", "Download and install the latest version"),
-            ("herdr completion zsh", "Generate shell completions for zsh"),
+            ("sheprd update", "Download and install the latest version"),
             (
-                "herdr server stop",
+                "sheprd completion zsh",
+                "Generate shell completions for zsh",
+            ),
+            (
+                "sheprd server stop",
                 "Stop the running server via the API socket",
             ),
             (
-                "herdr channel set <stable|preview>",
+                "sheprd channel set <stable|preview>",
                 "Choose the stable or preview update channel",
             ),
             (
-                "herdr server reload-config",
+                "sheprd server reload-config",
                 "Reload config.toml in the running server",
             ),
             (
-                "herdr config reset-keys",
+                "sheprd config reset-keys",
                 "Back up config.toml and remove custom keybindings",
             ),
             (
-                "herdr channel <subcommand>",
+                "sheprd channel <subcommand>",
                 "Manage the stable or preview update channel",
             ),
-            ("herdr machine <subcommand>", "Manage saved SSH machines"),
+            ("sheprd machine <subcommand>", "Manage saved SSH machines"),
             (
-                "herdr api <subcommand>",
+                "sheprd api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
             ),
             (
-                "herdr workspace <subcommand>",
+                "sheprd workspace <subcommand>",
                 "Workspace helpers over the socket API",
             ),
             (
-                "herdr worktree <subcommand>",
+                "sheprd worktree <subcommand>",
                 "Git worktree helpers over the socket API",
             ),
-            ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            ("sheprd tab <subcommand>", "Tab helpers over the socket API"),
             (
-                "herdr notification <subcommand>",
+                "sheprd notification <subcommand>",
                 "Notification helpers over the socket API",
             ),
             (
-                "herdr agent <subcommand>",
+                "sheprd agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
             ),
             (
-                "herdr pane <subcommand>",
+                "sheprd pane <subcommand>",
                 "Pane control helpers over the socket API",
             ),
             (
-                "herdr session <subcommand>",
+                "sheprd session <subcommand>",
                 "Manage named persistent sessions",
             ),
             (
-                "herdr integration <subcommand>",
+                "sheprd integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
         ] {
@@ -723,7 +728,7 @@ fn main() -> io::Result<()> {
         }
         println!();
         println!("Advanced commands:");
-        println!("  {:<32} Run as headless server", "herdr server");
+        println!("  {:<32} Run as headless server", "sheprd server");
         println!();
         println!("Options:");
         println!("  --session <name>    Use or create a named persistent session");
@@ -740,7 +745,7 @@ fn main() -> io::Result<()> {
         println!("Config: {}", config::config_path().display());
         println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
-        println!("Home:   https://herdr.dev");
+        println!("Home:   https://sheprd.outsmartis.dev (built on https://herdr.dev)");
         println!();
         println!("{}", cli::AGENT_HELP_FOOTER);
         return Ok(());
