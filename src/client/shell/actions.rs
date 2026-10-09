@@ -64,6 +64,18 @@ impl ClientShellState {
                 }
                 // andreconde fork: sidebar project keys.
                 match action {
+                    crate::input::KeybindAction::ToggleWorkPanel => {
+                        // hidden -> full -> mini -> hidden
+                        self.work_panel = match self.work_panel {
+                            super::work_panel::HIDDEN => super::work_panel::FULL,
+                            super::work_panel::FULL => super::work_panel::MINI,
+                            _ => super::work_panel::HIDDEN,
+                        };
+                        self.invalidate_pane_surface();
+                        outcome.repaint = true;
+                        outcome.resize = true;
+                        self.persist_chrome_preferences(outcome);
+                    }
                     crate::input::KeybindAction::NextAttentionAgent => {
                         self.focus_next_attention_agent(outcome);
                         return;

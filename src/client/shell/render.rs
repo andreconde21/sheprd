@@ -332,6 +332,16 @@ pub(super) fn render_shell(
             );
         }
     }
+    if layout.work_panel.width > 0 {
+        super::work_panel::render(
+            buffer,
+            layout.work_panel,
+            state.endpoints,
+            state.active_endpoint_id,
+            config,
+            &mut hits,
+        );
+    }
     if layout.tab_bar.height > 0 {
         render_tab_bar(
             buffer,

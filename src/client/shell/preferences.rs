@@ -25,12 +25,19 @@ pub(super) struct ClientChromePreferences {
     /// andreconde fork (sheprd): the sidebar's third state, zero columns (SHE-100005).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) sidebar_hidden: bool,
+    /// andreconde fork (sheprd): work panel 0 hidden, 1 mini, 2 full (SHE-100004).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) work_panel: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
+}
+
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {

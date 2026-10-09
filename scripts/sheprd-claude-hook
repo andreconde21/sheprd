@@ -13,6 +13,10 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
   sheprd_todo_1..12     "✓ subject" / "▸ subject" (in progress) / "○ subject"
   sheprd_tl_1..10       timeline: "09:12 fix the bar widget (+3 edits, 2 cmds)", oldest first
   sheprd_refs           references mentioned in the chat (patterns from sheprd-refs.toml), newest first
+  sheprd_w_1..10        work panel: one task each, "id|label|stage:s,stage:s" (s = r running, d done,
+                        s stopped without a final answer), from the subagents this session started;
+                        newest first; id is empty when the task names no reference
+  sheprd_wf             path of the details file for the work panel (reports, visited pages)
 
 Incremental: a per-session cache keeps the read offset and state, so a turn only
 costs the new lines. Never fails the agent: any error exits 0.
@@ -28,6 +32,10 @@ import sys
 from datetime import datetime, timedelta
 
 CACHE_DIR = os.path.expanduser("~/.cache/sheprd/claude-hook")
+WORK_DIR = os.path.expanduser("~/.cache/sheprd/work")
+MAX_WORK = 10
+WORK_SCAN = 80  # most recent subagents looked at per turn
+STAGE_ORDER = ["dev", "adversarial", "chrome"]  # pipeline order; other subagent types follow
 CONFIG = os.path.expanduser("~/.config/herdr/sheprd-refs.toml")
 KEEP_DAYS = 7
 MAX_TODOS = 12
@@ -212,6 +220,126 @@ def read_new_lines(cache, transcript, patterns):
             )
 
 
+def _last_entry(path):
+    """The last JSON line of a (possibly large) transcript, read from the end."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            lines = handle.read().splitlines()
+        for line in reversed(lines):
+            if line.strip():
+                return json.loads(line)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _final_text(entry):
+    message = (entry or {}).get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def _visited(path, cache):
+    """Pages a browser-driving subagent opened and files it saved (cached by size)."""
+    key = f"{path}:{os.path.getsize(path)}"
+    seen = cache.setdefault("visited", {})
+    if key in seen:
+        return seen[key]
+    urls, files = [], []
+    try:
+        with open(path) as handle:
+            for line in handle:
+                if '"tool_use"' not in line:
+                    continue
+                for c in (json.loads(line).get("message") or {}).get("content") or []:
+                    if not isinstance(c, dict) or c.get("type") != "tool_use":
+                        continue
+                    data = c.get("input") or {}
+                    url = data.get("url")
+                    if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in urls:
+                        urls.append(url)
+                    for field in ("filename", "filePath", "path"):
+                        value = data.get(field)
+                        if isinstance(value, str) and value.lower().endswith((".png", ".gif", ".jpg", ".webm", ".mp4")):
+                            files.append(value)
+    except (OSError, ValueError):
+        pass
+    for old in [k for k in seen if k.startswith(f"{path}:")]:
+        del seen[old]
+    seen[key] = {"urls": urls[-8:], "files": files[-8:]}
+    return seen[key]
+
+
+def work(transcript, session, patterns, cache):
+    """Tasks this session handed to subagents, grouped by reference id, with each stage's state."""
+    folder = os.path.join(os.path.splitext(transcript)[0], "subagents")
+    try:
+        metas = sorted(
+            (os.path.join(folder, name) for name in os.listdir(folder) if name.endswith(".meta.json")),
+            key=os.path.getmtime, reverse=True,
+        )[:WORK_SCAN]
+    except OSError:
+        return {}, None
+    tasks = {}
+    for meta_path in metas:
+        try:
+            with open(meta_path) as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        log = meta_path[: -len(".meta.json")] + ".jsonl"
+        if not os.path.exists(log):
+            continue
+        description = (meta.get("description") or "").strip()
+        stage = (meta.get("customAgentType") or "").strip()
+        if not stage:
+            stage = "general" if meta.get("agentType") == "general-purpose" else "agent"
+        last = _last_entry(log)
+        final = (last or {}).get("type") == "assistant" and ((last.get("message") or {}).get("stop_reason") == "end_turn")
+        text = _final_text(last) if final else ""
+        state = "d" if final else ("r" if os.path.getmtime(log) > datetime.now().timestamp() - 1800 else "s")
+        ids = [task for source in patterns for task in source.findall(description)]
+        key = ids[0] if ids else ""
+        label = description
+        for task in ids[:1]:
+            label = re.sub(rf"\b{re.escape(task)}\b[:\s-]*", "", label).strip() or description
+        entry = tasks.setdefault(key or description, {"key": key, "label": label, "stages": [], "at": os.path.getmtime(log)})
+        if any(s["type"] == stage for s in entry["stages"]):
+            continue  # newest run of this stage wins (metas are newest first)
+        detail = {
+            "type": stage, "state": state, "description": description,
+            "verdict": fit(next((l.strip(" #*") for l in text.splitlines() if l.strip()), ""), 120),
+            "report": text[:6000],
+        }
+        if any(word in stage.lower() for word in ("chrome", "browser")):
+            detail.update(_visited(log, cache))
+        entry["stages"].append(detail)
+    ordered = sorted(tasks.values(), key=lambda t: t["at"], reverse=True)[:MAX_WORK]
+    out = {}
+    for i, task in enumerate(ordered, 1):
+        task["stages"].sort(key=lambda s: STAGE_ORDER.index(s["type"]) if s["type"] in STAGE_ORDER else len(STAGE_ORDER))
+        stages = ",".join(f"{s['type'][:12]}:{s['state']}" for s in task["stages"][-4:])
+        head = f"{task['key']}|"
+        out[f"sheprd_w_{i}"] = head + fit(task["label"], max(4, MAX_VALUE - len(head) - len(stages) - 1)) + "|" + stages
+    if not ordered:
+        return {}, None
+    os.makedirs(WORK_DIR, exist_ok=True)
+    path = os.path.join(WORK_DIR, f"{session}.json")
+    with open(path + ".tmp", "w") as handle:
+        json.dump({"tasks": ordered}, handle)
+    os.replace(path + ".tmp", path)
+    short = path.replace(os.path.expanduser("~"), "~", 1)
+    out["sheprd_wf"] = short if len(short) <= MAX_VALUE else path[-MAX_VALUE:]
+    return out, path
+
+
 def tokens(cache):
     out = {"sheprd_ctx": str(cache["ctx"])}
     for day, t in sorted(cache["days"].items()):
@@ -265,6 +393,8 @@ def main():
 
     current = tokens(cache)
     current["sheprd_session"] = session
+    work_tokens, _ = work(transcript, session, task_patterns(), cache)
+    current.update(work_tokens)
     stale = [name for name in cache.get("sent", []) if name not in current]
     cache["sent"] = sorted(current)
 
@@ -302,7 +432,7 @@ def install():
     command = f"python3 {os.path.realpath(__file__)}"
     old = ("sheprd-claude-hook", "agent-insights", "sheprd-usage-hook")
     hooks = settings.setdefault("hooks", {})
-    for event in ("Stop", "PostToolUse"):
+    for event in ("Stop", "PostToolUse", "SubagentStop"):
         groups = []
         for group in hooks.get(event, []):
             group["hooks"] = [h for h in group.get("hooks", []) if not any(o in h.get("command", "") for o in old)]
@@ -310,8 +440,10 @@ def install():
                 groups.append(group)
         hooks[event] = groups
     hooks["Stop"].append({"hooks": [{"type": "command", "command": command}]})
-    hooks["PostToolUse"].append({"matcher": "TaskCreate|TaskUpdate|TodoWrite",
+    hooks["PostToolUse"].append({"matcher": "TaskCreate|TaskUpdate|TodoWrite|Agent|Task",
                                  "hooks": [{"type": "command", "command": command}]})
+    # The work panel: a subagent finished.
+    hooks["SubagentStop"].append({"hooks": [{"type": "command", "command": command}]})
     if os.path.exists(path):
         with open(path) as src, open(path + ".bak-sheprd", "w") as dst:
             dst.write(src.read())
