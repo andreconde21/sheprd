@@ -83,7 +83,7 @@ pub(super) fn items_for(target: &ClientContextMenuTarget) -> Vec<ClientContextMe
                     item("Zoom", Action::Zoom),
                     item(
                         if *right_click_passthrough {
-                            "Use Herdr right-click menu"
+                            "Use sheprd right-click menu"
                         } else {
                             "Send right-clicks to pane"
                         },

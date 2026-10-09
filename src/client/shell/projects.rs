@@ -215,8 +215,7 @@ pub(super) fn update(change: impl FnOnce(&mut ProjectLayout)) {
     }
     let path = path();
     if let Ok(content) = toml::to_string_pretty(&guard.layout) {
-        let header =
-            "# herdr (andreconde fork) sidebar projects. Hand-editable; see projects.rs.\n";
+        let header = "# sheprd sidebar projects. Hand-editable.\n";
         let tmp = path.with_extension("toml.tmp");
         if std::fs::write(&tmp, format!("{header}{content}")).is_ok()
             && std::fs::rename(&tmp, &path).is_ok()
