@@ -651,7 +651,38 @@ async fn run_client_loop(
     let mut client_timer = timer::ClientLoopTimer::new();
     #[cfg(windows)]
     let mut stdin_open = true;
+    // andreconde fork (sheprd): switch timing (SHE-100003): each machine-switch step and its total.
+    let mut switch_timing: Option<(std::time::Instant, std::time::Instant, &'static str)> = None;
     while !should_quit.load(Ordering::Acquire) {
+        let phase = pending_activation
+            .as_ref()
+            .map(endpoint::PendingEndpointActivation::phase_name);
+        match (&mut switch_timing, phase) {
+            (None, Some(phase)) => {
+                let now = std::time::Instant::now();
+                switch_timing = Some((now, now, phase));
+            }
+            (Some((started, step_started, step)), Some(phase)) if *step != phase => {
+                debug!(
+                    step = *step,
+                    step_ms = step_started.elapsed().as_millis() as u64,
+                    total_ms = started.elapsed().as_millis() as u64,
+                    "sheprd switch: step done"
+                );
+                *step_started = std::time::Instant::now();
+                *step = phase;
+            }
+            (Some((started, step_started, step)), None) => {
+                debug!(
+                    step = *step,
+                    step_ms = step_started.elapsed().as_millis() as u64,
+                    total_ms = started.elapsed().as_millis() as u64,
+                    "sheprd switch: finished"
+                );
+                switch_timing = None;
+            }
+            _ => {}
+        }
         if pending_activation.is_none() {
             if let Some(reload) = pending_catalog.take() {
                 match reload {
@@ -1471,6 +1502,12 @@ async fn run_client_loop(
                         }
                         if !endpoint_active {
                             continue;
+                        }
+                        if let Some(started) = shell_runtime::focus_switch_started().take() {
+                            debug!(
+                                total_ms = started.elapsed().as_millis() as u64,
+                                "sheprd switch: same machine, first surface"
+                            );
                         }
                         let composed = if let Some(shell) = &mut state.shell {
                             shell.set_pane_surface(surface);

@@ -133,6 +133,11 @@ impl BlitEncoder {
         self.last_frame = Some(frame);
     }
 
+    /// andreconde fork (sheprd): the frame on screen now, kept per workspace for instant switches.
+    pub(crate) fn last_frame(&self) -> Option<&FrameData> {
+        self.last_frame.as_ref()
+    }
+
     pub(crate) fn is_current(&self, frame: &FrameData) -> bool {
         self.last_frame.as_ref() == Some(frame)
     }
