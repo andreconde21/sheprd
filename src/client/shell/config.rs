@@ -56,6 +56,7 @@ impl ClientShellState {
             sidebar_collapsed: self
                 .sidebar_collapsed_manual
                 .then_some(self.sidebar_collapsed),
+            sidebar_hidden: self.sidebar_hidden,
             agent_panel_sort: self
                 .agent_panel_sort_manual
                 .then_some(self.config.agent_panel_sort),
@@ -362,6 +363,7 @@ impl ClientShellConfig {
         cols: u16,
         rows: u16,
         sidebar_collapsed: bool,
+        sidebar_hidden: bool,
         tab_count: usize,
         sidebar_width: u16,
     ) -> ClientShellLayout {
@@ -375,7 +377,9 @@ impl ClientShellConfig {
             };
         }
 
-        let sidebar_width = if sidebar_collapsed {
+        let sidebar_width = if sidebar_hidden {
+            0
+        } else if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
                 SidebarCollapsedModeConfig::Compact => 4,
                 SidebarCollapsedModeConfig::Hidden => 0,
@@ -435,7 +439,14 @@ impl ClientShellConfig {
             .unwrap_or(self.sidebar_width)
             .clamp(min_width, max_width);
         let surface = self
-            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width)
+            .layout(
+                cols,
+                rows,
+                sidebar_collapsed,
+                self.preferences.sidebar_hidden,
+                0,
+                sidebar_width,
+            )
             .pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),
