@@ -1712,6 +1712,12 @@ impl ClientShellState {
         self.pane_surface.is_some()
     }
 
+    /// andreconde fork (sheprd): checks typed-ahead predictions against the current surface; true
+    /// when the frame must be composed again (not patched) so predictions are drawn or erased.
+    pub(crate) fn confirm_echo(&mut self) -> bool {
+        super::predict::predictor().confirm(self.pane_surface.as_ref(), std::time::Instant::now())
+    }
+
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;

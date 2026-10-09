@@ -1530,6 +1530,7 @@ async fn run_client_loop(
                         }
                         let composed = if let Some(shell) = &mut state.shell {
                             shell.set_pane_surface(surface);
+                            shell.confirm_echo();
                             shell.compose(state.reported_size.0, state.reported_size.1)
                         } else {
                             None
@@ -1545,15 +1546,24 @@ async fn run_client_loop(
                     ServerMessage::PaneSurfacePatch(patch) => {
                         let patch_started = crate::render_prof::timer();
                         let apply_started = crate::render_prof::timer();
-                        let outcome = state
-                            .shell
-                            .as_mut()
-                            .map(|shell| shell.apply_pane_surface_patch(patch));
+                        let mut echo_redraw = false;
+                        let outcome = state.shell.as_mut().map(|shell| {
+                            let outcome = shell.apply_pane_surface_patch(patch);
+                            echo_redraw = shell.confirm_echo();
+                            outcome
+                        });
                         crate::render_prof::duration_since(
                             "client_surface_patch.apply",
                             apply_started,
                         );
                         let compose_fallback = match outcome {
+                            // andreconde fork (sheprd): predictions shown or just erased need
+                            // a composed frame, not the raw patch.
+                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(_))
+                                if echo_redraw =>
+                            {
+                                true
+                            }
                             Some(shell::ClientPaneSurfacePatchOutcome::Applied(Some(patch))) => {
                                 match state.present_surface_patch(patch) {
                                     Ok(presented) => !presented,
