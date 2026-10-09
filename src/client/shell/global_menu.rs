@@ -7,6 +7,8 @@ pub(super) enum ClientGlobalMenuAction {
     /// andreconde fork (sheprd): the sidebar's mini rail and hidden states (SHE-100005).
     SidebarMini,
     SidebarHide,
+    /// andreconde fork (sheprd): the status board (SHE-100000).
+    Board,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -25,7 +27,12 @@ pub(super) fn global_menu_item_has_badge(
 pub(super) fn global_menu_items(
     snapshot: &ClientShellSnapshot,
 ) -> Vec<(&'static str, ClientGlobalMenuAction)> {
-    let mut items = vec![
+    let mut items = Vec::new();
+    // andreconde fork (sheprd): the status board comes first.
+    if !cfg!(test) {
+        items.push(("board", ClientGlobalMenuAction::Board));
+    }
+    items.extend([
         (
             "settings",
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings),
@@ -38,7 +45,7 @@ pub(super) fn global_menu_items(
             "reload config",
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::ReloadConfig),
         ),
-    ];
+    ]);
     if snapshot.update_available.is_some() || snapshot.latest_release_notes_available {
         items.push((
             if snapshot.update_available.is_some() {
@@ -112,6 +119,7 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
+            ClientGlobalMenuAction::Board => self.open_board(),
             ClientGlobalMenuAction::SidebarMini | ClientGlobalMenuAction::SidebarHide => {
                 self.sidebar_collapsed = true;
                 self.sidebar_hidden = action == ClientGlobalMenuAction::SidebarHide;

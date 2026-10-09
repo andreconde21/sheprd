@@ -17,6 +17,13 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
                         s stopped without a final answer), from the subagents this session started;
                         newest first; id is empty when the task names no reference
   sheprd_wf             path of the details file for the work panel (reports, visited pages)
+  sheprd_q_1..3         open questions in the agent's last message, when it stopped (for the board)
+  sheprd_sum            one-line summary of where the work stands (opt-in model summary)
+  sheprd_sum_1..3       what got done recently, one line each (opt-in model summary)
+
+Model summaries are off unless ~/.config/herdr/sheprd-hook.toml says `summaries = true`. They
+run Claude Haiku through your Claude subscription (`claude -p --safe-mode`), in the background,
+when the agent stops or every 10 minutes while it works, and only when the transcript grew.
 
 Incremental: a per-session cache keeps the read offset and state, so a turn only
 costs the new lines. Never fails the agent: any error exits 0.
@@ -36,6 +43,16 @@ WORK_DIR = os.path.expanduser("~/.cache/sheprd/work")
 MAX_WORK = 10
 WORK_SCAN = 80  # most recent subagents looked at per turn
 STAGE_ORDER = ["dev", "adversarial", "chrome"]  # pipeline order; other subagent types follow
+HOOK_CONFIG = os.path.expanduser("~/.config/herdr/sheprd-hook.toml")
+SUMMARY_EVERY = 600  # seconds between summaries while the agent keeps working
+SUMMARY_MIN_GROWTH = 4000  # transcript bytes added before a new summary is worth it
+SUMMARY_PROMPT = """You summarise a coding agent's session for the person running many agents at once.
+Reply with ONE JSON object and nothing else:
+{"title": "...", "done": ["...", "..."], "questions": ["..."]}
+- title: where the work stands now, at most 10 words (the state of the work, not the step this minute).
+- done: up to 3 short lines, what got done recently, newest last.
+- questions: what the agent is waiting on the user for, as short questions; [] when nothing.
+Plain words, no markdown."""
 CONFIG = os.path.expanduser("~/.config/herdr/sheprd-refs.toml")
 KEEP_DAYS = 7
 MAX_TODOS = 12
@@ -340,6 +357,157 @@ def work(transcript, session, patterns, cache):
     return out, path
 
 
+def last_assistant_text(transcript):
+    """The text of the main agent's last message (read from the end of the transcript)."""
+    try:
+        with open(transcript, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 262144))
+            lines = handle.read().splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            text = _final_text(entry)
+            if text.strip():
+                return text
+    return ""
+
+
+def open_questions(text):
+    """Questions the agent asks the user in its last message: lines ending with '?'."""
+    found = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line).strip().strip("*_ ")
+        if line.endswith("?") and len(line) > 3 and line not in found:
+            found.append(fit(line))
+    return found[:3]
+
+
+def hook_config():
+    try:
+        import tomllib
+        with open(HOOK_CONFIG, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, ImportError, ValueError):
+        return {}
+
+
+def summary_path(session):
+    return os.path.join(CACHE_DIR, f"{session}.summary.json")
+
+
+def summary_tokens(session):
+    try:
+        with open(summary_path(session)) as handle:
+            return json.load(handle).get("tokens", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def maybe_summarize(cache, session, transcript, pane, event):
+    """Starts a background model summary when enabled and the session moved on enough."""
+    if not hook_config().get("summaries"):
+        return
+    size = os.path.getsize(transcript)
+    now = datetime.now().timestamp()
+    last = cache.get("summary", {"size": 0, "at": 0})
+    grew = size - last.get("size", 0) >= SUMMARY_MIN_GROWTH
+    due = event == "Stop" or now - last.get("at", 0) >= SUMMARY_EVERY
+    if not (grew and due):
+        return
+    cache["summary"] = {"size": size, "at": now}
+    env = {k: v for k, v in os.environ.items() if k != "HERDR_PANE_ID"}
+    env["SHEPRD_HOOK_SKIP"] = "1"
+    subprocess.Popen(
+        [sys.executable, os.path.realpath(__file__), "--summarize", session, transcript, pane],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, env=env,
+    )
+
+
+def digest(transcript, limit=12000):
+    """First prompt plus the newest messages, as short 'USER:' / 'AGENT:' lines."""
+    lines = []
+    try:
+        with open(transcript) as handle:
+            for raw in handle:
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if entry.get("isSidechain"):
+                    continue
+                kind = entry.get("type")
+                if kind == "user":
+                    text = user_prompt_text(entry)
+                    if text:
+                        lines.append("USER: " + text[:600])
+                elif kind == "assistant":
+                    text = _final_text(entry).strip()
+                    if text:
+                        lines.append("AGENT: " + text[:300].replace("\n", " "))
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    first, rest = lines[0], lines[1:]
+    kept, size = [], len(first)
+    for line in reversed(rest):
+        if size + len(line) > limit:
+            break
+        kept.append(line)
+        size += len(line)
+    skipped = len(rest) - len(kept)
+    return "\n".join([first] + ([f"... {skipped} earlier messages ..."] if skipped else []) + list(reversed(kept)))
+
+
+def summarize(session, transcript, pane):
+    """Background: ask Haiku for a summary and report it (sheprd_sum, sheprd_sum_1..3)."""
+    text = digest(transcript)
+    if not text:
+        return
+    claude = os.environ.get("SHEPRD_CLAUDE_BIN") or "claude"
+    result = subprocess.run(
+        [claude, "-p", "--safe-mode", "--no-session-persistence", "--tools", "", "--model", "haiku",
+         "--output-format", "text", "--append-system-prompt", SUMMARY_PROMPT],
+        input=text, capture_output=True, text=True, timeout=120, check=False,
+    )
+    match = re.search(r"\{.*\}", result.stdout or "", re.S)
+    if not match:
+        return
+    data = json.loads(match.group(0))
+    out = {}
+    if data.get("title"):
+        out["sheprd_sum"] = fit(str(data["title"]))
+    for i, line in enumerate([str(d) for d in data.get("done", [])][-3:], 1):
+        out[f"sheprd_sum_{i}"] = fit(line)
+    with open(summary_path(session) + ".tmp", "w") as handle:
+        json.dump({"tokens": out, "questions": [fit(str(q)) for q in data.get("questions", [])][:3]}, handle)
+    os.replace(summary_path(session) + ".tmp", summary_path(session))
+    report(pane, out, [])
+
+
+def report(pane, values, clear):
+    operations = [["--token", f"{name}={value}"] for name, value in sorted(values.items())]
+    operations += [["--clear-token", name] for name in clear]
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    debug = bool(os.environ.get("SHEPRD_HOOK_DEBUG"))
+    # herdr accepts at most 16 token updates per metadata report.
+    for start in range(0, len(operations), 16):
+        args = [arg for operation in operations[start:start + 16] for arg in operation]
+        result = subprocess.run(
+            [herdr, "pane", "report-metadata", pane, "--source", "sheprd", *args],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if debug:
+            print("herdr exit", result.returncode, result.stderr[-800:], file=sys.stderr)
+
+
 def tokens(cache):
     out = {"sheprd_ctx": str(cache["ctx"])}
     for day, t in sorted(cache["days"].items()):
@@ -370,6 +538,8 @@ def tokens(cache):
 
 
 def main():
+    if os.environ.get("SHEPRD_HOOK_SKIP"):
+        return
     hook = json.load(sys.stdin)
     pane = os.environ.get("HERDR_PANE_ID")
     transcript = hook.get("transcript_path")
@@ -395,6 +565,15 @@ def main():
     current["sheprd_session"] = session
     work_tokens, _ = work(transcript, session, task_patterns(), cache)
     current.update(work_tokens)
+    event = hook.get("hook_event_name", "")
+    if event == "Stop":
+        cache["questions"] = open_questions(last_assistant_text(transcript))
+    elif event == "PostToolUse":
+        cache["questions"] = []  # working again: not waiting on the user
+    for i, question in enumerate(cache.get("questions", []), 1):
+        current[f"sheprd_q_{i}"] = question
+    current.update(summary_tokens(session))
+    maybe_summarize(cache, session, transcript, pane, event)
     stale = [name for name in cache.get("sent", []) if name not in current]
     cache["sent"] = sorted(current)
 
@@ -403,22 +582,10 @@ def main():
         json.dump(cache, handle)
     os.replace(tmp, cache_path)
 
-    operations = [["--token", f"{name}={value}"] for name, value in sorted(current.items())]
-    operations += [["--clear-token", name] for name in stale]
     if os.environ.get("SHEPRD_HOOK_DRY"):
         print(json.dumps({"set": current, "clear": stale}, ensure_ascii=False, indent=1))
         return
-    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    debug = bool(os.environ.get("SHEPRD_HOOK_DEBUG"))
-    # herdr accepts at most 16 token updates per metadata report.
-    for start in range(0, len(operations), 16):
-        args = [arg for operation in operations[start:start + 16] for arg in operation]
-        result = subprocess.run(
-            [herdr, "pane", "report-metadata", pane, "--source", "sheprd", *args],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if debug:
-            print("herdr exit", result.returncode, result.stderr[-800:], file=sys.stderr)
+    report(pane, current, stale)
 
 
 def install():
@@ -456,6 +623,12 @@ def install():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--install"]:
         install()
+        sys.exit(0)
+    if sys.argv[1:2] == ["--summarize"] and len(sys.argv) == 5:
+        try:
+            summarize(*sys.argv[2:5])
+        except Exception:  # noqa: BLE001 - background, never visible
+            pass
         sys.exit(0)
     try:
         main()

@@ -732,7 +732,13 @@ pub(super) fn render_panel(
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
             .map_or("Local", |endpoint| endpoint.label.as_str());
+        // The machine name goes first when the footer is too narrow for it and "board".
         let label = format!(" new · {active_label}");
+        let label = if inner.width > display_width(&label) + 16 {
+            label
+        } else {
+            " new".to_owned()
+        };
         hits.new_workspace =
             Rect::new(inner.x, footer_y, display_width(&label).min(inner.width), 1);
         put_text(
@@ -744,6 +750,20 @@ pub(super) fn render_panel(
             Style::default().fg(palette.overlay0),
         );
         hits.global_launcher = Rect::new(inner.right().saturating_sub(8), footer_y, 6, 1);
+        // The status board (SHE-100000), left of the menu.
+        hits.sheprd_board = Rect::default();
+        if inner.width > display_width(&label) + 15 {
+            let x = inner.right().saturating_sub(14);
+            hits.sheprd_board = Rect::new(x, footer_y, 5, 1);
+            put_text(
+                buffer,
+                x,
+                footer_y,
+                5,
+                "board",
+                Style::default().fg(palette.accent),
+            );
+        }
         put_right_text(
             buffer,
             Rect::new(inner.x, footer_y, inner.width.saturating_sub(2), 1),
@@ -772,11 +792,11 @@ pub(super) fn render_panel(
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let used = display_width(&label) + 7;
+        let used = display_width(&label) + 15;
         if !machines.is_empty() && display_width(&machines) + used < inner.width {
             put_right_text(
                 buffer,
-                Rect::new(inner.x, footer_y, inner.width.saturating_sub(7), 1),
+                Rect::new(inner.x, footer_y, inner.width.saturating_sub(15), 1),
                 footer_y,
                 &machines,
                 Style::default().fg(palette.overlay0),

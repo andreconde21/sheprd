@@ -569,6 +569,11 @@ impl ClientShellState {
             self.focus_next_attention_agent(outcome);
             return true;
         }
+        if super::contains(self.hits.sheprd_board, point) {
+            self.open_board();
+            outcome.repaint = true;
+            return true;
+        }
         if super::contains(self.hits.sheprd_hidden_toggle, point) {
             self.toggle_show_hidden_workspaces();
         } else if super::contains(self.hits.sheprd_view_toggle, point) {
@@ -1206,6 +1211,12 @@ impl ClientShellState {
     }
 
     /// A reference body opens in the markdown reader (scrollable, esc closes).
+    /// The status board (SHE-100000) in the reader.
+    pub(super) fn open_board(&mut self) {
+        let doc = super::board::board_document(&self.endpoints, &projects::layout());
+        self.show_task_body("status board", Some(doc));
+    }
+
     fn show_task_body(&mut self, id: &str, text: Option<String>) {
         let (version, reader, body) = match text {
             Some(text) => {

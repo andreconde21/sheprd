@@ -191,6 +191,16 @@ you add `share_view = true` to `sidebar.toml`. Then sheprd:
 The file format is a small versioned contract (v1); see `docs/sheprd-view-sync.md`
 in conductore-mobile.
 
+### Status board
+`board` in the sidebar footer (or first in the menu) opens one page with every
+agent on every machine, grouped by project, those that need you first: its
+card, what it is on (to-do), its tasks' pipelines, and the questions in its last
+message that wait on you. With `summaries = true` in
+`~/.config/herdr/sheprd-hook.toml`, the Claude Code hook also asks Claude Haiku
+(through your Claude subscription, `claude -p --safe-mode`, in the background)
+for a one-line state of the work and what got done recently, when the agent
+stops or every 10 minutes while it works, only when the session moved on.
+
 ### Token format (for other agent integrations)
 Any integration can feed the sidebar by reporting herdr pane metadata tokens
 (`herdr pane report-metadata <pane> --source sheprd --token name=value`; values
@@ -207,6 +217,8 @@ Any integration can feed the sidebar by reporting herdr pane metadata tokens
 | `sheprd_refs` | references mentioned, comma-separated, newest first |
 | `sheprd_w_1..10` | work panel tasks: `id|label|stage:s,stage:s` (s: `r` running, `d` done, `s` stopped, `f` failed; id may be empty) |
 | `sheprd_wf` | path of a JSON details file on the agent's machine (`tasks[].stages[]` with `report`, `urls`) |
+| `sheprd_q_1..3` | questions in the agent's last message that wait on the user |
+| `sheprd_sum` / `sheprd_sum_1..3` | where the work stands / what got done recently (model summary) |
 
 ### Desktop status
 While it runs, sheprd keeps `~/.local/state/herdr/sheprd-status.json` up to date
