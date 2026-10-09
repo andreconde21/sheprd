@@ -396,6 +396,9 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        // andreconde fork (sheprd): typed-ahead characters not yet echoed by the remote pane.
+        super::predict::predictor()
+            .overlay(&mut frame, (layout.pane_surface.x, layout.pane_surface.y));
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         // andreconde fork (sheprd): peek while the sidebar is collapsed draws the
         // full sidebar over the panes for a moment (view only).
