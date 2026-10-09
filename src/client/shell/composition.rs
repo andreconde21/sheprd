@@ -94,7 +94,28 @@ impl ClientShellState {
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
         };
-        if let Some(snapshot) = local_snapshot {
+        // andreconde fork (sheprd): the sheprd sidebar while connecting too, so startup never
+        // flashes herdr's sidebar; unit tests keep the stock renderers they were written for.
+        if !cfg!(test) && layout.sidebar.width > 0 {
+            render_state.sidebar_collapsed = self.sidebar_collapsed;
+            if self.sidebar_collapsed {
+                super::sheprd_sidebar::render_collapsed(
+                    &mut buffer,
+                    sidebar,
+                    &self.config,
+                    &mut render_state,
+                    &mut self.hits,
+                );
+            } else {
+                super::sheprd_sidebar::render(
+                    &mut buffer,
+                    sidebar,
+                    &self.config,
+                    &mut render_state,
+                    &mut self.hits,
+                );
+            }
+        } else if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
                 &mut buffer,
                 sidebar,
