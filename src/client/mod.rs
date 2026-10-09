@@ -653,6 +653,7 @@ async fn run_client_loop(
     let mut stdin_open = true;
     // andreconde fork (sheprd): switch timing (SHE-100003): each machine-switch step and its total.
     let mut switch_timing: Option<(std::time::Instant, std::time::Instant, &'static str)> = None;
+    let mut resume_check: Option<(std::time::Instant, std::time::SystemTime)> = None;
     while !should_quit.load(Ordering::Acquire) {
         let phase = pending_activation
             .as_ref()
@@ -769,6 +770,24 @@ async fn run_client_loop(
                     if let Some(frame) = frame {
                         state.present_frozen_chrome(frame);
                     }
+                }
+            }
+        }
+        // andreconde fork (sheprd): after a sleep the wall clock jumps but the monotonic clock does
+        // not; retry every waiting machine at once instead of waiting out its backoff.
+        {
+            let (mono, wall) = (std::time::Instant::now(), std::time::SystemTime::now());
+            if let Some((last_mono, last_wall)) = resume_check.replace((mono, wall)) {
+                let slept = wall
+                    .duration_since(last_wall)
+                    .unwrap_or_default()
+                    .saturating_sub(mono.saturating_duration_since(last_mono));
+                if slept > std::time::Duration::from_secs(3) {
+                    info!(
+                        slept_s = slept.as_secs(),
+                        "woke from sleep; reconnecting machines now"
+                    );
+                    supervisors.retry_now(mono);
                 }
             }
         }
