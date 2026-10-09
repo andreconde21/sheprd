@@ -343,6 +343,35 @@ pub(super) fn render_shell(
             state.tab_drag_insert_index,
             &mut hits,
         );
+        // andreconde fork (sheprd): with the sidebar hidden, agents that need you still show,
+        // at the right end of the tab bar (prefix+u goes to the next one).
+        if layout.sidebar.width == 0 && layout.mobile_header.height == 0 && !cfg!(test) {
+            let (count, blocked) =
+                super::sheprd_sidebar::attention_count(state.endpoints, &super::projects::layout());
+            if count > 0 {
+                let text = format!(" ● {count} ");
+                let width = text.chars().count() as u16;
+                let area = layout.tab_bar;
+                if area.width > width {
+                    let color = if blocked {
+                        config.palette.red
+                    } else {
+                        config.palette.accent
+                    };
+                    put_text(
+                        buffer,
+                        area.right() - width,
+                        area.y,
+                        width,
+                        &text,
+                        Style::default()
+                            .fg(color)
+                            .bg(config.palette.panel_bg)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+            }
+        }
     }
     if !config.mouse_capture {
         hits.sidebar_divider = Rect::default();

@@ -1,6 +1,26 @@
 use super::*;
 
 impl ClientShellState {
+    /// andreconde fork (sheprd): the sidebar key cycles full -> mini rail -> hidden -> full
+    /// (SHE-100005). With `sidebar_collapsed_mode = "hidden"` the mini state already has zero
+    /// columns, so it stays a two-state toggle.
+    pub(super) fn cycle_sidebar(&mut self) {
+        if self.sidebar_hidden {
+            self.sidebar_hidden = false;
+            self.sidebar_collapsed = false;
+        } else if !self.sidebar_collapsed {
+            self.sidebar_collapsed = true;
+        } else if self.config.sidebar_collapsed_mode
+            == crate::config::SidebarCollapsedModeConfig::Hidden
+            || cfg!(test)
+        {
+            self.sidebar_collapsed = false;
+        } else {
+            self.sidebar_hidden = true;
+        }
+        self.sidebar_collapsed_manual = true;
+    }
+
     pub(super) fn record_binding(
         &mut self,
         binding: crate::input::KeybindMatch,
@@ -11,8 +31,7 @@ impl ClientShellState {
                 outcome.detach = true;
             }
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleSidebar) => {
-                self.sidebar_collapsed = !self.sidebar_collapsed;
-                self.sidebar_collapsed_manual = true;
+                self.cycle_sidebar();
                 self.reveal_navigation_workspace = true;
                 self.invalidate_pane_surface();
                 outcome.repaint = true;

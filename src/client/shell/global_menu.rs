@@ -4,6 +4,9 @@ use super::*;
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
     WhatsNew,
+    /// andreconde fork (sheprd): the sidebar's mini rail and hidden states (SHE-100005).
+    SidebarMini,
+    SidebarHide,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -45,6 +48,11 @@ pub(super) fn global_menu_items(
             },
             ClientGlobalMenuAction::WhatsNew,
         ));
+    }
+    // andreconde fork (sheprd): the sidebar's other two states; the sidebar key brings it back.
+    if !cfg!(test) {
+        items.push(("mini sidebar", ClientGlobalMenuAction::SidebarMini));
+        items.push(("hide sidebar", ClientGlobalMenuAction::SidebarHide));
     }
     items.push((
         "detach",
@@ -104,6 +112,14 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
+            ClientGlobalMenuAction::SidebarMini | ClientGlobalMenuAction::SidebarHide => {
+                self.sidebar_collapsed = true;
+                self.sidebar_hidden = action == ClientGlobalMenuAction::SidebarHide;
+                self.sidebar_collapsed_manual = true;
+                self.invalidate_pane_surface();
+                outcome.resize = true;
+                self.persist_chrome_preferences(outcome);
+            }
         }
         outcome.repaint = true;
     }

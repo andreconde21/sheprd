@@ -22,6 +22,9 @@ pub(super) struct ClientChromePreferences {
     pub(super) sidebar_section_split: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_collapsed: Option<bool>,
+    /// andreconde fork (sheprd): the sidebar's third state, zero columns (SHE-100005).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) sidebar_hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

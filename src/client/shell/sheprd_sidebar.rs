@@ -1132,7 +1132,10 @@ fn render_row(
 
 /// Agents that need you (blocked, finished-unseen, marked unread) on online
 /// machines, skipping hidden workspaces; and whether any is blocked.
-fn attention_count(endpoints: &[ClientShellEndpoint], layout: &ProjectLayout) -> (usize, bool) {
+pub(super) fn attention_count(
+    endpoints: &[ClientShellEndpoint],
+    layout: &ProjectLayout,
+) -> (usize, bool) {
     let mut count = 0;
     let mut blocked = false;
     for endpoint in endpoints
