@@ -298,6 +298,17 @@ impl ClientShellState {
             self.reconcile_input_source();
         }
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
+        // andreconde fork (sheprd): predictive local echo for remote panes (SHE-100003 A).
+        let remote = !self.active_endpoint_id.is_local();
+        let now = std::time::Instant::now();
+        let mut echo = super::predict::predictor();
+        for request in &outcome.requests {
+            if let ClientMessage::ClientShellPaneInput { pane_id, events } = request {
+                outcome.repaint |=
+                    echo.observe(pane_id, events, self.pane_surface.as_ref(), remote, now);
+            }
+        }
+        drop(echo);
         outcome
     }
 
