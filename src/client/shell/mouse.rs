@@ -677,6 +677,43 @@ impl ClientShellState {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
+        // andreconde fork (sheprd): the work panel (SHE-100004).
+        if self.overlay.is_none() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(hit) = self
+                .hits
+                .work_panel
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .map(|(_, hit)| hit.clone())
+            {
+                use super::work_panel::WorkHit;
+                match hit {
+                    WorkHit::Card(id) => super::projects::open_task(id),
+                    WorkHit::Stage {
+                        machine,
+                        file,
+                        key,
+                        label,
+                        stage,
+                    } => super::work_panel::open_stage(machine, file, key, label, stage),
+                    WorkHit::Url {
+                        machine,
+                        file,
+                        key,
+                        label,
+                        stage,
+                    } => super::work_panel::open_url(machine, file, key, label, stage),
+                    WorkHit::Expand => {
+                        self.work_panel = super::work_panel::FULL;
+                        self.invalidate_pane_surface();
+                        outcome.resize = true;
+                        self.persist_chrome_preferences(outcome);
+                    }
+                }
+                outcome.repaint = true;
+                return;
+            }
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()

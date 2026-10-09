@@ -120,6 +120,10 @@ pub(crate) fn keybind_help_groups(
                     "next agent that needs you",
                 ),
                 entry(
+                    binding_label(&keybinds.toggle_work_panel),
+                    "work panel: full / mini / hidden",
+                ),
+                entry(
                     binding_label(&keybinds.new_workspace_on),
                     "new workspace on a machine",
                 ),
