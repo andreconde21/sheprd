@@ -528,7 +528,7 @@ fn client_error_display_connection_failed() {
         "should mention connection failure: {msg}"
     );
     assert!(
-        msg.contains("herdr server"),
+        msg.contains("sheprd server"),
         "should suggest starting server: {msg}"
     );
 }
@@ -642,7 +642,7 @@ fn client_error_display_remote_connection_lost_has_reattach_hint() {
     let err = ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
     let msg = err.to_string();
     assert!(
-        msg.contains("lost connection to remote Herdr"),
+        msg.contains("lost connection to the remote machine"),
         "should mention remote connection loss: {msg}"
     );
     assert!(

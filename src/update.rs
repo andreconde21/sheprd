@@ -531,6 +531,11 @@ fn first_windows_stable_is_pending(
 }
 
 fn check_latest() -> Result<Option<ReleaseInfo>, String> {
+    // andreconde fork (sheprd): sheprd ships its own releases (`sheprd update`); herdr's update
+    // notices and product announcements would point at upstream versions sheprd doesn't have.
+    if !cfg!(test) {
+        return Ok(None);
+    }
     let channel = UpdateChannel::configured();
     if channel == UpdateChannel::Preview {
         return release_info_from_preview_manifest(&fetch_preview_manifest()?);
