@@ -97,10 +97,21 @@ you don't have to read its transcript:
 ```
 
 - **Summary**: while the panel shows an agent, sheprd asks its machine for a
-  short summary from Claude Haiku (through your Claude subscription,
-  `claude -p --safe-mode`): the first time, then when the agent moved on and 10
-  minutes passed. Nothing is spent on an agent whose transcript barely grew.
-- **Waiting on you**: the questions in its last message.
+  short summary: the first time, then when the agent moved on and 10 minutes
+  passed. Any agent works: a Claude Code agent is summarized from its
+  transcript, any other (Codex, OpenCode, Gemini…) from what its pane shows.
+  The summarizer is `summary_command` in `~/.config/herdr/sheprd-hook.toml` on
+  that machine, any command that reads a prompt on stdin and prints the answer:
+
+  ```toml
+  summary_command = "ollama run llama3.2"      # or "codex exec -", "llm -m gpt-4o-mini"
+  ```
+
+  Without it, Claude Haiku (`claude -p --safe-mode`, your Claude subscription)
+  when `claude` is installed; without either, the agent's last lines stand in.
+  Nothing is spent on an agent that barely moved on.
+- **Waiting on you**: the questions in its last message (for agents other than
+  Claude Code, the ones the summary found on its screen).
 - **Tasks**: when it hands work to subagents (dev, adversarial review, a browser
   check…), one entry per task, grouped by the reference id in the subagent's
   description. Click the id to read the card (your `[[refs]]` command), a stage
@@ -327,7 +338,8 @@ members = ["local/notes"]              # explicit members, in display order
 
 sheprd shows its sidebar with one machine or many. Stock herdr ignores this file.
 `~/.config/herdr/sheprd-refs.toml` holds `[[refs]]` and `[[status]]` (above),
-`~/.config/herdr/sheprd-hook.toml` the hook's `summaries` switch.
+`~/.config/herdr/sheprd-hook.toml` the summarizer (`summary_command`) and the
+`summaries` switch.
 
 ## Agents talking to agents, across machines
 

@@ -78,7 +78,12 @@ jobs:
       - name: Build
         run: |
           rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
-          cargo build --release --locked --target ${{ matrix.target }}
+          # The vendored ghostty build downloads its deps; a network blip there failed two
+          # releases, so retry once before giving up.
+          cargo build --release --locked --target ${{ matrix.target }} || {
+            sleep 30
+            cargo build --release --locked --target ${{ matrix.target }}
+          }
 
       - name: Package
         run: |

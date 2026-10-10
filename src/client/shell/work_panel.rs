@@ -383,14 +383,15 @@ pub(super) fn render(
             }
         }
         None => {
-            put_text(
-                buffer,
-                x + 1,
-                y,
-                width - 1,
-                "on its way…",
-                base.fg(palette.overlay0),
-            );
+            // A summary takes a few seconds; after 3 minutes without one, say why.
+            let waiting = summary_asked_at(machine.as_deref(), &agent.pane_id)
+                .is_none_or(|at| at.elapsed() < std::time::Duration::from_secs(180));
+            let note = if waiting {
+                "on its way…"
+            } else {
+                "none yet (set summary_command)"
+            };
+            put_text(buffer, x + 1, y, width - 1, note, base.fg(palette.overlay0));
             y += 1;
         }
     }
@@ -563,29 +564,44 @@ pub(super) fn render(
 /// Asks the focused agent's machine for a fresh summary when the panel shows it: the first time,
 /// then when it moved on (state changed) and 10 minutes passed. The hook skips sessions whose
 /// transcript barely grew, so looking at an idle agent costs nothing.
+type Asked = std::collections::HashMap<String, (u64, std::time::Instant)>;
+
+fn asked() -> &'static std::sync::Mutex<Asked> {
+    static ASKED: std::sync::OnceLock<std::sync::Mutex<Asked>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(Default::default)
+}
+
+/// When a summary was last asked for this agent (None: never).
+fn summary_asked_at(machine: Option<&str>, pane: &str) -> Option<std::time::Instant> {
+    asked()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&format!("{}/{pane}", machine.unwrap_or("local")))
+        .map(|(_, at)| *at)
+}
+
 pub(super) fn request_summary(endpoints: &[ClientShellEndpoint], active: &ClientEndpointId) {
-    static ASKED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::Instant)>>,
-    > = std::sync::OnceLock::new();
     if cfg!(test) {
         return;
     }
     let Some((agent, machine)) = focused_agent(endpoints, active) else {
         return;
     };
-    let Some(session) = projects::agent_token(agent, "sheprd_session").map(str::to_owned) else {
-        return;
-    };
+    // Claude Code agents are summarized from their transcript, any other agent from its pane.
+    let session = projects::agent_token(agent, "sheprd_session")
+        .filter(|session| {
+            session
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .map(str::to_owned);
     let key = format!(
         "{}/{}",
         machine.as_deref().unwrap_or("local"),
         agent.pane_id
     );
     {
-        let mut asked = ASKED
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut asked = asked().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((seq, at)) = asked.get(&key) {
             if *seq == agent.state_change_seq || at.elapsed() < std::time::Duration::from_secs(600)
             {
@@ -602,9 +618,10 @@ pub(super) fn request_summary(endpoints: &[ClientShellEndpoint], active: &Client
                     return;
                 };
                 let mut command = std::process::Command::new("python3");
-                command
-                    .arg(hook)
-                    .args(["--summarize-session", &session, &pane]);
+                command.arg(hook).args(["--summarize-pane", &pane]);
+                if let Some(session) = &session {
+                    command.arg(session);
+                }
                 if let Ok(exe) = std::env::current_exe() {
                     command.env("HERDR_BIN_PATH", exe);
                 }
@@ -620,7 +637,8 @@ pub(super) fn request_summary(endpoints: &[ClientShellEndpoint], active: &Client
                     format!("HERDR_SOCKET_PATH=\"$HOME/.config/herdr/sessions/{herdr_session}/herdr.sock\" ")
                 };
                 let script = format!(
-                    "PATH=\"$HOME/.local/bin:$PATH\"; {socket}sheprd-claude-hook --summarize-session {session} {pane}"
+                    "PATH=\"$HOME/.local/bin:$PATH\"; {socket}sheprd-claude-hook --summarize-pane '{pane}' {}",
+                    session.as_deref().unwrap_or("")
                 );
                 let mut command = std::process::Command::new("ssh");
                 command.args([
