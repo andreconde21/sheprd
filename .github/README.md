@@ -73,25 +73,55 @@ project to choose your own.
 the menu also has "mini sidebar" and "hide sidebar". While it is hidden, agents
 that need you show as ` ● 2 ` at the right end of the tab bar.
 
-### Work panel: each task's pipeline
-When an agent hands tasks to subagents (dev, adversarial review, a browser
-check…), `prefix+shift+b` opens a panel on the right with, for the focused agent,
-one entry per task, grouped by the reference id in the subagent's description:
+### Right panel: what the focused agent has been doing
+`prefix+shift+b` opens a panel on the right about the agent you're looking at, so
+you don't have to read its transcript:
 
 ```
-CAL-1133 reference lists
-  dev ✓  adv ●  chr ·
-CAL-1120 orphan payslip
-  dev ✓  adv ✓  chr ✓ ↗
+ claude · dev
+ card CB-12 ↗                       ← the card its launcher reported
+ ✗ PR #7 · checks ✗ 1 ↗             ← [[status]] lines (below)
+
+ SUMMARY · 14:05
+ Retry queue done, waiting on deploy approval
+ · Moved retries to a queue
+ WAITING ON YOU
+ ? OK to deploy to dev?
+ TO-DO 1/3
+ ▸ wire the dead-letter alert
+ TASKS
+ CAL-1021 Bring PRs onto trunk
+  dev ✓  adv ●  chr ✓ ↗
+ TIMELINE
+ 13:58 fix the retry queue (+3 edits, 2 cmds)
 ```
 
-When the tool that started the workspace reported `card` and `card_link`
-workspace tokens (Cockpit Board does), the panel shows `card CB-12 ↗` at the top;
-clicking opens the link (obsidian://, https://). Click the id to read the card (your `[[refs]]` command), a stage to read its
-final report, `↗` to open the page a browser stage last visited. The same key
-switches to a mini column (one mark per task) and hides it. It reads the
-`sheprd_w_*` tokens of the Claude Code hook; run `sheprd setup` again after
-updating so the hook also runs when a subagent finishes.
+- **Summary**: while the panel shows an agent, sheprd asks its machine for a
+  short summary from Claude Haiku (through your Claude subscription,
+  `claude -p --safe-mode`): the first time, then when the agent moved on and 10
+  minutes passed. Nothing is spent on an agent whose transcript barely grew.
+- **Waiting on you**: the questions in its last message.
+- **Tasks**: when it hands work to subagents (dev, adversarial review, a browser
+  check…), one entry per task, grouped by the reference id in the subagent's
+  description. Click the id to read the card (your `[[refs]]` command), a stage
+  to read its final report, `↗` to open the page a browser stage last visited.
+- **Card**: when the tool that started the workspace reported `card` and
+  `card_link` workspace tokens (Cockpit Board does), click to open the link
+  (obsidian://, https://).
+
+The same key switches to a mini column (one mark per task) and hides it. It
+reads the Claude Code hook's tokens; run `sheprd setup` again after updating.
+
+### Remote machines that feel local
+- **Typing** in a pane on another machine shows each character at once
+  (underlined until the machine echoes it), like mosh. It waits for the first
+  echo after Enter, so passwords and keys that don't echo (vim normal mode)
+  never show stray characters, and it stays off when echo is already fast.
+  Menu → **local echo** turns it off.
+- **Switching** to a workspace shows its last screen immediately while the
+  machine answers.
+- **Reconnecting**: retries at most every 10 s, and at once after the laptop
+  wakes from sleep.
 
 ### Projects across machines
 - **Drag** any row onto a project header to move its workspace there. Drop it on
@@ -196,15 +226,18 @@ installs both on every machine.
 
 ### Sharing the sidebar with other apps
 Apps that mirror sheprd (Conductore Mobile, for one) can show your projects and
-which agents need you, and mark agents read or unread from there. It's off until
+which agents need you, mark agents read or unread, and edit the layout (move a
+workspace, hide it, create, rename, pin, reorder or delete projects) from there. It's off until
 you add `share_view = true` to `sidebar.toml`. Then sheprd:
 - writes `~/.local/state/sheprd/view.json` (layout, each agent's presence and
   marks, order, focus) when it changes and every 30 s;
 - copies it to every saved machine over the relay's SSH connection;
-- applies marks those apps queue in `view-updates.jsonl` on any machine.
+- applies the marks and layout edits those apps queue in `view-updates.jsonl` on
+  any machine, refusing an edit that conflicts with a newer change (the app shows
+  why: `rejected` in view.json).
 
-The file format is a small versioned contract (v1); see `docs/sheprd-view-sync.md`
-in conductore-mobile.
+The file format is a small versioned contract (v1 marks, v2 layout edits); see
+`docs/sheprd-view-sync.md` in conductore-mobile.
 
 ### PR, checks and deploy status
 `[[status]]` entries in `~/.config/herdr/sheprd-refs.toml` run a command in each
@@ -226,14 +259,13 @@ page); a failing one counts as needing you (the counter, `prefix+u`, the board).
 CLI. Write your own for any other forge, pipeline or deploy.
 
 ### Status board
-`board` in the sidebar footer, `prefix+shift+u`, or the first menu entry opens one page with every
-agent on every machine, grouped by project, those that need you first: its
-card, what it is on (to-do), its tasks' pipelines, and the questions in its last
-message that wait on you. With `summaries = true` in
-`~/.config/herdr/sheprd-hook.toml`, the Claude Code hook also asks Claude Haiku
-(through your Claude subscription, `claude -p --safe-mode`, in the background)
-for a one-line state of the work and what got done recently, when the agent
-stops or every 10 minutes while it works, only when the session moved on.
+`board` in the sidebar footer, `prefix+shift+u`, or the first menu entry opens one
+page with every agent on every machine, grouped by project, those that need you
+first (including red CI): its card, status lines, summary, what it is on
+(to-do), its tasks' pipelines, and the questions that wait on you. Summaries are
+the ones the right panel asked for; with `summaries = true` in
+`~/.config/herdr/sheprd-hook.toml` every agent also gets one when it stops or
+every 10 minutes while it works (more Haiku calls).
 
 ### Token format (for other agent integrations)
 Any integration can feed the sidebar by reporting herdr pane metadata tokens
@@ -283,6 +315,8 @@ compact = false                        # view: one row per agent / per workspace
 active_only = false                    # filter: all agents / active ones
 recent_hours = 24                      # idle agents stay "active" this long
 hidden = ["gpu-box/scratch"]           # machine/workspace
+share_view = false                     # mirror to apps like Conductore (see above)
+local_echo_off = false                 # turn predictive local echo off (menu: local echo)
 
 [[group]]
 name = "storefront"
@@ -291,8 +325,9 @@ match = ["storefront"]                 # name or folder substring
 members = ["local/notes"]              # explicit members, in display order
 ```
 
-The combined sidebar appears when the client is connected to 2+ machines. With
-a single machine sheprd looks like herdr. Stock herdr ignores this file.
+sheprd shows its sidebar with one machine or many. Stock herdr ignores this file.
+`~/.config/herdr/sheprd-refs.toml` holds `[[refs]]` and `[[status]]` (above),
+`~/.config/herdr/sheprd-hook.toml` the hook's `summaries` switch.
 
 ## Agents talking to agents, across machines
 
@@ -337,9 +372,12 @@ The server keeps running stock herdr; use the matching herdr version on each mac
 `sheprd-v<herdr version>-<n>`, e.g. `sheprd-v0.9.3-1` = herdr 0.9.3 + sheprd patch set 1.
 
 ## For maintainers of this fork
-- Fork code lives in `src/client/shell/projects.rs` (model),
-  `src/client/shell/sheprd_sidebar.rs` (the combined sidebar) and
-  `src/client/shell/project_actions.rs` (menus, clicks, drag, keys). Small hooks in
+- Fork code lives in `src/client/shell/`: `projects.rs` (model), `sheprd_sidebar.rs`
+  (the combined sidebar), `project_actions.rs` (menus, clicks, drag, keys),
+  `work_panel.rs` (right panel), `board.rs` (status board), `status.rs`
+  ([[status]] worker), `predict.rs` (local echo), `view_sync.rs` (sharing), plus
+  `src/sheprd_msg.rs` and the bundled scripts in `scripts/` (`sheprd-msg`,
+  `sheprd-claude-hook`, `sheprd-doc`, `sheprd-status-github`). Small hooks in
   upstream files are tagged: `grep -rn "andreconde fork" src`.
 - **Following herdr is automatic**: *sheprd rebase* runs daily. When herdr ships
   a new stable release it rebases sheprd onto it; if that's clean and the tests
