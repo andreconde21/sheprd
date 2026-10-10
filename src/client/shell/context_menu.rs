@@ -21,6 +21,8 @@ pub(super) fn items_for(target: &ClientContextMenuTarget) -> Vec<ClientContextMe
             | ClientContextMenuTarget::Info { .. }
             | ClientContextMenuTarget::TidyConfirm { .. }
             | ClientContextMenuTarget::TaskPicker { .. }
+            | ClientContextMenuTarget::MovePicker { .. }
+            | ClientContextMenuTarget::MoveConfirm { .. }
             | ClientContextMenuTarget::Agent { .. } => {
                 super::project_actions::project_menu_items(target)
             }

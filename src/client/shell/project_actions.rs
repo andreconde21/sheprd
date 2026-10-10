@@ -160,6 +160,17 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             .enumerate()
             .map(|(index, task)| item(format!("→ {task}"), Action::TaskOpen(index)))
             .collect(),
+        ClientContextMenuTarget::MovePicker { machines, .. } => machines
+            .iter()
+            .enumerate()
+            .map(|(index, (_, name))| item(format!("→ {name}"), Action::MoveToMachine(index)))
+            .collect(),
+        ClientContextMenuTarget::MoveConfirm { dirty, .. } => vec![
+            item(format!("{dirty} uncommitted file(s) here"), Action::Info),
+            item("Commit and push, then move", Action::MoveCommit),
+            item("Carry them as a patch", Action::MovePatch),
+            item("Cancel", Action::Info),
+        ],
         ClientContextMenuTarget::Agent {
             unread_key,
             seq,
@@ -171,6 +182,7 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             active,
             groups,
             grouped,
+            movable,
             ..
         } => {
             let presence = projects::layout().presence(unread_key, *seq, *status);
@@ -180,6 +192,9 @@ pub(super) fn project_menu_items(target: &ClientContextMenuTarget) -> Vec<Client
             ];
             if !timeline.is_empty() {
                 items.push(item("Timeline", Action::AgentTimeline));
+            }
+            if *movable {
+                items.push(item("Move to…", Action::AgentMoveTo));
             }
             if !tasks.is_empty() {
                 items.push(item(
@@ -355,6 +370,8 @@ impl ClientShellState {
             groups: Self::group_names(),
             workspace_key,
             active: endpoint_id == self.active_endpoint_id,
+            movable: self.movable_agent(&endpoint_id, &pane_id).is_some()
+                && !self.move_targets(&endpoint_id).is_empty(),
             endpoint_id,
             pane_id,
             timeline,
@@ -362,7 +379,7 @@ impl ClientShellState {
         })
     }
 
-    fn open_menu(&mut self, target: ClientContextMenuTarget, x: u16, y: u16) {
+    pub(super) fn open_menu(&mut self, target: ClientContextMenuTarget, x: u16, y: u16) {
         projects::set_peek_anchor((x, y));
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target,
@@ -714,6 +731,34 @@ impl ClientShellState {
                     }
                 }
             }
+            ClientContextMenuTarget::MovePicker {
+                from,
+                pane_id,
+                machines,
+            } => {
+                if let Action::MoveToMachine(index) = action {
+                    if let Some((to, _)) = machines.get(index).cloned() {
+                        self.begin_move(&from, &pane_id, to);
+                    }
+                }
+            }
+            ClientContextMenuTarget::MoveConfirm { job, .. } => match action {
+                Action::MoveCommit => {
+                    self.receive_endpoint_unavailable(format!(
+                        "Committing, pushing and moving to {}…",
+                        job.to
+                    ));
+                    super::move_agent::start_move(job, Some("commit"));
+                }
+                Action::MovePatch => {
+                    self.receive_endpoint_unavailable(format!(
+                        "Moving to {} with a patch…",
+                        job.to
+                    ));
+                    super::move_agent::start_move(job, Some("patch"));
+                }
+                _ => {}
+            },
             ClientContextMenuTarget::TidyConfirm { targets, .. } => {
                 if action == Action::TidyConfirm {
                     for (endpoint_id, workspace_id) in targets {
@@ -838,6 +883,19 @@ impl ClientShellState {
                 Action::AgentTimeline => {
                     let (x, y) = projects::peek_anchor();
                     self.open_menu(ClientContextMenuTarget::Info { lines: timeline }, x, y);
+                }
+                Action::AgentMoveTo => {
+                    let machines = self.move_targets(&endpoint_id);
+                    let (x, y) = projects::peek_anchor();
+                    self.open_menu(
+                        ClientContextMenuTarget::MovePicker {
+                            from: endpoint_id,
+                            pane_id,
+                            machines,
+                        },
+                        x,
+                        y,
+                    );
                 }
                 Action::AgentTasks => {
                     let (x, y) = projects::peek_anchor();
@@ -1362,6 +1420,7 @@ impl ClientShellState {
         }
         super::view_sync::tick(&self.endpoints, &self.active_endpoint_id);
         super::status::tick(&self.endpoints);
+        self.tick_moves(outcome);
         if self.work_panel == super::work_panel::FULL {
             super::work_panel::request_summary(&self.endpoints, &self.active_endpoint_id);
         }

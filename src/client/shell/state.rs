@@ -592,6 +592,11 @@ pub(super) enum ClientContextMenuAction {
     AgentTasks,
     TaskOpen(usize),
     NewOnMachine(usize),
+    /// andreconde fork (sheprd): move an agent to another machine (SHE-100001).
+    AgentMoveTo,
+    MoveToMachine(usize),
+    MoveCommit,
+    MovePatch,
     ProjectNewWorkspace,
     ProjectNewAgent,
     /// A read-only line (usage); picking it does nothing.
@@ -661,9 +666,22 @@ pub(super) enum ClientContextMenuTarget {
         /// From the agent hook (sheprd-claude-hook).
         timeline: Vec<String>,
         tasks: Vec<String>,
+        /// A Claude Code agent with another machine online: "Move to…" (SHE-100001).
+        movable: bool,
     },
     /// Pick one of the task ids an agent mentioned.
     TaskPicker { tasks: Vec<String> },
+    /// Machines an agent can move to (SHE-100001).
+    MovePicker {
+        from: ClientEndpointId,
+        pane_id: String,
+        machines: Vec<(ClientEndpointId, String)>,
+    },
+    /// Uncommitted changes before a move: commit and push, or carry them as a patch.
+    MoveConfirm {
+        job: super::move_agent::MoveJob,
+        dirty: usize,
+    },
 }
 
 #[derive(Debug)]
