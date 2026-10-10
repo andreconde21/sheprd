@@ -9,6 +9,8 @@ pub(super) enum ClientGlobalMenuAction {
     SidebarHide,
     /// andreconde fork (sheprd): the status board (SHE-100000).
     Board,
+    /// andreconde fork (sheprd): predictive local echo on/off (SHE-100003).
+    LocalEcho,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -60,6 +62,14 @@ pub(super) fn global_menu_items(
     if !cfg!(test) {
         items.push(("mini sidebar", ClientGlobalMenuAction::SidebarMini));
         items.push(("hide sidebar", ClientGlobalMenuAction::SidebarHide));
+        items.push((
+            if super::predict::enabled() {
+                "local echo: on"
+            } else {
+                "local echo: off"
+            },
+            ClientGlobalMenuAction::LocalEcho,
+        ));
     }
     items.push((
         "detach",
@@ -120,6 +130,11 @@ impl ClientShellState {
             }
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
             ClientGlobalMenuAction::Board => self.open_board(),
+            ClientGlobalMenuAction::LocalEcho => {
+                let enabled = !super::predict::enabled();
+                super::predict::set_enabled(enabled);
+                projects::update(|layout| layout.local_echo_off = !enabled);
+            }
             ClientGlobalMenuAction::SidebarMini | ClientGlobalMenuAction::SidebarHide => {
                 self.sidebar_collapsed = true;
                 self.sidebar_hidden = action == ClientGlobalMenuAction::SidebarHide;

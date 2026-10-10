@@ -299,7 +299,7 @@ impl ClientShellState {
         }
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
         // andreconde fork (sheprd): predictive local echo for remote panes (SHE-100003 A).
-        let remote = !self.active_endpoint_id.is_local();
+        let remote = !self.active_endpoint_id.is_local() && super::predict::enabled();
         let now = std::time::Instant::now();
         let mut echo = super::predict::predictor();
         for request in &outcome.requests {
