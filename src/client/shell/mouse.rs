@@ -791,6 +791,17 @@ impl ClientShellState {
                         stage,
                     } => super::work_panel::open_url(machine, file, key, label, stage),
                     WorkHit::Link(link) => super::work_panel::open_link(&link),
+                    WorkHit::Reply { pane_id } => {
+                        let endpoint_id = self.active_endpoint_id.clone();
+                        self.prompt(
+                            "reply to the agent",
+                            "",
+                            ClientRenameTarget::ReplyAgent {
+                                endpoint_id,
+                                pane_id,
+                            },
+                        );
+                    }
                     WorkHit::Details { title, details } => {
                         super::projects::push_task_body(title, Some(details))
                     }

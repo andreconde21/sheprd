@@ -654,7 +654,12 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
-    fn prompt(&mut self, title: &'static str, initial: &str, target: ClientRenameTarget) {
+    pub(super) fn prompt(
+        &mut self,
+        title: &'static str,
+        initial: &str,
+        target: ClientRenameTarget,
+    ) {
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
             title,
             input: TextEditor::new(initial, false),
@@ -923,6 +928,15 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> Option<ClientRenameTarget> {
         match target {
+            ClientRenameTarget::ReplyAgent {
+                endpoint_id,
+                pane_id,
+            } => {
+                let text = text.trim().to_owned();
+                if !text.is_empty() {
+                    self.reply_to_agent(&endpoint_id, &pane_id, text);
+                }
+            }
             ClientRenameTarget::ProjectAssign { key } => {
                 projects::update(|layout| layout.assign(&key, text))
             }
@@ -1196,6 +1210,24 @@ impl ClientShellState {
                 cwd,
             },
         );
+    }
+
+    /// Sends the user's answer to an agent (right panel's reply): as a prompt, or typed into its
+    /// pane when it doesn't take prompts right now (a permission dialog, for one).
+    fn reply_to_agent(&mut self, endpoint_id: &ClientEndpointId, pane_id: &str, text: String) {
+        let prompt = self.herdr_cli(endpoint_id, &["agent", "prompt", pane_id, &text]);
+        let typed = self.herdr_cli(endpoint_id, &["pane", "send-text", pane_id, &text]);
+        let enter = self.herdr_cli(endpoint_id, &["pane", "send-keys", pane_id, "enter"]);
+        let (Some(mut prompt), Some(mut typed), Some(mut enter)) = (prompt, typed, enter) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let sent = prompt.output().is_ok_and(|output| output.status.success());
+            if !sent && typed.output().is_ok_and(|output| output.status.success()) {
+                let _ = enter.output();
+            }
+        });
+        self.receive_endpoint_unavailable("Reply sent".into());
     }
 
     /// herdr's own CLI (this binary), aimed at one machine. The client

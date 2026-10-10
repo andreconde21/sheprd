@@ -356,6 +356,11 @@ pub(super) enum ClientRenameTarget {
         run_agent: bool,
         cwd: Option<String>,
     },
+    /// sheprd: an answer to the agent's question, from the right panel.
+    ReplyAgent {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+    },
 }
 
 #[derive(Debug)]
