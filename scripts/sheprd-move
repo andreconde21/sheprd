@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""sheprd-move — move a Claude Code agent to another machine, keeping its conversation.
+
+  sheprd-move check --from M --to M --pane P --cwd PATH --session ID
+  sheprd-move run   --from M --to M --pane P --cwd PATH --session ID [--dirty commit|patch]
+                    [--label TEXT]
+
+M is a saved machine's label or "local". Runs where sheprd runs; it reaches each machine over the
+same SSH targets sheprd uses. Prints one JSON object.
+
+check: the repo, branch and uncommitted files on the source; whether the target has the repo at
+       the same place (a path under your home maps to the same place under the target's home),
+       the branch, and a clean checkout; whether the session file exists.
+run:   with uncommitted changes, --dirty is required: "commit" commits them on the source and
+       pushes the branch; "patch" carries them as a patch applied on the target and stashes them
+       on the source. Then: checks out the branch on the target, copies the session transcript,
+       opens a workspace there running `claude --resume <session>`, and renames the old pane
+       "moved → <target>". Nothing is deleted.
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+CATALOG = os.path.expanduser("~/.local/state/herdr/client/endpoints.json")
+
+
+class MoveError(Exception):
+    pass
+
+
+def profile(machine):
+    """(ssh target, herdr session) of a saved machine; None for local."""
+    if machine == "local":
+        return None
+    try:
+        with open(CATALOG) as handle:
+            catalog = json.load(handle)
+    except (OSError, ValueError):
+        raise MoveError("no saved machines")
+    for item in catalog.get("ssh", []):
+        if item.get("label") == machine:
+            return item["target"], item.get("session") or "default"
+    raise MoveError(f"unknown machine {machine}")
+
+
+def sh(machine, script, stdin=None, timeout=120):
+    """Runs a bash script on a machine; returns (exit code, stdout, stderr). Without `stdin` the
+    script itself goes on stdin; with it, the script is an argument and `stdin` its input."""
+    target = profile(machine)
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target[0]] if target else None
+    if stdin is None:
+        command, data = (ssh + ["bash -s"]) if ssh else ["bash", "-s"], script.encode()
+    else:
+        command = (ssh + [f"bash -c {shlex.quote(script)}"]) if ssh else ["bash", "-c", script]
+        data = stdin
+    result = subprocess.run(command, input=data, capture_output=True, timeout=timeout, check=False)
+    return result.returncode, result.stdout.decode(errors="replace"), result.stderr.decode(errors="replace")
+
+
+def herdr(machine, *args):
+    binary = os.environ.get("HERDR_BIN_PATH") or "sheprd"
+    command = [binary] + ([] if machine == "local" else ["--machine", machine]) + list(args)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+    return result.returncode, result.stdout
+
+
+def home(machine):
+    code, out, _ = sh(machine, 'printf %s "$HOME"')
+    if code != 0 or not out:
+        raise MoveError(f"{machine} is not reachable")
+    return out
+
+
+def map_path(path, source_home, target_home):
+    if path == source_home or path.startswith(source_home + "/"):
+        return target_home + path[len(source_home):]
+    return path
+
+
+def claude_dir(path):
+    """Claude Code's project folder name for a working directory."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def git_state(machine, path):
+    q = shlex.quote(path)
+    script = f"""cd {q} 2>/dev/null || {{ echo NOPATH; exit 0; }}
+top=$(git rev-parse --show-toplevel 2>/dev/null) || {{ echo NOGIT; exit 0; }}
+echo "TOP $top"
+echo "BRANCH $(git rev-parse --abbrev-ref HEAD)"
+echo "REMOTE $(git remote get-url origin 2>/dev/null)"
+echo "AHEAD $(git rev-list --count @{{u}}..HEAD 2>/dev/null || echo none)"
+git status --porcelain | sed 's/^/DIRTY /'
+"""
+    code, out, _ = sh(machine, script)
+    state = {"exists": True, "git": True, "dirty": []}
+    for line in out.splitlines():
+        if line == "NOPATH":
+            return {"exists": False}
+        if line == "NOGIT":
+            return {"exists": True, "git": False}
+        key, _, value = line.partition(" ")
+        if key == "DIRTY":
+            state["dirty"].append(value.strip())
+        elif key in ("TOP", "BRANCH", "REMOTE", "AHEAD"):
+            state[key.lower()] = value.strip()
+    return state
+
+
+def same_remote(a, b):
+    norm = lambda url: re.sub(r"(\.git)?/?$", "", re.sub(r"^.*[:/]([^/:]+/[^/]+)$", r"\1", url or ""))
+    return bool(a) and norm(a) == norm(b)
+
+
+def check(args):
+    src, dst = args["from"], args["to"]
+    if src == dst:
+        raise MoveError("the agent is already on that machine")
+    src_home, dst_home = home(src), home(dst)
+    path = args["cwd"]
+    source = git_state(src, path)
+    if not source.get("exists"):
+        raise MoveError(f"{path} is gone on {src}")
+    target_path = map_path(path, src_home, dst_home)
+    target = git_state(dst, target_path)
+    code, out, _ = sh(src, f'ls ~/.claude/projects/*/{shlex.quote(args["session"])}.jsonl 2>/dev/null | head -1')
+    report = {
+        "source_path": path, "target_path": target_path, "session_file": out.strip(),
+        "git": source.get("git", False), "branch": source.get("branch"), "dirty": source.get("dirty", []),
+        "ahead": source.get("ahead"), "problems": [],
+    }
+    if not report["session_file"]:
+        report["problems"].append(f"no Claude Code session {args['session']} on {src}")
+    if not target.get("exists"):
+        report["problems"].append(f"{target_path} does not exist on {dst}")
+    elif source.get("git"):
+        if not target.get("git"):
+            report["problems"].append(f"{target_path} on {dst} is not a git checkout")
+        elif not same_remote(source.get("remote"), target.get("remote")):
+            report["problems"].append(f"{target_path} on {dst} is a different repository")
+        elif target.get("dirty"):
+            report["problems"].append(f"{target_path} on {dst} has uncommitted changes")
+    return report
+
+
+def run(args):
+    report = check(args)
+    if report["problems"]:
+        raise MoveError("; ".join(report["problems"]))
+    src, dst = args["from"], args["to"]
+    path, target_path, branch = report["source_path"], report["target_path"], report["branch"]
+    q, tq = shlex.quote(path), shlex.quote(target_path)
+    patch = None
+    if report["git"]:
+        dirty = report["dirty"]
+        mode = args.get("dirty")
+        if dirty and mode not in ("commit", "patch"):
+            raise MoveError(f"{len(dirty)} uncommitted file(s): choose commit or patch")
+        if dirty and mode == "commit":
+            code, _, err = sh(src, f"cd {q} && git add -A && git commit -q -m 'wip: move to {dst}' && git push -q -u origin HEAD")
+            if code != 0:
+                raise MoveError(f"commit and push failed on {src}: {err.strip()[-200:]}")
+        elif report["ahead"] not in ("0", "none") or report["ahead"] is None:
+            # Commits the target can't fetch yet: push the branch (it is the agent's own branch).
+            code, _, err = sh(src, f"cd {q} && git push -q -u origin HEAD")
+            if code != 0:
+                raise MoveError(f"push failed on {src}: {err.strip()[-200:]}")
+        if dirty and mode == "patch":
+            code, out, err = sh(src, f"cd {q} && git add -A && git diff --cached --binary HEAD")
+            if code != 0:
+                raise MoveError(f"could not make the patch on {src}: {err.strip()[-200:]}")
+            patch = out.encode()
+        bq = shlex.quote(branch)
+        code, _, err = sh(dst, f"cd {tq} && git fetch -q origin && (git checkout -q {bq} 2>/dev/null || git checkout -q -b {bq} --track origin/{bq}) && git pull -q --ff-only")
+        if code != 0:
+            raise MoveError(f"could not check out {branch} on {dst}: {err.strip()[-200:]}")
+        if patch:
+            code, _, err = sh(dst, f"cd {tq} && git apply --index --binary -", stdin=patch)
+            if code != 0:
+                raise MoveError(f"the patch did not apply on {dst} (nothing changed on {src}): {err.strip()[-200:]}")
+            code, _, err = sh(src, f"cd {q} && git stash push -q -u -m 'moved to {dst}'")
+            if code != 0:
+                raise MoveError(f"patch applied on {dst} but stashing on {src} failed: {err.strip()[-200:]}")
+    # The conversation: copy the transcript to the target's Claude project folder.
+    code, out, err = sh(src, f"cat {shlex.quote(report['session_file'])}")
+    if code != 0:
+        raise MoveError(f"could not read the session on {src}")
+    folder = f"$HOME/.claude/projects/{claude_dir(target_path)}"
+    code, _, err = sh(dst, f'mkdir -p "{folder}" && cat > "{folder}/{args["session"]}.jsonl"', stdin=out.encode())
+    if code != 0:
+        raise MoveError(f"could not copy the session to {dst}: {err.strip()[-200:]}")
+    code, created = herdr(dst, "workspace", "create", "--cwd", target_path, "--label", args.get("label") or os.path.basename(target_path), "--focus")
+    pane = None
+    try:
+        pane = find_pane_id(json.loads(created[created.find("{"):]))
+    except ValueError:
+        pass
+    if code != 0 or not pane:
+        raise MoveError(f"could not open a workspace on {dst}")
+    herdr(dst, "pane", "run", pane, f"claude --resume {args['session']}")
+    herdr(src, "pane", "rename", args["pane"], f"moved → {dst}")
+    return {"moved": True, "target_pane": pane, "branch": branch, "carried": "patch" if patch else (
+        "commit" if report["dirty"] else "none")}
+
+
+def find_pane_id(value):
+    if isinstance(value, dict):
+        if isinstance(value.get("pane_id"), str):
+            return value["pane_id"]
+        for item in value.values():
+            found = find_pane_id(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_pane_id(item)
+            if found:
+                return found
+    return None
+
+
+def main(argv):
+    if not argv or argv[0] not in ("check", "run"):
+        print(__doc__.strip())
+        return 2
+    action, rest, args = argv[0], argv[1:], {}
+    while rest:
+        key = rest.pop(0)
+        if key.startswith("--") and rest:
+            args[key[2:]] = rest.pop(0)
+    for needed in ("from", "to", "pane", "cwd", "session"):
+        if needed not in args:
+            print(json.dumps({"error": f"--{needed} is required"}))
+            return 2
+    try:
+        out = check(args) if action == "check" else run(args)
+    except MoveError as err:
+        out = {"error": str(err)}
+    except subprocess.TimeoutExpired:
+        out = {"error": "a machine did not answer in time"}
+    print(json.dumps(out, ensure_ascii=False))
+    return 0 if "error" not in out else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
