@@ -457,6 +457,24 @@ fn read_details(machine: Option<&str>, file: &str) -> Option<serde_json::Value> 
     serde_json::from_str(&text).ok()
 }
 
+/// The SSH target and herdr session of a saved machine, by its label.
+pub(super) fn machine_profile(label: &str) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(crate::client::endpoint::catalog_path()).ok()?;
+    let catalog: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let profile = catalog
+        .get("ssh")?
+        .as_array()?
+        .iter()
+        .find(|profile| profile.get("label").and_then(|l| l.as_str()) == Some(label))?;
+    let target = profile.get("target")?.as_str()?.to_owned();
+    let session = profile
+        .get("session")
+        .and_then(|s| s.as_str())
+        .unwrap_or("default")
+        .to_owned();
+    Some((target, session))
+}
+
 /// The SSH target of a saved machine, by its label.
 pub(super) fn ssh_target(label: &str) -> Option<String> {
     let text = std::fs::read_to_string(crate::client::endpoint::catalog_path()).ok()?;

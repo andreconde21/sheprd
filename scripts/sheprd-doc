@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""sheprd-doc — open a document in your editor, in a split next to the agent's pane.
+
+  sheprd-doc <path> [--pane <pane id>] [--cwd <folder>] [--session <herdr session>]
+
+Opens a vertical split to the right of the pane (default: $HERDR_PANE_ID, the pane this runs in)
+and runs $SHEPRD_DOC_EDITOR, else $VISUAL, else $EDITOR, else nvim on the file. One document split per workspace: when the
+workspace already has one and it is still open, the file is opened in it (Esc, `:e <path>`) instead
+of splitting again. Quitting the editor closes the split.
+
+Runs on the machine that hosts the pane, with stock herdr or sheprd. sheprd's Ctrl+click on a
+Markdown path calls it there; agents call it to show you the plans and reports they write.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+STATE = os.path.expanduser("~/.cache/sheprd/doc-panes.json")
+
+
+SESSION = []
+
+
+def herdr(*args):
+    binary = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    result = subprocess.run([binary, *SESSION, *args], capture_output=True, text=True, timeout=15,
+                            check=False)
+    return result.returncode, result.stdout
+
+
+def find_pane_id(value, exclude):
+    """The first pane id in a herdr JSON reply that is not `exclude`."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "pane_id" and isinstance(item, str) and item != exclude:
+                return item
+            found = find_pane_id(item, exclude)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_pane_id(item, exclude)
+            if found:
+                return found
+    return None
+
+
+def load_state():
+    try:
+        with open(STATE) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE + ".tmp", "w") as handle:
+        json.dump(state, handle)
+    os.replace(STATE + ".tmp", STATE)
+
+
+def main(argv):
+    args = list(argv)
+    pane = os.environ.get("HERDR_PANE_ID")
+    cwd = os.getcwd()
+    path = None
+    while args:
+        arg = args.pop(0)
+        if arg == "--pane" and args:
+            pane = args.pop(0)
+        elif arg == "--cwd" and args:
+            cwd = args.pop(0)
+        elif arg == "--session" and args:
+            session = args.pop(0)
+            if session and session != "default":
+                SESSION[:] = ["--session", session]
+        elif arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            path = arg
+    if not path or not pane:
+        print("usage: sheprd-doc <path> [--pane <pane id>] [--cwd <folder>]", file=sys.stderr)
+        return 2
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.normpath(os.path.join(os.path.expanduser(cwd), path))
+    if not os.path.exists(path):
+        print(f"sheprd-doc: no such file: {path}", file=sys.stderr)
+        return 1
+    workspace = (SESSION[1] + "/" if SESSION else "") + pane.split(":")[0]
+    state = load_state()
+    existing = state.get(workspace)
+    if existing and existing != pane and herdr("pane", "get", existing)[0] == 0:
+        herdr("pane", "send-keys", existing, "esc")
+        herdr("pane", "send-text", existing, f":e {path}")
+        herdr("pane", "send-keys", existing, "enter")
+        print(f"opened {path} in {existing}")
+        return 0
+    code, out = herdr("pane", "split", pane, "--direction", "right", "--cwd", os.path.dirname(path))
+    if code != 0:
+        print(f"sheprd-doc: could not split {pane}", file=sys.stderr)
+        return 1
+    try:
+        new = find_pane_id(json.loads(out[out.find("{"):]), pane)
+    except ValueError:
+        new = None
+    if not new:
+        print("sheprd-doc: herdr did not say which pane it made", file=sys.stderr)
+        return 1
+    editor = os.environ.get("SHEPRD_DOC_EDITOR")
+    command = shlex.quote(editor) if editor else "${VISUAL:-${EDITOR:-nvim}}"
+    herdr("pane", "run", new, f"exec {command} {shlex.quote(path)}")
+    state[workspace] = new
+    save_state(state)
+    print(f"opened {path} in {new}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

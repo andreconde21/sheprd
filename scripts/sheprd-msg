@@ -572,6 +572,22 @@ A prompt that starts with `[sheprd-msg] Message from …` comes from another age
   the user didn't ask for. There is a rate limit per target.
 """
 
+DOC_SKILL = """---
+name: sheprd-doc
+description: Show the user a document you wrote or updated for them (a plan, report, spec, review, summary) in their editor, in a split next to your pane. Use right after writing a Markdown file the user should read; not for every file you touch.
+---
+
+# Showing the user a document
+
+Run `sheprd-doc <path>` (relative to your folder, or absolute) after you write a Markdown file the
+user should read: a plan, a report, a spec, a review. It opens a split next to your pane with
+their editor on that file; when the workspace already has a document split, the file opens in it.
+
+- Only documents meant for the user, once, when they are ready (not drafts, not code files).
+- Still say in the chat what the document is and where it is; the split is a convenience.
+- If `sheprd-doc` is missing or fails, just give the path.
+"""
+
 INSTALL_REMOTE = r"""set -e
 bin="$HOME/.local/bin"; [ "$(id -u)" = 0 ] && [ -w /usr/local/bin ] && bin=/usr/local/bin
 mkdir -p "$bin" "$HOME/.config/herdr" "$HOME/.claude/skills/sheprd-msg"
@@ -584,6 +600,11 @@ if [ -n "$3" ]; then
 fi
 if [ -n "$4" ]; then
   printf '%s' "$4" | base64 -d > "$bin/sheprd-status-github" && chmod +x "$bin/sheprd-status-github"
+fi
+if [ -n "$5" ]; then
+  printf '%s' "$5" | base64 -d > "$bin/sheprd-doc" && chmod +x "$bin/sheprd-doc"
+  mkdir -p "$HOME/.claude/skills/sheprd-doc"
+  printf '%s' "$6" | base64 -d > "$HOME/.claude/skills/sheprd-doc/SKILL.md"
 fi
 command -v sheprd-msg >/dev/null || echo "note: $bin is not on PATH"
 echo "installed $bin/sheprd-msg as $(grep -o '"[^"]*"' "$HOME/.config/herdr/sheprd-msg.toml")"
@@ -601,13 +622,18 @@ def cmd_setup(_args):
     # The example [[status]] command for the work panel (PR and checks of the branch).
     status_path = os.path.join(os.path.dirname(me), "sheprd-status-github")
     status_b64 = base64.b64encode(open(status_path, "rb").read()).decode() if os.path.exists(status_path) else ""
-    local = subprocess.run(["bash", "-c", INSTALL_REMOTE, "setup", my_name(), skill_b64, hook_b64, status_b64],
+    # Documents in the user's editor, and the skill telling agents when to open them.
+    doc_path = os.path.join(os.path.dirname(me), "sheprd-doc")
+    doc_b64 = base64.b64encode(open(doc_path, "rb").read()).decode() if os.path.exists(doc_path) else ""
+    doc_skill_b64 = base64.b64encode(DOC_SKILL.encode()).decode()
+    local = subprocess.run(["bash", "-c", INSTALL_REMOTE, "setup", my_name(), skill_b64, hook_b64, status_b64,
+                            doc_b64, doc_skill_b64],
                            input=script, capture_output=True, check=False)
     print(f"{my_name()}: " + (local.stdout.decode().strip() or local.stderr.decode().strip()))
     for label, host in direct_machines().items():
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", host,
-             f"bash -c {shlex.quote(INSTALL_REMOTE)} setup {shlex.quote(label)} {skill_b64} {shlex.quote(hook_b64)} {shlex.quote(status_b64)}"],
+             f"bash -c {shlex.quote(INSTALL_REMOTE)} setup {shlex.quote(label)} {skill_b64} {shlex.quote(hook_b64)} {shlex.quote(status_b64)} {shlex.quote(doc_b64)} {shlex.quote(doc_skill_b64)}"],
             input=script, capture_output=True, timeout=60, check=False)
         out = (result.stdout.decode() or result.stderr.decode()).strip()
         print(f"{label}: {out}")
