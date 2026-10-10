@@ -582,6 +582,9 @@ if [ -n "$3" ]; then
   printf '%s' "$3" | base64 -d > "$bin/sheprd-claude-hook" && chmod +x "$bin/sheprd-claude-hook"
   python3 "$bin/sheprd-claude-hook" --install
 fi
+if [ -n "$4" ]; then
+  printf '%s' "$4" | base64 -d > "$bin/sheprd-status-github" && chmod +x "$bin/sheprd-status-github"
+fi
 command -v sheprd-msg >/dev/null || echo "note: $bin is not on PATH"
 echo "installed $bin/sheprd-msg as $(grep -o '"[^"]*"' "$HOME/.config/herdr/sheprd-msg.toml")"
 """
@@ -595,13 +598,16 @@ def cmd_setup(_args):
     # The Claude Code hook ships next to this script (sheprd writes both).
     hook_path = os.path.join(os.path.dirname(me), "sheprd-claude-hook")
     hook_b64 = base64.b64encode(open(hook_path, "rb").read()).decode() if os.path.exists(hook_path) else ""
-    local = subprocess.run(["bash", "-c", INSTALL_REMOTE, "setup", my_name(), skill_b64, hook_b64],
+    # The example [[status]] command for the work panel (PR and checks of the branch).
+    status_path = os.path.join(os.path.dirname(me), "sheprd-status-github")
+    status_b64 = base64.b64encode(open(status_path, "rb").read()).decode() if os.path.exists(status_path) else ""
+    local = subprocess.run(["bash", "-c", INSTALL_REMOTE, "setup", my_name(), skill_b64, hook_b64, status_b64],
                            input=script, capture_output=True, check=False)
     print(f"{my_name()}: " + (local.stdout.decode().strip() or local.stderr.decode().strip()))
     for label, host in direct_machines().items():
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", host,
-             f"bash -c {shlex.quote(INSTALL_REMOTE)} setup {shlex.quote(label)} {skill_b64} {shlex.quote(hook_b64)}"],
+             f"bash -c {shlex.quote(INSTALL_REMOTE)} setup {shlex.quote(label)} {skill_b64} {shlex.quote(hook_b64)} {shlex.quote(status_b64)}"],
             input=script, capture_output=True, timeout=60, check=False)
         out = (result.stdout.decode() or result.stderr.decode()).strip()
         print(f"{label}: {out}")

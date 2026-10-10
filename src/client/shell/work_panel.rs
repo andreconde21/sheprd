@@ -45,6 +45,11 @@ pub(super) enum WorkHit {
     Expand,
     /// A link the tool that started the workspace reported (`card_link`), opened in its app.
     Link(String),
+    /// A `[[status]]` result's details, shown in the reader.
+    Details {
+        title: String,
+        details: String,
+    },
 }
 
 /// Tasks from one agent's `sheprd_w_1..` tokens ("id|label|stage:s,stage:s"), newest first.
@@ -279,23 +284,64 @@ pub(super) fn render(
         };
         hits.work_panel.push((Rect::new(x, area.y + 1, w, 1), hit));
     }
+    // `[[status]]` results for this workspace (PR, checks, deploy): red = needs you.
+    let mut top = area.y + 2;
+    let workspace = agent.and_then(|agent| {
+        let endpoint = endpoints.iter().find(|e| e.endpoint_id == *active)?;
+        let snapshot = endpoint.snapshot.as_deref()?;
+        let workspace = snapshot
+            .workspaces
+            .iter()
+            .find(|w| w.workspace_id == agent.workspace_id)?;
+        Some(projects::workspace_key(endpoint, workspace))
+    });
+    for status in workspace
+        .map(|key| super::status::statuses(&key))
+        .unwrap_or_default()
+    {
+        if top + 1 >= area.bottom() {
+            break;
+        }
+        let (glyph, color) = match status.state.as_str() {
+            "ok" => ("✓", palette.green),
+            "fail" => ("✗", palette.red),
+            "review" => ("◐", palette.yellow),
+            _ => ("●", palette.accent),
+        };
+        let text = format!(" {glyph} {}", status.text);
+        let w = display_width(&text).min(width);
+        put_text(buffer, x, top, w, &text, base.fg(color));
+        if !status.details.is_empty() {
+            hits.work_panel.push((
+                Rect::new(x, top, w, 1),
+                WorkHit::Details {
+                    title: format!("{} · {}", status.name, status.text),
+                    details: status.details.clone(),
+                },
+            ));
+        }
+        if !status.url.is_empty() && x + w + 2 <= x + width {
+            put_text(buffer, x + w + 1, top, 1, "↗", base.fg(palette.accent));
+            hits.work_panel.push((
+                Rect::new(x + w + 1, top, 1, 1),
+                WorkHit::Link(status.url.clone()),
+            ));
+        }
+        top += 1;
+    }
+    if top > area.y + 2 {
+        top += 1;
+    }
     if tasks.is_empty() {
         let note = if agent.is_some() {
             " no subagent tasks yet"
         } else {
             " no agent focused"
         };
-        put_text(
-            buffer,
-            x,
-            area.y + 2,
-            width,
-            note,
-            base.fg(palette.overlay0),
-        );
+        put_text(buffer, x, top, width, note, base.fg(palette.overlay0));
         return;
     }
-    let mut y = area.y + 2;
+    let mut y = top;
     for task in &tasks {
         if y + 1 >= area.bottom() {
             break;
@@ -412,7 +458,7 @@ fn read_details(machine: Option<&str>, file: &str) -> Option<serde_json::Value> 
 }
 
 /// The SSH target of a saved machine, by its label.
-fn ssh_target(label: &str) -> Option<String> {
+pub(super) fn ssh_target(label: &str) -> Option<String> {
     let text = std::fs::read_to_string(crate::client::endpoint::catalog_path()).ok()?;
     let catalog: serde_json::Value = serde_json::from_str(&text).ok()?;
     catalog

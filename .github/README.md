@@ -195,6 +195,25 @@ you add `share_view = true` to `sidebar.toml`. Then sheprd:
 The file format is a small versioned contract (v1); see `docs/sheprd-view-sync.md`
 in conductore-mobile.
 
+### PR, checks and deploy status
+`[[status]]` entries in `~/.config/herdr/sheprd-refs.toml` run a command in each
+workspace's folder, on that workspace's machine (over SSH for remote ones), when
+the workspace has an agent and then every 3 minutes:
+
+```toml
+[[status]]
+name = "github"
+command = "sheprd-status-github"   # shipped; `sheprd setup` installs it on each machine
+match = ["my-repo"]                # optional: workspace label or folder contains one of these
+```
+
+The command prints one JSON line,
+`{"state":"ok|pending|fail|review|none","text":"PR #212 · checks ✗ 2","url":"…","details":"markdown"}`.
+The work panel shows it under the card (click for the details, `↗` for the
+page); a failing one counts as needing you (the counter, `prefix+u`, the board).
+`sheprd-status-github` reads the branch's PR, checks and review with the GitHub
+CLI. Write your own for any other forge, pipeline or deploy.
+
 ### Status board
 `board` in the sidebar footer (or first in the menu) opens one page with every
 agent on every machine, grouped by project, those that need you first: its
