@@ -91,6 +91,24 @@ fn is_backspace(event: &ClientPaneInputEvent) -> bool {
     )
 }
 
+/// Whether the server has echoed a predicted key: the cell shows it AND the server's cursor moved
+/// past it. A matching cell alone is not enough: a space "matches" the blank cell before the
+/// echo arrives, and dropping its prediction early put the next key in its place.
+fn echoed(frame: &FrameData, prediction: &Prediction) -> bool {
+    let shows = cell_symbol(frame, prediction.x, prediction.y).is_some_and(|symbol| {
+        symbol == prediction.ch.encode_utf8(&mut [0; 4])
+            || (prediction.ch == ' ' && symbol.is_empty())
+    });
+    let past = match frame.cursor.as_ref() {
+        Some(cursor) => {
+            cursor.y > prediction.y || (cursor.y == prediction.y && cursor.x > prediction.x)
+        }
+        // No cursor to go by: trust the cell, except for a space (indistinguishable from blank).
+        None => prediction.ch != ' ',
+    };
+    shows && past
+}
+
 fn cell_symbol(frame: &FrameData, x: u16, y: u16) -> Option<&str> {
     if x >= frame.width || y >= frame.height {
         return None;
@@ -189,7 +207,7 @@ impl EchoPredictor {
             return self.reset() || before;
         };
         while let Some(first) = self.pending.first() {
-            if cell_symbol(frame, first.x, first.y) == Some(first.ch.encode_utf8(&mut [0; 4])) {
+            if echoed(frame, first) {
                 let sample = now.saturating_duration_since(first.at);
                 self.rtt = Some(match self.rtt {
                     Some(rtt) => (rtt * 3 + sample) / 4,
@@ -203,9 +221,12 @@ impl EchoPredictor {
         }
         if self.pending.is_empty() {
             self.cursor = None;
-        } else if self.pending.iter().skip(1).any(|later| {
-            cell_symbol(frame, later.x, later.y) == Some(later.ch.encode_utf8(&mut [0; 4]))
-        }) {
+        } else if self
+            .pending
+            .iter()
+            .skip(1)
+            .any(|later| echoed(frame, later))
+        {
             // A later key was echoed but an earlier one was not: the app did something else.
             self.reset();
         }
@@ -373,6 +394,45 @@ mod tests {
             t0 + Duration::from_millis(96),
         );
         assert!(!echo.showing());
+    }
+
+    #[test]
+    fn a_space_is_not_confirmed_by_the_blank_cell_before_its_echo() {
+        let t0 = Instant::now();
+        let mut echo = EchoPredictor::default();
+        echo.observe("p1", &[key("a")], Some(&surface("$ ", 2, false)), true, t0);
+        echo.confirm(
+            Some(&surface("$ a", 3, false)),
+            t0 + Duration::from_millis(60),
+        );
+        // Type " b" before the space is echoed: the cell under the space is blank already.
+        let echoed_a = surface("$ a", 3, false);
+        echo.observe(
+            "p1",
+            &[key(" "), key("b")],
+            Some(&echoed_a),
+            true,
+            t0 + Duration::from_millis(70),
+        );
+        echo.confirm(Some(&echoed_a), t0 + Duration::from_millis(80));
+        assert_eq!(
+            echo.pending.len(),
+            2,
+            "the space stays predicted until the cursor moves"
+        );
+        let mut frame = echoed_a.frame.clone();
+        echo.overlay(&mut frame, (0, 0));
+        assert_eq!(
+            frame.cells[4].symbol, "b",
+            "b is drawn after the space, not on it"
+        );
+        // The server echoes the space: confirmed now, b still pending at its own cell.
+        echo.confirm(
+            Some(&surface("$ a ", 4, false)),
+            t0 + Duration::from_millis(130),
+        );
+        assert_eq!(echo.pending.len(), 1);
+        assert_eq!(echo.cursor, Some((5, 0)));
     }
 
     #[test]
