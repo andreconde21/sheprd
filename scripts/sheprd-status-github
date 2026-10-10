@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""sheprd-status-github — the PR of the current branch, for sheprd's work panel ([[status]]).
+
+Run in a workspace folder; prints one JSON line:
+  {"state": "ok|pending|fail|review|none", "text": "PR #212 · checks ✗ 2", "url": "...",
+   "details": "markdown for the reader"}
+Needs the GitHub CLI (`gh`) signed in on this machine. "none" when there is no PR.
+"""
+import json
+import subprocess
+import sys
+
+FIELDS = "number,title,url,state,isDraft,reviewDecision,statusCheckRollup,mergeStateStatus"
+
+
+def main():
+    result = subprocess.run(["gh", "pr", "view", "--json", FIELDS], capture_output=True, text=True,
+                            timeout=20, check=False)
+    if result.returncode != 0:
+        print(json.dumps({"state": "none", "text": "no PR for this branch"}))
+        return
+    # Tool shims (mise, asdf) may print notes before gh's JSON.
+    pr = json.loads(result.stdout[result.stdout.find("{"):])
+    checks = pr.get("statusCheckRollup") or []
+    failed = [c for c in checks if (c.get("conclusion") or c.get("state") or "").upper()
+              in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED")]
+    running = [c for c in checks if (c.get("status") or c.get("state") or "").upper()
+               in ("IN_PROGRESS", "QUEUED", "PENDING", "EXPECTED", "WAITING")]
+    review = pr.get("reviewDecision") or ""
+    if pr.get("state") == "MERGED":
+        state, extra = "ok", "merged"
+    elif pr.get("state") == "CLOSED":
+        state, extra = "none", "closed"
+    elif failed:
+        state, extra = "fail", f"checks ✗ {len(failed)}"
+    elif running:
+        state, extra = "pending", f"checks ● {len(running)}"
+    elif review in ("REVIEW_REQUIRED", "CHANGES_REQUESTED"):
+        state, extra = "review", "changes requested" if review == "CHANGES_REQUESTED" else "waiting for review"
+    else:
+        state, extra = "ok", "checks ✓" if checks else "open"
+    if pr.get("isDraft"):
+        extra += " · draft"
+    lines = [f"# PR #{pr['number']} {pr.get('title', '')}", "", f"- state: {pr.get('state', '').lower()}",
+             f"- review: {review.lower().replace('_', ' ') or 'none'}", "", "## Checks", ""]
+    for check in checks:
+        name = check.get("name") or check.get("context") or "check"
+        outcome = (check.get("conclusion") or check.get("state") or check.get("status") or "").lower()
+        lines.append(f"- {name}: {outcome}")
+    if not checks:
+        lines.append("- none")
+    print(json.dumps({"state": state, "text": f"PR #{pr['number']} · {extra}", "url": pr.get("url", ""),
+                      "details": "\n".join(lines)}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:  # noqa: BLE001 - always print one line
+        print(json.dumps({"state": "none", "text": f"status failed: {err}"[:80]}))
+    sys.exit(0)
