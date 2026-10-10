@@ -907,7 +907,10 @@ pub(super) fn open_task(id: String) {
                 push_task_body(id, text);
             });
         }
-        None => push_task_body(id, None),
+        None => match task_open(&id) {
+            Some(command) => spawn_detached(&command),
+            None => push_task_body(id, None),
+        },
     }
 }
 
@@ -1022,15 +1025,29 @@ pub(super) fn word_at<'a>(
 /// `[[refs]] name = "issues" pattern = "#\\d+" command = "gh issue view {id}"`.
 /// The first source whose pattern matches the whole id wins.
 pub(super) fn task_command(id: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Source {
-        pattern: String,
-        command: String,
-    }
+    ref_command(id, |source| source.command.as_deref())
+}
+
+/// The `open` command of the reference source matching `id` (opens the card in another app, e.g.
+/// `xdg-open 'obsidian://…{id}'`), used when the source has no reader `command`.
+pub(super) fn task_open(id: &str) -> Option<String> {
+    ref_command(id, |source| source.open.as_deref())
+}
+
+#[derive(Deserialize)]
+struct RefSource {
+    pattern: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    open: Option<String>,
+}
+
+fn ref_command(id: &str, pick: impl Fn(&RefSource) -> Option<&str>) -> Option<String> {
     #[derive(Deserialize)]
     struct Config {
         #[serde(default)]
-        refs: Vec<Source>,
+        refs: Vec<RefSource>,
     }
     if !id
         .chars()
@@ -1040,12 +1057,24 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     }
     let path = crate::config::config_dir().join("sheprd-refs.toml");
     let config: Config = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    config.refs.into_iter().find_map(|source| {
+    config.refs.iter().find_map(|source| {
         let pattern = regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok()?;
-        pattern
-            .is_match(id)
-            .then(|| source.command.replace("{id}", id))
+        if !pattern.is_match(id) {
+            return None;
+        }
+        pick(source).map(|command| command.replace("{id}", id))
     })
+}
+
+/// Runs a command detached (opening something in another app); output is ignored.
+pub(super) fn spawn_detached(command: &str) {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Current context size of an agent, from the usage hook.
