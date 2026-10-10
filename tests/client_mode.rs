@@ -564,15 +564,19 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
                     output.push_str(&out);
+                    // andreconde fork (sheprd): its sidebar's header is a rendered frame too.
                     if out.contains("\u{2500}")
                         || out.contains("workspace")
                         || out.contains("pane")
                         || out.contains("terminal")
+                        || out.contains("all agents")
                     {
                         seen = true;
                         break;
                     }
-                    if output.to_lowercase().contains("herdr:") {
+                    if output.to_lowercase().contains("herdr:")
+                        || output.to_lowercase().contains("sheprd:")
+                    {
                         break;
                     }
                 }
