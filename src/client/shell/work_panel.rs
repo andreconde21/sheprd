@@ -255,15 +255,19 @@ pub(super) fn render(
     }
     let title = match agent {
         Some(agent) => format!(
-            " work · {}",
+            " {}{}",
             agent
                 .name
                 .as_deref()
                 .or(agent.display_agent.as_deref())
                 .or(agent.agent.as_deref())
-                .unwrap_or("agent")
+                .unwrap_or("agent"),
+            machine
+                .as_deref()
+                .map(|machine| format!(" · {machine}"))
+                .unwrap_or_default()
         ),
-        None => " work".to_owned(),
+        None => " no agent focused".to_owned(),
     };
     put_text(
         buffer,
@@ -332,16 +336,139 @@ pub(super) fn render(
     if top > area.y + 2 {
         top += 1;
     }
-    if tasks.is_empty() {
-        let note = if agent.is_some() {
-            " no subagent tasks yet"
-        } else {
-            " no agent focused"
-        };
-        put_text(buffer, x, top, width, note, base.fg(palette.overlay0));
+    let Some(agent) = agent else {
         return;
-    }
+    };
+    let heading = base.fg(palette.overlay1).add_modifier(Modifier::BOLD);
     let mut y = top;
+    // What the agent has been doing (model summary, asked for by sheprd while this shows).
+    let summary = projects::agent_token(agent, "sheprd_sum");
+    let label = match projects::agent_token(agent, "sheprd_sum_at") {
+        Some(at) => format!(" SUMMARY · {at}"),
+        None => " SUMMARY".to_owned(),
+    };
+    put_text(buffer, x, y, width, &label, heading);
+    y += 1;
+    match summary {
+        Some(summary) => {
+            for line in wrap(summary, usize::from(width.saturating_sub(2)))
+                .into_iter()
+                .take(3)
+            {
+                if y >= area.bottom() {
+                    return;
+                }
+                put_text(buffer, x + 1, y, width - 1, &line, base);
+                y += 1;
+            }
+            for i in 1..=3 {
+                if let Some(done) = projects::agent_token(agent, &format!("sheprd_sum_{i}")) {
+                    let lines = wrap(done, usize::from(width.saturating_sub(4)));
+                    for (n, line) in lines.into_iter().take(2).enumerate() {
+                        if y >= area.bottom() {
+                            return;
+                        }
+                        let bullet = if n == 0 { "· " } else { "  " };
+                        put_text(
+                            buffer,
+                            x + 1,
+                            y,
+                            width - 1,
+                            &format!("{bullet}{line}"),
+                            base.fg(palette.overlay1),
+                        );
+                        y += 1;
+                    }
+                }
+            }
+        }
+        None => {
+            put_text(
+                buffer,
+                x + 1,
+                y,
+                width - 1,
+                "on its way…",
+                base.fg(palette.overlay0),
+            );
+            y += 1;
+        }
+    }
+    // Questions in its last message that wait on you.
+    let questions = (1..=3)
+        .filter_map(|i| projects::agent_token(agent, &format!("sheprd_q_{i}")))
+        .collect::<Vec<_>>();
+    if !questions.is_empty() && y + 1 < area.bottom() {
+        y += 1;
+        put_text(
+            buffer,
+            x,
+            y,
+            width,
+            " WAITING ON YOU",
+            heading.fg(palette.yellow),
+        );
+        y += 1;
+        for question in questions {
+            for line in wrap(question, usize::from(width.saturating_sub(4)))
+                .into_iter()
+                .take(2)
+            {
+                if y >= area.bottom() {
+                    return;
+                }
+                put_text(
+                    buffer,
+                    x + 1,
+                    y,
+                    width - 1,
+                    &format!("? {line}"),
+                    base.fg(palette.yellow),
+                );
+                y += 1;
+            }
+        }
+    }
+    // To-do: what it is on, then what is left.
+    if let Some(((done, total), items)) = projects::agent_todo(agent) {
+        if y + 1 < area.bottom() {
+            y += 1;
+            put_text(
+                buffer,
+                x,
+                y,
+                width,
+                &format!(" TO-DO {done}/{total}"),
+                heading,
+            );
+            y += 1;
+            let mut shown = items
+                .iter()
+                .filter(|item| !item.starts_with('✓'))
+                .take(5)
+                .collect::<Vec<_>>();
+            if shown.is_empty() {
+                shown = items.iter().rev().take(1).collect();
+            }
+            for item in shown {
+                if y >= area.bottom() {
+                    return;
+                }
+                let color = if item.starts_with('▸') {
+                    palette.accent
+                } else {
+                    palette.text
+                };
+                put_text(buffer, x + 1, y, width - 1, item, base.fg(color));
+                y += 1;
+            }
+        }
+    }
+    if !tasks.is_empty() && y + 2 < area.bottom() {
+        y += 1;
+        put_text(buffer, x, y, width, " TASKS", heading);
+        y += 1;
+    }
     for task in &tasks {
         if y + 1 >= area.bottom() {
             break;
@@ -419,6 +546,121 @@ pub(super) fn render(
         }
         y += 3;
     }
+    // Timeline: the latest prompts it got, oldest first, as many as fit.
+    let timeline = projects::agent_timeline(agent);
+    if !timeline.is_empty() && y + 2 < area.bottom() {
+        put_text(buffer, x, y, width, " TIMELINE", heading);
+        y += 1;
+        let room = usize::from(area.bottom().saturating_sub(y));
+        let skip = timeline.len().saturating_sub(room);
+        for line in timeline.iter().skip(skip) {
+            put_text(buffer, x + 1, y, width - 1, line, base.fg(palette.overlay1));
+            y += 1;
+        }
+    }
+}
+
+/// Asks the focused agent's machine for a fresh summary when the panel shows it: the first time,
+/// then when it moved on (state changed) and 10 minutes passed. The hook skips sessions whose
+/// transcript barely grew, so looking at an idle agent costs nothing.
+pub(super) fn request_summary(endpoints: &[ClientShellEndpoint], active: &ClientEndpointId) {
+    static ASKED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    if cfg!(test) {
+        return;
+    }
+    let Some((agent, machine)) = focused_agent(endpoints, active) else {
+        return;
+    };
+    let Some(session) = projects::agent_token(agent, "sheprd_session").map(str::to_owned) else {
+        return;
+    };
+    let key = format!(
+        "{}/{}",
+        machine.as_deref().unwrap_or("local"),
+        agent.pane_id
+    );
+    {
+        let mut asked = ASKED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((seq, at)) = asked.get(&key) {
+            if *seq == agent.state_change_seq || at.elapsed() < std::time::Duration::from_secs(600)
+            {
+                return;
+            }
+        }
+        asked.insert(key, (agent.state_change_seq, std::time::Instant::now()));
+    }
+    let pane = agent.pane_id.clone();
+    std::thread::spawn(move || {
+        let mut command = match machine {
+            None => {
+                let Some(hook) = crate::sheprd_msg::bundled_script("sheprd-claude-hook") else {
+                    return;
+                };
+                let mut command = std::process::Command::new("python3");
+                command
+                    .arg(hook)
+                    .args(["--summarize-session", &session, &pane]);
+                if let Ok(exe) = std::env::current_exe() {
+                    command.env("HERDR_BIN_PATH", exe);
+                }
+                command
+            }
+            Some(label) => {
+                let Some((target, herdr_session)) = machine_profile(&label) else {
+                    return;
+                };
+                let socket = if herdr_session == "default" {
+                    String::new()
+                } else {
+                    format!("HERDR_SOCKET_PATH=\"$HOME/.config/herdr/sessions/{herdr_session}/herdr.sock\" ")
+                };
+                let script = format!(
+                    "PATH=\"$HOME/.local/bin:$PATH\"; {socket}sheprd-claude-hook --summarize-session {session} {pane}"
+                );
+                let mut command = std::process::Command::new("ssh");
+                command.args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=5",
+                    &target,
+                    &script,
+                ]);
+                command
+            }
+        };
+        let _ = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+/// Word-wraps `text` to `width` columns.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty()
+            && display_width(&line) as usize + 1 + display_width(word) as usize > width
+        {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Reads the hook's details file, here or on the agent's machine (over SSH, with the target from

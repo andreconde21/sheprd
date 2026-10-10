@@ -20,10 +20,12 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
   sheprd_q_1..3         open questions in the agent's last message, when it stopped (for the board)
   sheprd_sum            one-line summary of where the work stands (opt-in model summary)
   sheprd_sum_1..3       what got done recently, one line each (opt-in model summary)
+  sheprd_sum_at         when that summary was made (HH:MM)
 
-Model summaries are off unless ~/.config/herdr/sheprd-hook.toml says `summaries = true`. They
-run Claude Haiku through your Claude subscription (`claude -p --safe-mode`), in the background,
-when the agent stops or every 10 minutes while it works, and only when the transcript grew.
+Model summaries run Claude Haiku through your Claude subscription (`claude -p --safe-mode`), in
+the background. sheprd asks for one when its work panel shows the agent and the agent moved on
+(`--summarize-session`); with `summaries = true` in ~/.config/herdr/sheprd-hook.toml every agent
+also gets one when it stops or every 10 minutes while it works. Only when the transcript grew.
 
 Incremental: a per-session cache keeps the read offset and state, so a turn only
 costs the new lines. Never fails the agent: any error exits 0.
@@ -466,8 +468,26 @@ def digest(transcript, limit=12000):
     return "\n".join([first] + ([f"... {skipped} earlier messages ..."] if skipped else []) + list(reversed(kept)))
 
 
+def summarize_session(session, pane):
+    """On request (sheprd's work panel): summarize a session found by id, if it moved on."""
+    import glob
+    found = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session}.jsonl"))
+    if not found:
+        return
+    transcript = found[0]
+    try:
+        with open(summary_path(session)) as handle:
+            done_size = json.load(handle).get("size", 0)
+    except (OSError, ValueError):
+        done_size = 0
+    if os.path.getsize(transcript) - done_size < 2000:
+        return
+    summarize(session, transcript, pane)
+
+
 def summarize(session, transcript, pane):
     """Background: ask Haiku for a summary and report it (sheprd_sum, sheprd_sum_1..3)."""
+    size = os.path.getsize(transcript)
     text = digest(transcript)
     if not text:
         return
@@ -486,8 +506,11 @@ def summarize(session, transcript, pane):
         out["sheprd_sum"] = fit(str(data["title"]))
     for i, line in enumerate([str(d) for d in data.get("done", [])][-3:], 1):
         out[f"sheprd_sum_{i}"] = fit(line)
+    out["sheprd_sum_at"] = datetime.now().strftime("%H:%M")
+    os.makedirs(CACHE_DIR, exist_ok=True)
     with open(summary_path(session) + ".tmp", "w") as handle:
-        json.dump({"tokens": out, "questions": [fit(str(q)) for q in data.get("questions", [])][:3]}, handle)
+        json.dump({"tokens": out, "size": size,
+                   "questions": [fit(str(q)) for q in data.get("questions", [])][:3]}, handle)
     os.replace(summary_path(session) + ".tmp", summary_path(session))
     report(pane, out, [])
 
@@ -623,6 +646,13 @@ def install():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--install"]:
         install()
+        sys.exit(0)
+    if sys.argv[1:2] == ["--summarize-session"] and len(sys.argv) == 4:
+        os.environ["SHEPRD_HOOK_SKIP"] = "1"  # the claude -p it starts must not run this hook
+        try:
+            summarize_session(*sys.argv[2:4])
+        except Exception:  # noqa: BLE001 - background, never visible
+            pass
         sys.exit(0)
     if sys.argv[1:2] == ["--summarize"] and len(sys.argv) == 5:
         try:

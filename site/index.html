@@ -262,8 +262,28 @@
       </article>
       <article class="feature">
         <span class="glyph">▰▰▰▱▱ 3/5</span>
-        <h3>What each agent is doing</h3>
-        <p>With the bundled Claude Code hook: a to-do progress bar on the row, a timeline of each prompt and what followed, and the references the agent talked about.</p>
+        <h3>What each agent has been doing</h3>
+        <p>A panel on the right for the agent you're looking at: a short summary of its work, the questions it waits on, its to-do list, and each task it handed to subagents with its dev, review and browser-check stages. No need to read the transcript.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">✗ PR #7</span>
+        <h3>PR, checks and deploys</h3>
+        <p>Plug in a command per forge or pipeline and every workspace shows its PR, checks and deploy state. Red CI counts as needing you.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">board</span>
+        <h3>Every agent on one page</h3>
+        <p>A status board across machines, grouped by project, those that need you first, with what each is on and what it's asking.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">3 ms</span>
+        <h3>A server that feels local</h3>
+        <p>What you type on another machine shows at once, like mosh. Switching workspaces shows the last screen immediately, and machines reconnect seconds after Wi-Fi comes back.</p>
+      </article>
+      <article class="feature">
+        <span class="glyph">plan.md</span>
+        <h3>Documents in your editor</h3>
+        <p>Ctrl+click a Markdown path an agent printed and it opens in your editor, in a split next to that agent, on its machine. Agents can open the plans they write for you too.</p>
       </article>
       <article class="feature">
         <span class="glyph">laptop ⇄ server</span>
@@ -350,12 +370,15 @@ command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
         <tbody>
           <tr><td><kbd>prefix+space</kbd></td><td>Peek: idle age, context, jump numbers, usage, latency</td></tr>
           <tr><td><kbd>prefix+u</kbd></td><td>Next agent that needs you</td></tr>
+          <tr><td><kbd>prefix+b</kbd></td><td>Sidebar: full, rail or hidden</td></tr>
+          <tr><td><kbd>prefix+shift+b</kbd></td><td>Right panel: full, mini or hidden</td></tr>
+          <tr><td><kbd>prefix+shift+u</kbd></td><td>Status board</td></tr>
           <tr><td><kbd>prefix+#</kbd></td><td>Show jump numbers, type one to jump</td></tr>
           <tr><td><kbd>prefix+alt+c</kbd></td><td>New workspace on a machine you pick</td></tr>
           <tr><td><kbd>prefix+/</kbd></td><td>Filter the sidebar</td></tr>
           <tr><td><kbd>prefix+.</kbd></td><td>Project menu for the focused workspace</td></tr>
           <tr><td><kbd>prefix+alt+h</kbd></td><td>Show or conceal hidden workspaces</td></tr>
-          <tr><td><kbd>ctrl+click</kbd></td><td>Open the reference under the mouse</td></tr>
+          <tr><td><kbd>ctrl+click</kbd></td><td>Open the reference or Markdown document under the mouse</td></tr>
         </tbody>
       </table>
     </div>
