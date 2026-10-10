@@ -68,6 +68,7 @@ fn agent_text(
     agent: &crate::protocol::ClientShellAgent,
     machine: &str,
     workspace: &str,
+    workspace_key: &str,
     presence: Presence,
 ) -> String {
     let mut text = format!(
@@ -75,6 +76,15 @@ fn agent_text(
         mark(presence),
         title(agent)
     );
+    for status in super::status::statuses(workspace_key) {
+        let glyph = match status.state.as_str() {
+            "ok" => "✓",
+            "fail" => "✗",
+            "review" => "◐",
+            _ => "●",
+        };
+        text.push_str(&format!("- {glyph} {}: {}\n", status.name, status.text));
+    }
     if let Some(card) = projects::agent_tasks(agent).first() {
         text.push_str(&format!("- card: {card}\n"));
     }
@@ -149,10 +159,16 @@ pub(super) fn board_document(endpoints: &[ClientShellEndpoint], layout: &Project
                 agent.state_change_seq,
                 agent.agent_status,
             );
+            // Red CI counts as needing you (SHE-100004).
+            let failing = super::status::failing(&key);
             entries.push(Entry {
-                rank: rank(presence),
+                rank: if failing {
+                    rank(presence).min(1)
+                } else {
+                    rank(presence)
+                },
                 project: project_of(&key),
-                text: agent_text(agent, &endpoint.label, &workspace.label, presence),
+                text: agent_text(agent, &endpoint.label, &workspace.label, &key, presence),
             });
         }
     }

@@ -615,10 +615,20 @@ impl ClientShellState {
                     row.agent.state_change_seq,
                     row.agent.agent_status,
                 );
+                // Red CI on the agent's workspace counts as needing you (SHE-100004).
+                let failing = endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == row.agent.workspace_id)
+                        .is_some_and(|workspace| {
+                            super::status::failing(&projects::workspace_key(endpoint, workspace))
+                        })
+                });
                 (
                     endpoint.endpoint_id.clone(),
                     row.agent.pane_id.clone(),
-                    presence.needs_attention(),
+                    presence.needs_attention() || failing,
                     row.agent.focused && endpoint.endpoint_id == self.active_endpoint_id,
                 )
             })
@@ -1351,6 +1361,7 @@ impl ClientShellState {
             crate::sheprd_msg::ensure_relay();
         }
         super::view_sync::tick(&self.endpoints, &self.active_endpoint_id);
+        super::status::tick(&self.endpoints);
         outcome.actions.extend(self.tick_sheprd_launch());
         for (endpoint_id, pane_id) in projects::take_focus_requests() {
             self.focus_or_activate(

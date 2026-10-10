@@ -705,6 +705,9 @@ impl ClientShellState {
                         stage,
                     } => super::work_panel::open_url(machine, file, key, label, stage),
                     WorkHit::Link(link) => super::work_panel::open_link(&link),
+                    WorkHit::Details { title, details } => {
+                        super::projects::push_task_body(title, Some(details))
+                    }
                     WorkHit::Expand => {
                         self.work_panel = super::work_panel::FULL;
                         self.invalidate_pane_surface();

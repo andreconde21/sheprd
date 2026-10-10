@@ -1166,14 +1166,12 @@ pub(super) fn attention_count(
             continue;
         };
         for agent in &snapshot.agents {
-            let hidden = snapshot
+            let key = snapshot
                 .workspaces
                 .iter()
                 .find(|workspace| workspace.workspace_id == agent.workspace_id)
-                .is_some_and(|workspace| {
-                    layout.is_hidden(&projects::workspace_key(endpoint, workspace))
-                });
-            if hidden {
+                .map(|workspace| projects::workspace_key(endpoint, workspace));
+            if key.as_deref().is_some_and(|key| layout.is_hidden(key)) {
                 continue;
             }
             let presence = layout.presence(
@@ -1181,7 +1179,9 @@ pub(super) fn attention_count(
                 agent.state_change_seq,
                 agent.agent_status,
             );
-            if presence.needs_attention() {
+            // Red CI on the workspace counts as needing you (SHE-100004).
+            let failing = key.as_deref().is_some_and(super::status::failing);
+            if presence.needs_attention() || failing {
                 count += 1;
                 blocked |= presence == Presence::Blocked;
             }
