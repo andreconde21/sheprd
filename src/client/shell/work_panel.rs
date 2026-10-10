@@ -23,6 +23,8 @@ pub(super) struct WorkTask {
     pub(super) label: String,
     /// (stage type, state: 'r' running, 'd' done, 's' stopped, 'f' failed).
     pub(super) stages: Vec<(String, char)>,
+    /// Stages that opened pages in a browser (the hook's "+"): the panel links them.
+    pub(super) browsed: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,23 +83,32 @@ fn parse_task(value: &str) -> Option<WorkTask> {
     let mut parts = value.splitn(3, '|');
     let key = parts.next()?.trim().to_owned();
     let label = parts.next()?.trim().to_owned();
+    let mut browsed = Vec::new();
     let stages = parts
         .next()?
         .split(',')
         .filter_map(|stage| {
             let (name, state) = stage.rsplit_once(':')?;
-            Some((name.trim().to_owned(), state.trim().chars().next()?))
+            let name = name.trim().to_owned();
+            if state.contains('+') {
+                browsed.push(name.clone());
+            }
+            Some((name, state.trim().chars().next()?))
         })
         .collect::<Vec<_>>();
-    (!stages.is_empty()).then_some(WorkTask { key, label, stages })
+    (!stages.is_empty()).then_some(WorkTask {
+        key,
+        label,
+        stages,
+        browsed,
+    })
 }
 
 fn short_stage(name: &str) -> String {
-    match name {
-        "adversarial" => "adv".to_owned(),
-        "chrome" => "chr".to_owned(),
-        other if other.chars().count() <= 5 => other.to_owned(),
-        other => other.chars().take(3).collect(),
+    if name.chars().count() <= 5 {
+        name.to_owned()
+    } else {
+        name.chars().take(3).collect()
     }
 }
 
@@ -117,11 +128,6 @@ fn mark_color(state: char, palette: &Palette) -> ratatui::style::Color {
         'f' => palette.red,
         _ => palette.overlay0,
     }
-}
-
-fn is_browser_stage(name: &str) -> bool {
-    let name = name.to_lowercase();
-    name.contains("chrome") || name.contains("browser")
 }
 
 /// A workspace token (`card`, `card_link`), as reported by the tool that started it.
@@ -544,7 +550,7 @@ pub(super) fn render(
                 hits.work_panel.push((Rect::new(sx, line, w, 1), hit));
             }
             sx += w + 2;
-            if is_browser_stage(stage) && *state == 'd' && sx + 1 <= x + width {
+            if task.browsed.contains(stage) && *state == 'd' && sx + 1 <= x + width {
                 if let Some(file) = &file {
                     put_text(buffer, sx - 1, line, 1, "↗", base.fg(palette.accent));
                     let hit = WorkHit::Url {
@@ -887,13 +893,16 @@ mod tests {
     #[test]
     fn parses_hook_tokens() {
         assert_eq!(
-            parse_task("CAL-1021|Bring PRs onto trunk|dev:d,adversarial:r"),
+            parse_task("BILL-12|Retry failed webhooks|dev:d,adversarial:r"),
             Some(WorkTask {
-                key: "CAL-1021".into(),
-                label: "Bring PRs onto trunk".into(),
+                key: "BILL-12".into(),
+                label: "Retry failed webhooks".into(),
                 stages: vec![("dev".into(), 'd'), ("adversarial".into(), 'r')],
+                browsed: vec![],
             })
         );
+        let checked = parse_task("BILL-3|Check|qa:d+").unwrap();
+        assert_eq!(checked.browsed, vec!["qa".to_owned()]);
         let no_id = parse_task("|Draft release notes|agent:s").unwrap();
         assert_eq!((no_id.key.as_str(), no_id.stages[0].1), ("", 's'));
         assert_eq!(parse_task("garbage"), None);
@@ -903,7 +912,7 @@ mod tests {
     #[test]
     fn stage_document_includes_report_and_pages() {
         let details = serde_json::json!({"tasks": [
-            {"key": "CAL-9", "label": "x", "stages": [
+            {"key": "BILL-9", "label": "x", "stages": [
                 {"type": "chrome", "state": "d", "description": "DEV check", "report": "All good.",
                  "urls": ["https://dev.example/a"], "files": []}
             ]},
@@ -911,7 +920,7 @@ mod tests {
                 {"type": "agent", "state": "s", "description": "Draft notes", "report": ""}
             ]}
         ]});
-        let doc = stage_document(&details, "CAL-9", "x", "chrome").unwrap();
+        let doc = stage_document(&details, "BILL-9", "x", "chrome").unwrap();
         assert!(doc.contains("# chrome · done") && doc.contains("All good."));
         assert!(doc.contains("- https://dev.example/a"));
         let no_id = stage_document(&details, "", "Draft notes", "agent").unwrap();
@@ -919,6 +928,6 @@ mod tests {
             no_id.contains("stopped without a final answer")
                 && no_id.contains("No final report yet.")
         );
-        assert!(stage_document(&details, "CAL-9", "x", "dev").is_none());
+        assert!(stage_document(&details, "BILL-9", "x", "dev").is_none());
     }
 }

@@ -549,8 +549,8 @@ description: Talk to coding agents on other machines (or other workspaces on thi
 
 ```bash
 sheprd-msg list                          # every reachable agent: machine/workspace, pane, status, context
-sheprd-msg send dev/TheCalendar "text"   # submit a prompt to that agent (by workspace label, id or pane id)
-sheprd-msg read dev/TheCalendar -n 80    # its recent terminal output (machines reachable directly)
+sheprd-msg send dev/billing "text"   # submit a prompt to that agent (by workspace label, id or pane id)
+sheprd-msg read dev/billing -n 80    # its recent terminal output (machines reachable directly)
 sheprd-msg whoami                        # how others address you
 ```
 

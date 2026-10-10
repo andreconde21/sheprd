@@ -54,8 +54,8 @@ pub(super) struct ProjectGroup {
     pub(super) short: Option<String>,
 }
 
-/// Rail tag: explicit `short`, else capitals ("TheCalendar" -> "TC"), else
-/// first letters of the first two words ("Outsmartis ops" -> "OO"), else the
+/// Rail tag: explicit `short`, else capitals ("StoreFront" -> "SF"), else
+/// first letters of the first two words ("Acme ops" -> "AO"), else the
 /// first two letters ("Infrastructure" -> "In").
 pub(super) fn project_tag(name: &str, short: Option<&str>) -> String {
     if let Some(short) = short.filter(|short| !short.trim().is_empty()) {
@@ -995,7 +995,7 @@ pub(super) fn reader_document(id: &str, text: &str) -> (String, String, String) 
     (title, subtitle, out)
 }
 
-/// The task-id-shaped word at `col` in a row of cell symbols ("…see HZ-018, then…" → "HZ-018"),
+/// The task-id-shaped word at `col` in a row of cell symbols ("…see OP-018, then…" → "OP-018"),
 /// trimmed of surrounding punctuation. Whether it is a task is up to `task_command`.
 pub(super) fn word_at<'a>(
     symbols: impl IntoIterator<Item = &'a str>,
@@ -1670,8 +1670,8 @@ mod tests {
 
     #[test]
     fn rail_tags() {
-        assert_eq!(project_tag("TheCalendar", None), "TC");
-        assert_eq!(project_tag("Outsmartis ops", None), "OO");
+        assert_eq!(project_tag("StoreFront", None), "SF");
+        assert_eq!(project_tag("Acme ops", None), "AO");
         assert_eq!(project_tag("Infrastructure", None), "In");
         assert_eq!(project_tag("LF", None), "LF");
         assert_eq!(project_tag("VTM", None), "VT");
@@ -1786,16 +1786,16 @@ mod word_at_tests {
         assert_eq!(at("file:///tmp/a.md#intro", 9), Some("/tmp/a.md".into()));
         assert_eq!(at("open README.MD now", 7), Some("README.MD".into()));
         assert_eq!(at("see src/main.rs", 6), None);
-        assert_eq!(at("CAL-1021 is done", 2), None);
+        assert_eq!(at("BILL-12 is done", 2), None);
     }
 
     #[test]
     fn finds_the_task_id_under_the_column_without_punctuation() {
-        let cells = row("see HZ-018, then (CAL-1090).");
+        let cells = row("see OP-018, then (SHP-1090).");
         let symbols = || cells.iter().map(String::as_str);
-        assert_eq!(word_at(symbols(), 6).as_deref(), Some("HZ-018"));
-        assert_eq!(word_at(symbols(), 4).as_deref(), Some("HZ-018"));
-        assert_eq!(word_at(symbols(), 20).as_deref(), Some("CAL-1090"));
+        assert_eq!(word_at(symbols(), 6).as_deref(), Some("OP-018"));
+        assert_eq!(word_at(symbols(), 4).as_deref(), Some("OP-018"));
+        assert_eq!(word_at(symbols(), 20).as_deref(), Some("SHP-1090"));
         assert_eq!(word_at(symbols(), 3), None);
     }
 }
@@ -1806,10 +1806,10 @@ mod reader_tests {
 
     #[test]
     fn front_matter_becomes_title_and_subtitle_and_markdown_is_mapped() {
-        let text = "---\nid: HZ-018\ntitle: \"Rotate the token\"\nstatus: todo\nproject: hetzner\nbadges:\n  - x\n---\n\n## Description\n\n**Bold** text\n- [ ] open item\n  - nested\n> quoted\n";
-        let (title, subtitle, body) = reader_document("HZ-018", text);
-        assert_eq!(title, "HZ-018  Rotate the token");
-        assert_eq!(subtitle, "status todo · project hetzner");
+        let text = "---\nid: OP-018\ntitle: \"Rotate the token\"\nstatus: todo\nproject: ops\nbadges:\n  - x\n---\n\n## Description\n\n**Bold** text\n- [ ] open item\n  - nested\n> quoted\n";
+        let (title, subtitle, body) = reader_document("OP-018", text);
+        assert_eq!(title, "OP-018  Rotate the token");
+        assert_eq!(subtitle, "status todo · project ops");
         assert!(body.contains("### Description"));
         assert!(body.contains("Bold text"));
         assert!(body.contains("- ☐ open item"));
