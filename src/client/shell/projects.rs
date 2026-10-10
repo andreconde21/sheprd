@@ -132,6 +132,9 @@ pub(super) struct ProjectLayout {
     /// Share this view with apps that mirror sheprd (~/.local/state/sheprd/view.json).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) share_view: bool,
+    /// Predictive local echo for panes on other machines is on unless this is set (SHE-100003).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) local_echo_off: bool,
 }
 
 struct Store {

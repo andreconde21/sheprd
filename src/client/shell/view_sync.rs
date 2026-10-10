@@ -70,7 +70,13 @@ pub(super) fn view_json(
     let layout = projects::layout();
     let mut shown = serde_json::to_value(&layout).unwrap_or_default();
     if let Some(map) = shown.as_object_mut() {
-        for private in ["unread", "dismissed", "kept", "share_view"] {
+        for private in [
+            "unread",
+            "dismissed",
+            "kept",
+            "share_view",
+            "local_echo_off",
+        ] {
             map.remove(private);
         }
     }

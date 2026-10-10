@@ -1344,6 +1344,8 @@ impl ClientShellState {
 
     /// Periodic sheprd work, from the client loop's 100 ms timer.
     pub(crate) fn tick_sheprd(&mut self, outcome: &mut ClientShellInput) {
+        static ECHO_LOADED: std::sync::Once = std::sync::Once::new();
+        ECHO_LOADED.call_once(|| super::predict::set_enabled(!projects::layout().local_echo_off));
         outcome.repaint |= super::predict::predictor().expire(std::time::Instant::now());
         if self.endpoints.len() > 1 {
             crate::sheprd_msg::ensure_relay();

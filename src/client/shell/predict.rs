@@ -18,6 +18,20 @@ use crate::protocol::{
 const SHOW_ABOVE: Duration = Duration::from_millis(30);
 const MIN_GIVE_UP: Duration = Duration::from_secs(1);
 
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Local echo on or off (sidebar.toml `local_echo_off`, the menu's "local echo" entry).
+pub(super) fn set_enabled(enabled: bool) {
+    ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    if !enabled {
+        predictor().reset();
+    }
+}
+
+pub(super) fn enabled() -> bool {
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The client's one predictor (one focused pane at a time).
 pub(super) fn predictor() -> std::sync::MutexGuard<'static, EchoPredictor> {
     static PREDICTOR: std::sync::OnceLock<std::sync::Mutex<EchoPredictor>> =
