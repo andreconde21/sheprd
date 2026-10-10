@@ -14,8 +14,10 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
   sheprd_tl_1..10       timeline: "09:12 fix the bar widget (+3 edits, 2 cmds)", oldest first
   sheprd_refs           references mentioned in the chat (patterns from sheprd-refs.toml), newest first
   sheprd_w_1..10        work panel: one task each, "id|label|stage:s,stage:s" (s = r running, d done,
-                        s stopped without a final answer), from the subagents this session started;
-                        newest first; id is empty when the task names no reference
+                        s stopped without a final answer; a trailing "+" when it opened pages in a
+                        browser), from the subagents this session started; newest first; id is
+                        empty when the task names no reference. Stage order: `stage_order` in
+                        ~/.config/herdr/sheprd-hook.toml, else the order they ran in
   sheprd_wf             path of the details file for the work panel (reports, visited pages)
   sheprd_q_1..3         open questions in the agent's last message, when it stopped (for the board)
   sheprd_sum            one-line summary of where the work stands (opt-in model summary)
@@ -48,7 +50,8 @@ CACHE_DIR = os.path.expanduser("~/.cache/sheprd/claude-hook")
 WORK_DIR = os.path.expanduser("~/.cache/sheprd/work")
 MAX_WORK = 10
 WORK_SCAN = 80  # most recent subagents looked at per turn
-STAGE_ORDER = ["dev", "adversarial", "chrome"]  # pipeline order; other subagent types follow
+# Browser tools (any MCP server or plugin): a subagent that used one gets its pages linked.
+BROWSER_TOOL = re.compile(r"navigate|browser|chrome|playwright|new_page|open_page|goto", re.I)
 HOOK_CONFIG = os.path.expanduser("~/.config/herdr/sheprd-hook.toml")
 SUMMARY_EVERY = 600  # seconds between summaries while the agent keeps working
 SUMMARY_MIN_GROWTH = 4000  # transcript bytes added before a new summary is worth it
@@ -288,6 +291,8 @@ def _visited(path, cache):
                 for c in (json.loads(line).get("message") or {}).get("content") or []:
                     if not isinstance(c, dict) or c.get("type") != "tool_use":
                         continue
+                    if not BROWSER_TOOL.search(c.get("name", "")):
+                        continue
                     data = c.get("input") or {}
                     url = data.get("url")
                     if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in urls:
@@ -302,6 +307,19 @@ def _visited(path, cache):
         del seen[old]
     seen[key] = {"urls": urls[-8:], "files": files[-8:]}
     return seen[key]
+
+
+def _started(path):
+    """When a subagent started: the timestamp of its transcript's first entry (ISO text sorts)."""
+    try:
+        with open(path) as handle:
+            for line in handle:
+                stamp = json.loads(line).get("timestamp")
+                if stamp:
+                    return stamp
+    except (OSError, ValueError):
+        pass
+    return ""
 
 
 def work(transcript, session, patterns, cache):
@@ -338,21 +356,27 @@ def work(transcript, session, patterns, cache):
         for task in ids[:1]:
             label = re.sub(rf"\b{re.escape(task)}\b[:\s-]*", "", label).strip() or description
         entry = tasks.setdefault(key or description, {"key": key, "label": label, "stages": [], "at": os.path.getmtime(log)})
-        if any(s["type"] == stage for s in entry["stages"]):
-            continue  # newest run of this stage wins (metas are newest first)
+        started = _started(log)
+        earlier = next((s for s in entry["stages"] if s["type"] == stage), None)
+        if earlier:
+            # Newest run of a stage wins (metas are newest first); keep when it first ran.
+            earlier["first"] = min(earlier["first"], started)
+            continue
         detail = {
-            "type": stage, "state": state, "description": description,
+            "type": stage, "state": state, "description": description, "first": started,
             "verdict": fit(next((l.strip(" #*") for l in text.splitlines() if l.strip()), ""), 120),
             "report": text[:6000],
         }
-        if any(word in stage.lower() for word in ("chrome", "browser")):
-            detail.update(_visited(log, cache))
+        detail.update(_visited(log, cache))
         entry["stages"].append(detail)
     ordered = sorted(tasks.values(), key=lambda t: t["at"], reverse=True)[:MAX_WORK]
     out = {}
     for i, task in enumerate(ordered, 1):
-        task["stages"].sort(key=lambda s: STAGE_ORDER.index(s["type"]) if s["type"] in STAGE_ORDER else len(STAGE_ORDER))
-        stages = ",".join(f"{s['type'][:12]}:{s['state']}" for s in task["stages"][-4:])
+        # Your pipeline's order (`stage_order` in sheprd-hook.toml), else the order they ran in.
+        order = [str(s) for s in hook_config().get("stage_order", [])]
+        task["stages"].sort(key=lambda s: (order.index(s["type"]) if s["type"] in order else len(order), s["first"]))
+        # "+" marks a stage that opened pages in a browser (the panel links them).
+        stages = ",".join(f"{s['type'][:12]}:{s['state']}{'+' if s.get('urls') else ''}" for s in task["stages"][-4:])
         head = f"{task['key']}|"
         out[f"sheprd_w_{i}"] = head + fit(task["label"], max(4, MAX_VALUE - len(head) - len(stages) - 1)) + "|" + stages
     if not ordered:

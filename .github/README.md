@@ -90,7 +90,7 @@ you don't have to read its transcript:
  TO-DO 1/3
  ▸ wire the dead-letter alert
  TASKS
- CAL-1021 Bring PRs onto trunk
+ BILL-12 Retry failed webhooks
   dev ✓  adv ●  chr ✓ ↗
  TIMELINE
  13:58 fix the retry queue (+3 edits, 2 cmds)
@@ -116,10 +116,14 @@ you don't have to read its transcript:
   Claude Code, the ones the summary found on its screen). Click **↩ reply** to
   answer without switching to it: your text goes to the agent as a prompt (or is
   typed into its pane when it is on a dialog).
-- **Tasks**: when it hands work to subagents (dev, adversarial review, a browser
-  check…), one entry per task, grouped by the reference id in the subagent's
-  description. Click the id to read the card (your `[[refs]]` command), a stage
-  to read its final report, `↗` to open the page a browser stage last visited.
+- **Tasks**: when it hands work to subagents (say an implementer, a reviewer, a
+  browser check), one entry per task, grouped by the reference id in the
+  subagent's description, one mark per subagent type. Stages show in the order
+  they ran, or in your pipeline's order with `stage_order = ["dev", "review",
+  "qa"]` in `~/.config/herdr/sheprd-hook.toml` (your subagent type names). Click
+  the id to read the card (your `[[refs]]` command), a stage to read its final
+  report, `↗` (on a stage that used a browser tool) to open the page it last
+  visited.
 - **Card**: when the tool that started the workspace reported `card` and
   `card_link` workspace tokens (Cockpit Board does), click to open the link
   (obsidian://, https://).
@@ -355,8 +359,8 @@ members = ["local/notes"]              # explicit members, in display order
 
 sheprd shows its sidebar with one machine or many. Stock herdr ignores this file.
 `~/.config/herdr/sheprd-refs.toml` holds `[[refs]]` and `[[status]]` (above),
-`~/.config/herdr/sheprd-hook.toml` the summarizer (`summary_command`) and the
-`summaries` switch.
+`~/.config/herdr/sheprd-hook.toml` the summarizer (`summary_command`), the
+`summaries` switch and your subagent pipeline's `stage_order`.
 
 ## Agents talking to agents, across machines
 
