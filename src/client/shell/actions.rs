@@ -64,6 +64,10 @@ impl ClientShellState {
                 }
                 // andreconde fork: sidebar project keys.
                 match action {
+                    crate::input::KeybindAction::OpenBoard => {
+                        self.open_board();
+                        outcome.repaint = true;
+                    }
                     crate::input::KeybindAction::ToggleWorkPanel => {
                         // hidden -> full -> mini -> hidden
                         self.work_panel = match self.work_panel {
