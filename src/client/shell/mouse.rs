@@ -426,6 +426,92 @@ impl ClientShellState {
         outcome
     }
 
+    /// andreconde fork (sheprd): a Markdown path under (row, col) of a pane's visible text.
+    fn markdown_path_in_pane(&self, pane_id: &str, row: u16, col: u16) -> Option<String> {
+        let surface = self.pane_surface.as_ref()?;
+        let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
+        let frame = &surface.frame;
+        let (x, y) = (
+            usize::from(pane.inner_rect.x),
+            usize::from(pane.inner_rect.y + row),
+        );
+        let width = usize::from(pane.inner_rect.width);
+        if usize::from(col) >= width || y >= usize::from(frame.height) {
+            return None;
+        }
+        let start = y * usize::from(frame.width) + x;
+        let cells = frame.cells.get(start..start + width)?;
+        super::projects::markdown_path_at(
+            cells.iter().map(|cell| cell.symbol.as_str()),
+            usize::from(col),
+        )
+    }
+
+    /// andreconde fork (sheprd): opens a document in the user's editor, in a split next to the
+    /// pane, on the pane's machine (`sheprd-doc`; one document split per workspace).
+    fn open_document(&self, pane_id: &str, path: String) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        else {
+            return;
+        };
+        let cwd = endpoint
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.panes.iter().find(|pane| pane.pane_id == pane_id))
+            .and_then(|pane| pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()))
+            .unwrap_or_else(|| "~".to_owned());
+        let machine = (!endpoint.endpoint_id.is_local()).then(|| endpoint.label.clone());
+        let pane_id = pane_id.to_owned();
+        std::thread::spawn(move || {
+            let mut command = match machine {
+                None => {
+                    let Some(script) = crate::sheprd_msg::bundled_script("sheprd-doc") else {
+                        return;
+                    };
+                    let mut command = std::process::Command::new("python3");
+                    command
+                        .arg(script)
+                        .args([path.as_str(), "--pane", &pane_id, "--cwd", &cwd]);
+                    if let Ok(exe) = std::env::current_exe() {
+                        command.env("HERDR_BIN_PATH", exe);
+                    }
+                    command
+                }
+                Some(label) => {
+                    let Some((target, session)) = super::work_panel::machine_profile(&label) else {
+                        return;
+                    };
+                    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+                    let script = format!(
+                        "PATH=\"$HOME/.local/bin:$PATH\"; sheprd-doc {} --pane {} --cwd {} --session {}",
+                        quote(&path),
+                        quote(&pane_id),
+                        quote(&cwd),
+                        quote(&session)
+                    );
+                    let mut command = std::process::Command::new("ssh");
+                    command.args([
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=5",
+                        &target,
+                        &script,
+                    ]);
+                    command
+                }
+            };
+            let _ = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
+    }
+
     /// andreconde fork (sheprd): the word under (row, col) of a pane's visible text, when a task
     /// source in sheprd-refs.toml claims it.
     fn task_id_at(&self, pane_id: &str, row: u16, col: u16) -> Option<String> {
@@ -998,6 +1084,12 @@ impl ClientShellState {
             {
                 let viewport_row = mouse.row.saturating_sub(hit.inner_rect.y);
                 let col = mouse.column.saturating_sub(hit.inner_rect.x);
+                // andreconde fork (sheprd): ctrl+click on a Markdown path opens it in the editor.
+                if let Some(path) = self.markdown_path_in_pane(&hit.pane_id, viewport_row, col) {
+                    self.last_pane_click = None;
+                    self.open_document(&hit.pane_id, path);
+                    return;
+                }
                 // andreconde fork (sheprd): ctrl+click on a task id in the output opens the task.
                 if let Some(id) = self.task_id_at(&hit.pane_id, viewport_row, col) {
                     self.last_pane_click = None;

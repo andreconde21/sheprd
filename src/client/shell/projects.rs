@@ -1020,6 +1020,53 @@ pub(super) fn word_at<'a>(
     (!word.is_empty()).then(|| word.to_owned())
 }
 
+/// A Markdown file path under column `col` (`docs/plan.md`, `~/x.md`, `/abs/r.markdown`,
+/// `file:///abs/x.md`), without surrounding quotes, brackets, punctuation, a `:line` suffix or a
+/// `#anchor`.
+pub(super) fn markdown_path_at<'a>(
+    symbols: impl IntoIterator<Item = &'a str>,
+    col: usize,
+) -> Option<String> {
+    let chars: Vec<char> = symbols
+        .into_iter()
+        .map(|symbol| symbol.chars().next().unwrap_or(' '))
+        .collect();
+    let part = |c: char| c.is_alphanumeric() || "_-./~:#@+%,()[]'\"`<>".contains(c);
+    if !chars.get(col).copied().is_some_and(part) {
+        return None;
+    }
+    let start = (0..col)
+        .rev()
+        .take_while(|&i| part(chars[i]))
+        .last()
+        .unwrap_or(col);
+    let end = (col..chars.len()).take_while(|&i| part(chars[i])).last()? + 1;
+    let token: String = chars[start..end].iter().collect();
+    let trim = |c: char| "\"'`()[]<>,;:.".contains(c);
+    let mut path = token.trim_matches(trim).to_owned();
+    if let Some(rest) = path.strip_prefix("file://") {
+        path = rest.to_owned();
+    }
+    if let Some((before, _)) = path.split_once('#') {
+        path = before.to_owned();
+    }
+    // `docs/plan.md:12` or `docs/plan.md:12:4`
+    while let Some((before, after)) = path.rsplit_once(':') {
+        if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+            path = before.to_owned();
+        } else {
+            break;
+        }
+    }
+    let path = path.trim_matches(trim).to_owned();
+    let lower = path.to_lowercase();
+    ([".md", ".markdown", ".mdx"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+        && path.len() > 3)
+        .then_some(path)
+}
+
 /// The command that shows a reference's body (a task, an issue…), from the user's reference
 /// sources in `<config_dir>/sheprd-refs.toml`:
 /// `[[refs]] name = "issues" pattern = "#\\d+" command = "gh issue view {id}"`.
@@ -1714,10 +1761,22 @@ mod tests {
 
 #[cfg(test)]
 mod word_at_tests {
-    use super::word_at;
+    use super::{markdown_path_at, word_at};
 
     fn row(text: &str) -> Vec<String> {
         text.chars().map(String::from).collect()
+    }
+
+    #[test]
+    fn markdown_paths_under_the_cursor() {
+        let at = |text: &str, col: usize| markdown_path_at(row(text).iter().map(String::as_str), col);
+        assert_eq!(at("see docs/plan.md for details", 6), Some("docs/plan.md".into()));
+        assert_eq!(at("wrote `~/notes/report.md`.", 12), Some("~/notes/report.md".into()));
+        assert_eq!(at("(/abs/x.markdown:12:4)", 5), Some("/abs/x.markdown".into()));
+        assert_eq!(at("file:///tmp/a.md#intro", 9), Some("/tmp/a.md".into()));
+        assert_eq!(at("open README.MD now", 7), Some("README.MD".into()));
+        assert_eq!(at("see src/main.rs", 6), None);
+        assert_eq!(at("CAL-1021 is done", 2), None);
     }
 
     #[test]
