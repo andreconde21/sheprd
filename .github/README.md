@@ -110,6 +110,8 @@ you don't have to read its transcript:
   Without it, Claude Haiku (`claude -p --safe-mode`, your Claude subscription)
   when `claude` is installed; without either, the agent's last lines stand in.
   Nothing is spent on an agent that barely moved on.
+  For agents other than Claude Code the same summary also reads the plan or
+  to-do list they show (Codex, OpenCode…), which fills the panel's TO-DO.
 - **Waiting on you**: the questions in its last message (for agents other than
   Claude Code, the ones the summary found on its screen).
 - **Tasks**: when it hands work to subagents (dev, adversarial review, a browser

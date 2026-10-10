@@ -56,10 +56,12 @@ DEFAULT_SUMMARY_COMMAND = ("claude -p --safe-mode --no-session-persistence --too
                            "--output-format text")
 SUMMARY_PROMPT = """You summarise a coding agent's session for the person running many agents at once.
 Reply with ONE JSON object and nothing else:
-{"title": "...", "done": ["...", "..."], "questions": ["..."]}
+{"title": "...", "done": ["...", "..."], "questions": ["..."], "plan": [{"step": "...", "status": "done"}]}
 - title: where the work stands now, at most 10 words (the state of the work, not the step this minute).
 - done: up to 3 short lines, what got done recently, newest last.
 - questions: what the agent is waiting on the user for, as short questions; [] when nothing.
+- plan: the agent's own plan or to-do list if it shows one (status "done", "doing" or "todo"),
+  at most 12 steps, in its order; [] when it shows none. Never invent steps.
 Plain words, no markdown."""
 CONFIG = os.path.expanduser("~/.config/herdr/sheprd-refs.toml")
 KEEP_DAYS = 7
@@ -554,9 +556,17 @@ def summarize(key, text, pane, size, from_pane=False, keep_text=None):
     out["sheprd_sum_at"] = datetime.now().strftime("%H:%M") + (" · last lines" if data.get("fallback") else "")
     questions = [fit(str(q)) for q in data.get("questions", [])][:3]
     if from_pane:
-        # No Claude Code hook reports this agent's questions: the summary does.
+        # No Claude Code hook reports this agent's questions or to-do list: the summary does.
         for i in range(1, 4):
             out[f"sheprd_q_{i}"] = questions[i - 1] if i <= len(questions) else ""
+        plan = [step for step in data.get("plan", []) if isinstance(step, dict) and str(step.get("step", "")).strip()][:12]
+        marks = {"done": "✓", "doing": "▸"}
+        out["sheprd_todo"] = f"{sum(1 for s in plan if s.get('status') == 'done')}/{len(plan)}" if plan else ""
+        for i in range(1, 13):
+            if i <= len(plan):
+                out[f"sheprd_todo_{i}"] = fit(f"{marks.get(plan[i - 1].get('status'), '○')} {plan[i - 1]['step']}")
+            else:
+                out[f"sheprd_todo_{i}"] = ""
     os.makedirs(CACHE_DIR, exist_ok=True)
     record = {"tokens": out, "size": size, "questions": questions}
     if keep_text is not None:
