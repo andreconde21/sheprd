@@ -1769,10 +1769,20 @@ mod word_at_tests {
 
     #[test]
     fn markdown_paths_under_the_cursor() {
-        let at = |text: &str, col: usize| markdown_path_at(row(text).iter().map(String::as_str), col);
-        assert_eq!(at("see docs/plan.md for details", 6), Some("docs/plan.md".into()));
-        assert_eq!(at("wrote `~/notes/report.md`.", 12), Some("~/notes/report.md".into()));
-        assert_eq!(at("(/abs/x.markdown:12:4)", 5), Some("/abs/x.markdown".into()));
+        let at =
+            |text: &str, col: usize| markdown_path_at(row(text).iter().map(String::as_str), col);
+        assert_eq!(
+            at("see docs/plan.md for details", 6),
+            Some("docs/plan.md".into())
+        );
+        assert_eq!(
+            at("wrote `~/notes/report.md`.", 12),
+            Some("~/notes/report.md".into())
+        );
+        assert_eq!(
+            at("(/abs/x.markdown:12:4)", 5),
+            Some("/abs/x.markdown".into())
+        );
         assert_eq!(at("file:///tmp/a.md#intro", 9), Some("/tmp/a.md".into()));
         assert_eq!(at("open README.MD now", 7), Some("README.MD".into()));
         assert_eq!(at("see src/main.rs", 6), None);

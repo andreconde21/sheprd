@@ -1362,6 +1362,9 @@ impl ClientShellState {
         }
         super::view_sync::tick(&self.endpoints, &self.active_endpoint_id);
         super::status::tick(&self.endpoints);
+        if self.work_panel == super::work_panel::FULL {
+            super::work_panel::request_summary(&self.endpoints, &self.active_endpoint_id);
+        }
         outcome.actions.extend(self.tick_sheprd_launch());
         for (endpoint_id, pane_id) in projects::take_focus_requests() {
             self.focus_or_activate(
