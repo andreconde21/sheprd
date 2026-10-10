@@ -43,6 +43,8 @@ pub(super) enum WorkHit {
         stage: String,
     },
     Expand,
+    /// A link the tool that started the workspace reported (`card_link`), opened in its app.
+    Link(String),
 }
 
 /// Tasks from one agent's `sheprd_w_1..` tokens ("id|label|stage:s,stage:s"), newest first.
@@ -111,6 +113,60 @@ fn mark_color(state: char, palette: &Palette) -> ratatui::style::Color {
 fn is_browser_stage(name: &str) -> bool {
     let name = name.to_lowercase();
     name.contains("chrome") || name.contains("browser")
+}
+
+/// A workspace token (`card`, `card_link`), as reported by the tool that started it.
+fn workspace_token<'a>(
+    workspace: &'a crate::protocol::ClientShellWorkspace,
+    name: &str,
+) -> Option<&'a str> {
+    workspace
+        .tokens
+        .iter()
+        .find(|(token, _)| token.trim_start_matches('$') == name)
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// The card the focused agent's workspace was started for (e.g. by Cockpit Board) and its link.
+fn workspace_card(
+    endpoints: &[ClientShellEndpoint],
+    active: &ClientEndpointId,
+    agent: &crate::protocol::ClientShellAgent,
+) -> Option<(String, Option<String>)> {
+    let snapshot = endpoints
+        .iter()
+        .find(|e| e.endpoint_id == *active)?
+        .snapshot
+        .as_deref()?;
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|w| w.workspace_id == agent.workspace_id)?;
+    let card = workspace_token(workspace, "card")?.to_owned();
+    let link = workspace_token(workspace, "card_link")
+        .filter(|link| {
+            ["obsidian://", "https://", "http://"]
+                .iter()
+                .any(|scheme| link.starts_with(scheme))
+        })
+        .map(str::to_owned);
+    Some((card, link))
+}
+
+/// Opens a link in this machine's default app.
+pub(super) fn open_link(link: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(link)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// The focused agent on the active machine, with that machine's label (None for Local).
@@ -212,6 +268,17 @@ pub(super) fn render(
         &title,
         base.fg(palette.overlay1).add_modifier(Modifier::BOLD),
     );
+    // The card this workspace was started for (Cockpit Board and other launchers).
+    if let Some((card, link)) = agent.and_then(|agent| workspace_card(endpoints, active, agent)) {
+        let text = format!(" card {card}{}", if link.is_some() { " ↗" } else { "" });
+        let w = display_width(&text).min(width);
+        put_text(buffer, x, area.y + 1, w, &text, base.fg(palette.accent));
+        let hit = match link {
+            Some(link) => WorkHit::Link(link),
+            None => WorkHit::Card(card),
+        };
+        hits.work_panel.push((Rect::new(x, area.y + 1, w, 1), hit));
+    }
     if tasks.is_empty() {
         let note = if agent.is_some() {
             " no subagent tasks yet"
