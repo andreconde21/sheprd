@@ -134,6 +134,19 @@ reads the Claude Code hook's tokens; run `sheprd setup` again after updating.
 - **Reconnecting**: retries at most every 10 s, and at once after the laptop
   wakes from sleep.
 
+### Move an agent to another machine
+Right-click a Claude Code agent → **Move to…** → pick a machine, e.g. before you
+close the laptop lid. sheprd checks the target first: the repository at the same
+place (a path under your home maps to the same place under the target's home),
+a clean checkout there, the session file here. If the agent has uncommitted
+changes it asks: **commit and push** (the target pulls the branch) or **carry
+them as a patch** (applied on the target, stashed here). Then it copies the
+conversation over the machines' SSH link, opens a workspace on the target
+running `claude --resume`, focuses it, and renames the old pane
+"moved → <machine>". Nothing is deleted. Unpushed commits are pushed first (the
+agent's own branch). A folder Claude Code has never opened on the target asks
+once whether to trust it.
+
 ### Projects across machines
 - **Drag** any row onto a project header to move its workspace there. Drop it on
   **Other** to take it out, or on another row to place it just above that row.

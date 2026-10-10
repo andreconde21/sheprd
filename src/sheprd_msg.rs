@@ -14,6 +14,8 @@ const CLAUDE_HOOK: &str = include_str!("../scripts/sheprd-claude-hook");
 const STATUS_GITHUB: &str = include_str!("../scripts/sheprd-status-github");
 /// Opens a document in the user's editor in a split (Ctrl+click on a Markdown path, and agents).
 const DOC: &str = include_str!("../scripts/sheprd-doc");
+/// Moves an agent to another machine (the agent menu's "Move to…").
+const MOVE: &str = include_str!("../scripts/sheprd-move");
 
 /// Writes the bundled scripts next to the sheprd binary (only when they changed) and returns
 /// the messaging script's path.
@@ -23,6 +25,7 @@ fn script_path() -> std::io::Result<PathBuf> {
         ("sheprd-claude-hook", CLAUDE_HOOK),
         ("sheprd-status-github", STATUS_GITHUB),
         ("sheprd-doc", DOC),
+        ("sheprd-move", MOVE),
         ("sheprd-msg", SCRIPT),
     ] {
         let path = exe.with_file_name(name);

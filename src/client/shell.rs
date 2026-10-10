@@ -37,6 +37,7 @@ mod settings;
 mod sheprd_sidebar;
 // andreconde fork (sheprd): shared sidebar view for apps that mirror sheprd.
 mod board;
+mod move_agent;
 mod state;
 mod status;
 mod surface_patch;
