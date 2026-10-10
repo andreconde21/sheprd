@@ -367,6 +367,7 @@ pub struct Keybinds {
     pub new_workspace_on: ActionKeybinds,
     pub next_attention_agent: ActionKeybinds,
     pub toggle_work_panel: ActionKeybinds,
+    pub open_board: ActionKeybinds,
     pub jump_agent: ActionKeybinds,
     pub toggle_hidden_workspaces: ActionKeybinds,
     pub detach: ActionKeybinds,
@@ -558,6 +559,7 @@ impl Config {
             new_workspace_on: empty_action!(),
             next_attention_agent: empty_action!(),
             toggle_work_panel: empty_action!(),
+            open_board: empty_action!(),
             jump_agent: empty_action!(),
             toggle_hidden_workspaces: empty_action!(),
             detach: empty_action!(),
@@ -695,6 +697,7 @@ impl Config {
             apply_action!(keybinds.new_workspace_on, new_workspace_on, source);
             apply_action!(keybinds.next_attention_agent, next_attention_agent, source);
             apply_action!(keybinds.toggle_work_panel, toggle_work_panel, source);
+            apply_action!(keybinds.open_board, open_board, source);
             apply_action!(keybinds.jump_agent, jump_agent, source);
             apply_action!(
                 keybinds.toggle_hidden_workspaces,

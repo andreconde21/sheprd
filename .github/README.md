@@ -215,7 +215,7 @@ page); a failing one counts as needing you (the counter, `prefix+u`, the board).
 CLI. Write your own for any other forge, pipeline or deploy.
 
 ### Status board
-`board` in the sidebar footer (or first in the menu) opens one page with every
+`board` in the sidebar footer, `prefix+shift+u`, or the first menu entry opens one page with every
 agent on every machine, grouped by project, those that need you first: its
 card, what it is on (to-do), its tasks' pipelines, and the questions in its last
 message that wait on you. With `summaries = true` in
@@ -256,6 +256,7 @@ to show `● 3` in the bar; any other bar or script can too.
 | `prefix+u` | next agent that needs you |
 | `prefix+b` | sidebar: full / rail / hidden |
 | `prefix+shift+b` | work panel: full / mini / hidden |
+| `prefix+shift+u` | status board |
 | `prefix+#` | show jump numbers, type one to jump |
 | `prefix+alt+c` | new workspace on a machine you pick |
 | `prefix+/` | filter the sidebar |
