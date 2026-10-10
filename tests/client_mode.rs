@@ -988,6 +988,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
 }
 
 #[test]
+#[ignore = "andreconde fork (sheprd): clicks a workspace in herdr's machines sidebar, which sheprd replaces with its project list"]
 fn federated_client_starts_without_local_and_survives_its_restart() {
     use std::os::unix::fs::PermissionsExt;
 
