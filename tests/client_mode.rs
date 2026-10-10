@@ -517,7 +517,7 @@ fn server_unreachable_shows_clear_error() {
         "stderr should mention connection failure: {stderr}"
     );
     assert!(
-        stderr.contains("Is herdr server running?"),
+        stderr.contains("Is the sheprd server running?"),
         "stderr should include actionable guidance: {stderr}"
     );
     assert!(
@@ -878,15 +878,17 @@ fn attach_thin_client_with_config(
     let mut attached = false;
     while Instant::now() < deadline {
         let out = read_output(&output);
+        // andreconde fork (sheprd): its sidebar's header ("all agents") is a rendered frame too.
         if out.contains('\u{2500}')
             || out.contains("workspace")
             || out.contains("pane")
             || out.contains("terminal")
+            || out.contains("all agents")
         {
             attached = true;
             break;
         }
-        if out.to_lowercase().contains("herdr:") {
+        if out.to_lowercase().contains("herdr:") || out.to_lowercase().contains("sheprd:") {
             break;
         }
         thread::sleep(Duration::from_millis(30));
@@ -1679,10 +1681,12 @@ fn read_until_client_attaches(client: &SpawnedHerdr) -> String {
             }
             Err(err) => panic!("read thin client PTY: {err}"),
         }
+        // andreconde fork (sheprd): its sidebar's header ("all agents") is a rendered frame too.
         if output.contains('\u{2500}')
             || output.contains("workspace")
             || output.contains("pane")
             || output.contains("terminal")
+            || output.contains("all agents")
         {
             return output;
         }
