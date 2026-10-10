@@ -111,7 +111,9 @@ you don't have to read its transcript:
   when `claude` is installed; without either, the agent's last lines stand in.
   Nothing is spent on an agent that barely moved on.
 - **Waiting on you**: the questions in its last message (for agents other than
-  Claude Code, the ones the summary found on its screen).
+  Claude Code, the ones the summary found on its screen). Click **↩ reply** to
+  answer without switching to it: your text goes to the agent as a prompt (or is
+  typed into its pane when it is on a dialog).
 - **Tasks**: when it hands work to subagents (dev, adversarial review, a browser
   check…), one entry per task, grouped by the reference id in the subagent's
   description. Click the id to read the card (your `[[refs]]` command), a stage

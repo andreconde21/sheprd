@@ -45,6 +45,10 @@ pub(super) enum WorkHit {
     Expand,
     /// A link the tool that started the workspace reported (`card_link`), opened in its app.
     Link(String),
+    /// Answer the focused agent's question (opens the reply prompt).
+    Reply {
+        pane_id: String,
+    },
     /// A `[[status]]` result's details, shown in the reader.
     Details {
         title: String,
@@ -428,6 +432,16 @@ pub(super) fn render(
                 );
                 y += 1;
             }
+        }
+        if y < area.bottom() {
+            put_text(buffer, x + 1, y, 9, "↩ reply", base.fg(palette.accent));
+            hits.work_panel.push((
+                Rect::new(x + 1, y, 9, 1),
+                WorkHit::Reply {
+                    pane_id: agent.pane_id.clone(),
+                },
+            ));
+            y += 1;
         }
     }
     // To-do: what it is on, then what is left.
