@@ -446,7 +446,8 @@ impl ClientShellState {
             cells.iter().map(|cell| cell.symbol.as_str()),
             usize::from(col),
         )?;
-        super::projects::task_command(&id).is_some().then_some(id)
+        (super::projects::task_command(&id).is_some() || super::projects::task_open(&id).is_some())
+            .then_some(id)
     }
 
     fn pane_split_target_is_current(&self, hit: &PaneSplitHit, tab_id: &str) -> Option<bool> {
@@ -703,6 +704,7 @@ impl ClientShellState {
                         label,
                         stage,
                     } => super::work_panel::open_url(machine, file, key, label, stage),
+                    WorkHit::Link(link) => super::work_panel::open_link(&link),
                     WorkHit::Expand => {
                         self.work_panel = super::work_panel::FULL;
                         self.invalidate_pane_surface();

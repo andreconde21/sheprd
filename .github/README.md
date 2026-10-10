@@ -85,7 +85,9 @@ CAL-1120 orphan payslip
   dev ✓  adv ✓  chr ✓ ↗
 ```
 
-Click the id to read the card (your `[[refs]]` command), a stage to read its
+When the tool that started the workspace reported `card` and `card_link`
+workspace tokens (Cockpit Board does), the panel shows `card CB-12 ↗` at the top;
+clicking opens the link (obsidian://, https://). Click the id to read the card (your `[[refs]]` command), a stage to read its
 final report, `↗` to open the page a browser stage last visited. The same key
 switches to a mini column (one mark per task) and hides it. It reads the
 `sheprd_w_*` tokens of the Claude Code hook; run `sheprd setup` again after
@@ -178,6 +180,8 @@ command = "cat ~/notes/tasks/{id}.md"
   markdown is rendered, wheel / arrows / PgUp-PgDn scroll, esc closes.
 - The hook uses the same patterns (and `ids_from`) to list what an agent
   mentioned.
+- A source can have `open = "xdg-open 'obsidian://…{id}'"` instead of
+  `command`: the card then opens in that app rather than in the reader.
 
 ### Sharing the sidebar with other apps
 Apps that mirror sheprd (Conductore Mobile, for one) can show your projects and
