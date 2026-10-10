@@ -183,6 +183,17 @@ command = "cat ~/notes/tasks/{id}.md"
 - A source can have `open = "xdg-open 'obsidian://…{id}'"` instead of
   `command`: the card then opens in that app rather than in the reader.
 
+### Documents in your editor
+**Ctrl+click a Markdown path** in any pane (`docs/plan.md`, `~/notes/report.md`,
+`/abs/x.md:12`, `file:///abs/x.md`) and it opens in a vertical split next to that
+pane, on the pane's machine, in your editor: `$SHEPRD_DOC_EDITOR`, else `$VISUAL`,
+else `$EDITOR`, else `nvim`. Each workspace has at most one document split: the
+next document opens in it. Quitting the editor closes the split.
+
+Agents can do the same with `sheprd-doc <path>`; the `sheprd-doc` skill tells
+Claude Code to open the plans and reports it writes for you. `sheprd setup`
+installs both on every machine.
+
 ### Sharing the sidebar with other apps
 Apps that mirror sheprd (Conductore Mobile, for one) can show your projects and
 which agents need you, and mark agents read or unread from there. It's off until
