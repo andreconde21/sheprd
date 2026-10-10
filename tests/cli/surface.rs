@@ -476,7 +476,7 @@ fn root_help_advertises_api_schema_command_group() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("herdr api <subcommand>"),
+        stdout.contains("sheprd api <subcommand>"),
         "root help should advertise the api command group: {stdout}"
     );
 }

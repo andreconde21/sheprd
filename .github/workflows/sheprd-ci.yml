@@ -57,7 +57,7 @@ jobs:
         run: cargo nextest run --locked --no-run || { sleep 30; cargo nextest run --locked --no-run; }
 
       - name: Test
-        run: cargo nextest run --locked --status-level fail --final-status-level slow --failure-output final --success-output never
+        run: cargo nextest run --locked --no-fail-fast --status-level fail --final-status-level slow --failure-output final --success-output never
 
       - name: Bundled scripts parse
         run: |
