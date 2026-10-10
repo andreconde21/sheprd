@@ -1,0 +1,4 @@
+# sheprd CI: a test that hangs is reported as a timeout instead of eating the whole job.
+[profile.ci]
+slow-timeout = { period = "30s", terminate-after = 4 }
+fail-fast = false
