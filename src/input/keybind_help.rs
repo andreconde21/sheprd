@@ -156,6 +156,10 @@ pub(crate) fn keybind_help_groups(
                     "jump to agent by number",
                 ),
                 entry(
+                    binding_label(&keybinds.open_hints),
+                    "open a path, link or reference on screen",
+                ),
+                entry(
                     binding_label(&keybinds.toggle_hidden_workspaces),
                     "show/conceal hidden workspaces",
                 ),

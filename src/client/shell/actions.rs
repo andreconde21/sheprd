@@ -109,6 +109,11 @@ impl ClientShellState {
                         outcome.repaint = true;
                         return;
                     }
+                    crate::input::KeybindAction::OpenHints => {
+                        self.open_hints();
+                        outcome.repaint = true;
+                        return;
+                    }
                     crate::input::KeybindAction::ToggleHiddenWorkspaces => {
                         self.toggle_show_hidden_workspaces();
                         outcome.repaint = true;
@@ -774,7 +779,9 @@ impl ClientShellState {
                         handled: false,
                     }) if crate::app::actions::safe_web_url(&url).is_some() && replay.is_some() => {
                         self.url_click_consumes_until_up = completed_before_release;
-                        (false, vec![ClientShellAction::OpenSafeWebUrl(url)])
+                        // andreconde fork (sheprd): localhost on a remote machine opens through
+                        // an SSH tunnel (SHE-100007).
+                        (false, self.web_url_actions(url))
                     }
                     Ok(crate::api::schema::ResponseResult::PaneLinkActivated { .. }) => {
                         (false, replay_action(replay))

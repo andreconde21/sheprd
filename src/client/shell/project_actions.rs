@@ -1073,6 +1073,7 @@ impl ClientShellState {
                 run_agent,
                 cwd,
             } => self.create_workspace_on(endpoint_id, project, run_agent, cwd, text, outcome),
+            ClientRenameTarget::OpenHint => self.activate_hint(text, outcome),
             other => return Some(other),
         }
         outcome.repaint = true;
@@ -1451,6 +1452,7 @@ impl ClientShellState {
             crate::sheprd_msg::ensure_relay();
         }
         super::view_sync::tick(&self.endpoints, &self.active_endpoint_id);
+        outcome.repaint |= super::open_anything::take_preview_dirty();
         super::status::tick(&self.endpoints);
         self.tick_moves(outcome);
         if self.work_panel == super::work_panel::FULL {

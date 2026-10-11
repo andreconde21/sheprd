@@ -79,6 +79,8 @@ impl ClientShellState {
     }
 
     pub(super) fn update_link_hover(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        // andreconde fork (sheprd): Ctrl+hover over a reference previews it (SHE-100007).
+        self.update_ref_preview(mouse, outcome);
         if mouse.kind != MouseEventKind::Moved
             || !mouse.modifiers.contains(KeyModifiers::CONTROL)
             || !self.link_hover_allowed()

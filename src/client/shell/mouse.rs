@@ -449,7 +449,7 @@ impl ClientShellState {
 
     /// andreconde fork (sheprd): opens a document in the user's editor, in a split next to the
     /// pane, on the pane's machine (`sheprd-doc`; one document split per workspace).
-    fn open_document(&self, pane_id: &str, path: String) {
+    pub(super) fn open_document(&self, pane_id: &str, path: String, line: Option<u32>) {
         let Some(endpoint) = self
             .endpoints
             .iter()
@@ -472,9 +472,11 @@ impl ClientShellState {
                         return;
                     };
                     let mut command = std::process::Command::new("python3");
-                    command
-                        .arg(script)
-                        .args([path.as_str(), "--pane", &pane_id, "--cwd", &cwd]);
+                    command.arg(script);
+                    if let Some(line) = line {
+                        command.args(["--line", &line.to_string()]);
+                    }
+                    command.args([path.as_str(), "--pane", &pane_id, "--cwd", &cwd]);
                     if let Ok(exe) = std::env::current_exe() {
                         command.env("HERDR_BIN_PATH", exe);
                     }
@@ -485,8 +487,10 @@ impl ClientShellState {
                         return;
                     };
                     let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+                    // --line goes first: an older sheprd-doc takes the last bare word as the path.
+                    let line = line.map(|line| format!("--line {line} ")).unwrap_or_default();
                     let script = format!(
-                        "PATH=\"$HOME/.local/bin:$PATH\"; sheprd-doc {} --pane {} --cwd {} --session {}",
+                        "PATH=\"$HOME/.local/bin:$PATH\"; sheprd-doc {line}{} --pane {} --cwd {} --session {}",
                         quote(&path),
                         quote(&pane_id),
                         quote(&cwd),
@@ -1125,10 +1129,32 @@ impl ClientShellState {
             {
                 let viewport_row = mouse.row.saturating_sub(hit.inner_rect.y);
                 let col = mouse.column.saturating_sub(hit.inner_rect.x);
+                // andreconde fork (sheprd): ctrl+alt+click (or ctrl+shift+click) copies the path,
+                // link or reference under the mouse; ctrl+click opens a file or a reference
+                // (SHE-100007). Links go on to the server's link handling below.
+                let thing = self.thing_at(&hit.pane_id, viewport_row, col);
+                if mouse
+                    .modifiers
+                    .intersects(crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT)
+                {
+                    if let Some(thing) = thing.as_ref() {
+                        self.last_pane_click = None;
+                        self.copy_thing(thing, outcome);
+                        return;
+                    }
+                }
+                if let Some(thing) =
+                    thing.filter(|thing| !matches!(thing, super::open_anything::Thing::Url(_)))
+                {
+                    self.last_pane_click = None;
+                    let pane_id = hit.pane_id.clone();
+                    self.open_thing(&pane_id, thing, outcome);
+                    return;
+                }
                 // andreconde fork (sheprd): ctrl+click on a Markdown path opens it in the editor.
                 if let Some(path) = self.markdown_path_in_pane(&hit.pane_id, viewport_row, col) {
                     self.last_pane_click = None;
-                    self.open_document(&hit.pane_id, path);
+                    self.open_document(&hit.pane_id, path, None);
                     return;
                 }
                 // andreconde fork (sheprd): ctrl+click on a task id in the output opens the task.
