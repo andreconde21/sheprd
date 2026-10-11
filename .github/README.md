@@ -237,20 +237,48 @@ command = "cat ~/notes/tasks/{id}.md"
 ```
 
 - **Ctrl+click** a reference in any agent's output to read it. Anything else
-  falls through to normal link handling.
+  falls through to normal link handling. **Hold Ctrl** over one to see its title
+  (from `preview = "…"` if the source has one, else from `command`'s output).
 - It opens in a **reader**: front matter becomes the header (title, status…),
   markdown is rendered, wheel / arrows / PgUp-PgDn scroll, esc closes.
 - The hook uses the same patterns (and `ids_from`) to list what an agent
   mentioned.
 - A source can have `open = "xdg-open 'obsidian://…{id}'"` instead of
   `command`: the card then opens in that app rather than in the reader.
+- Sources are told apart by their patterns: the first whose `pattern` matches
+  the whole id wins, so give each tracker its own shape.
+- `{ssh}` and `{cwd}` stand for the clicked pane's machine (`ssh <target>`, empty
+  when local) and folder, for commands that must run where the agent is:
 
-### Documents in your editor
-**Ctrl+click a Markdown path** in any pane (`docs/plan.md`, `~/notes/report.md`,
-`/abs/x.md:12`, `file:///abs/x.md`) and it opens in a vertical split next to that
-pane, on the pane's machine, in your editor: `$SHEPRD_DOC_EDITOR`, else `$VISUAL`,
-else `$EDITOR`, else `nvim`. Each workspace has at most one document split: the
-next document opens in it. Quitting the editor closes the split.
+```toml
+[[refs]]
+name = "commits"
+pattern = "[0-9a-f]{7,40}"
+command = "{ssh} git -C {cwd} show --stat {id}"
+
+[[refs]]
+name = "prs"
+pattern = "PR#\\d+"
+open = "gh pr view --web $(echo {id} | tr -dc 0-9)"
+```
+
+### Ctrl+click opens anything
+- **Files**: Ctrl+click a path in any pane (`docs/plan.md`, `src/main.rs:42`,
+  `~/notes/report.md`, `file:///abs/x.md`). Text and code open in a vertical split
+  next to that pane, on the pane's machine, in your editor (at the line, when the
+  path has one): `$SHEPRD_DOC_EDITOR`, else `$VISUAL`, else `$EDITOR`, else `nvim`.
+  Each workspace has at most one document split: the next document opens in it.
+  Quitting the editor closes the split.
+- **Images and PDFs** open in your desktop's viewer. From a remote machine they
+  are copied to `~/.cache/sheprd/open/<machine>/` first.
+- **`http://localhost:3000` on a remote machine** opens through an SSH tunnel to
+  that machine, on the same port here when it's free. The tunnel is reused for
+  the next click and closes after 12 hours.
+- **Ctrl+Alt+click** copies the path, link or reference instead of opening it
+  (Ctrl+Shift+click too, in terminals that pass Shift through; foot keeps it for
+  its own selection).
+- **Hint mode** (`prefix+i`): every path, link and reference on screen gets a
+  letter; type it to open, type it in capitals to copy. No mouse needed.
 
 Agents can do the same with `sheprd-doc <path>`; the `sheprd-doc` skill tells
 Claude Code to open the plans and reports it writes for you. `sheprd setup`
@@ -337,6 +365,9 @@ to show `● 3` in the bar; any other bar or script can too.
 | `prefix+/` | filter the sidebar |
 | `prefix+.` | project menu for the focused workspace |
 | `prefix+alt+h` | show / conceal hidden workspaces |
+| `prefix+i` | hint mode: open (or, in capitals, copy) anything on screen |
+| `ctrl+click` | open the path, link or reference under the mouse |
+| `ctrl+alt+click` | copy it instead |
 
 ## Configuration
 Everything lives client-side in `~/.config/herdr/sidebar.toml`. The UI writes
@@ -419,8 +450,12 @@ The server keeps running stock herdr; use the matching herdr version on each mac
   changing nothing. *sheprd promote* (Actions → Run workflow) ships a ready
   rebase. Conflict resolutions are remembered via `git rerere` (`.github/rr-cache`).
 - Manual rebase: `git fetch origin --tags && git rebase --onto v<new> v<old> main`.
-- Release: `git tag sheprd-v<ver>-<n> && git push fork sheprd-v<ver>-<n>` → the
-  "sheprd release" workflow builds and publishes. Upstream workflows are disabled here.
+- Every user-visible change adds a line under `## Unreleased` in
+  `.github/SHEPRD-CHANGELOG.md`, and to "What's new" in `site/index.html`.
+- Release: rename `## Unreleased` to `## sheprd-v<ver>-<n>` (and add a new empty
+  `## Unreleased`), then `git tag sheprd-v<ver>-<n> && git push fork sheprd-v<ver>-<n>`
+  → the "sheprd release" workflow builds and publishes, with that section as the
+  GitHub release notes. Upstream workflows are disabled here.
 - Local build needs Zig 0.16.0 (`cargo build --release`).
 
 ## License

@@ -345,6 +345,8 @@ pub(super) enum ClientRenameTarget {
         name: String,
     },
     JumpAgent,
+    /// sheprd: hint mode (prefix+i), SHE-100007.
+    OpenHint,
     /// sheprd: live sidebar filter (prefix+/).
     SidebarFilter,
     ProjectNote {

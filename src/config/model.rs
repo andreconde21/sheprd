@@ -373,6 +373,8 @@ pub struct KeysConfig {
     pub open_board: BindingConfig,
     /// jump to agent by number (andreconde fork). Default: "prefix+#"
     pub jump_agent: BindingConfig,
+    /// label everything openable on screen (sheprd). Default: "prefix+i"
+    pub open_hints: BindingConfig,
     /// show/conceal hidden workspaces (andreconde fork). Default: "prefix+alt+h"
     pub toggle_hidden_workspaces: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
@@ -528,6 +530,8 @@ pub(crate) struct KeysConfigOverlay {
     open_board: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     jump_agent: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_hints: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_hidden_workspaces: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -698,6 +702,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_work_panel);
         apply_field!(open_board);
         apply_field!(jump_agent);
+        apply_field!(open_hints);
         apply_field!(toggle_hidden_workspaces);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
@@ -812,6 +817,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_work_panel, keybinds.toggle_work_panel);
         copy_effective_action_field!(open_board, keybinds.open_board);
         copy_effective_action_field!(jump_agent, keybinds.jump_agent);
+        copy_effective_action_field!(open_hints, keybinds.open_hints);
         copy_effective_action_field!(toggle_hidden_workspaces, keybinds.toggle_hidden_workspaces);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
         copy_effective_action_field!(navigate_workspace_down, keybinds.navigate.workspace_down);
@@ -1190,6 +1196,7 @@ impl Default for KeysConfig {
             toggle_work_panel: BindingConfig::one("prefix+shift+b"),
             open_board: BindingConfig::one("prefix+shift+u"),
             jump_agent: BindingConfig::one("prefix+#"),
+            open_hints: BindingConfig::one("prefix+i"),
             toggle_hidden_workspaces: BindingConfig::one("prefix+alt+h"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),

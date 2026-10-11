@@ -78,6 +78,7 @@ pub(crate) enum KeybindAction {
     ToggleWorkPanel,
     OpenBoard,
     JumpAgent,
+    OpenHints,
     ToggleHiddenWorkspaces,
 }
 
@@ -174,6 +175,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.toggle_work_panel, KeybindAction::ToggleWorkPanel),
         (&keybinds.open_board, KeybindAction::OpenBoard),
         (&keybinds.jump_agent, KeybindAction::JumpAgent),
+        (&keybinds.open_hints, KeybindAction::OpenHints),
         (
             &keybinds.toggle_hidden_workspaces,
             KeybindAction::ToggleHiddenWorkspaces,
