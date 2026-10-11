@@ -452,7 +452,7 @@ The server keeps running stock herdr; use the matching herdr version on each mac
 - Manual rebase: `git fetch origin --tags && git rebase --onto v<new> v<old> main`.
 - Every user-visible change adds a line under `## Unreleased` in
   `.github/SHEPRD-CHANGELOG.md`, and to "What's new" in `site/index.html`.
-- Release: rename `## Unreleased` to `## sheprd-v<ver>-<n>` (and add a new empty
+- Release: rename `## Unreleased` to `## sheprd-v<ver>-<n> (<date>)` (and add a new empty
   `## Unreleased`), then `git tag sheprd-v<ver>-<n> && git push fork sheprd-v<ver>-<n>`
   → the "sheprd release" workflow builds and publishes, with that section as the
   GitHub release notes. Upstream workflows are disabled here.
