@@ -1423,6 +1423,9 @@ pub(super) struct PendingLaunch {
     pub(super) known: HashSet<String>,
     pub(super) command: Option<String>,
     pub(super) since: Instant,
+    /// Created on a machine other than the one on screen: switch there once the workspace shows
+    /// up (switching right away lands on that machine's last focused workspace).
+    pub(super) switch_pending: bool,
 }
 
 fn launch_store() -> &'static std::sync::Mutex<Option<PendingLaunch>> {
