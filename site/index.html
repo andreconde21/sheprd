@@ -159,6 +159,13 @@
     @keyframes blink { 50% { opacity: 0; } }
   }
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.css">
+<style>
+  .demo-wrap { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #1a1b26; }
+  .demo-wrap .ap-wrapper { background: #1a1b26; }
+  .demo-caption { color: var(--muted); font-size: 0.92rem; margin: 0; }
+  .herdr-list { margin: 0; padding-left: 1.1rem; display: grid; gap: 8px; }
+</style>
 </head>
 <body>
 
@@ -237,6 +244,15 @@
         </div>
       </div>
     </figure>
+  </section>
+
+  <section class="section" id="demo">
+    <div style="display:grid;gap:12px">
+      <span class="eyebrow">See it</span>
+      <h2>What the agent has been doing, without reading its transcript.</h2>
+    </div>
+    <div class="demo-wrap" id="demo-player" aria-label="Recording of sheprd: the right panel, the status board and a document opened in the editor"></div>
+    <p class="demo-caption">A real session against a server: the right panel (<kbd>prefix+shift+b</kbd>) with the agent's summary, its question and to-do; the status board (<kbd>prefix+shift+u</kbd>); then <kbd>ctrl+click</kbd> on a Markdown path opens it in the editor, in a split on that machine.</p>
   </section>
 
   <section class="section" id="features">
@@ -365,6 +381,22 @@ command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
     </div>
   </section>
 
+  <section class="section" id="herdr">
+    <div class="split">
+      <div style="display:grid;gap:12px">
+        <span class="eyebrow">Coming from herdr?</span>
+        <h2>Same runtime. Your servers don't change.</h2>
+      </div>
+      <ul class="herdr-list">
+        <li><strong>Only the client changes.</strong> sheprd attaches to stock <code>herdr</code> servers of the same version, locally and over SSH. Nothing to install on the servers beyond herdr itself.</li>
+        <li><strong>Side by side.</strong> sheprd installs to <code>~/.local/share/sheprd</code> and leaves your <code>herdr</code> alone; run either one against the same sessions.</li>
+        <li><strong>Same config and state.</strong> It reads <code>~/.config/herdr</code>, the same sockets and keys; its own settings live in <code>sidebar.toml</code>, which stock herdr ignores.</li>
+        <li><strong>Everything herdr does, sheprd does.</strong> It follows herdr's stable releases: a daily job rebases sheprd onto each new one and the full test suite runs before it ships.</li>
+        <li><strong>Back any time.</strong> Detach and run <code>herdr</code>: your workspaces and agents are where you left them.</li>
+      </ul>
+    </div>
+  </section>
+
   <section class="section" id="keys">
     <div style="display:grid;gap:12px">
       <span class="eyebrow">Defaults, no config needed</span>
@@ -411,6 +443,17 @@ command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
       try {
         navigator.clipboard.writeText(code.textContent).then(done, function () { selectCode(); button.textContent = "Press Ctrl+C"; });
       } catch (e) { selectCode(); button.textContent = "Press Ctrl+C"; }
+    });
+  })();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.min.js"></script>
+<script>
+  (function () {
+    var el = document.getElementById("demo-player");
+    if (!el || !window.AsciinemaPlayer) return;
+    AsciinemaPlayer.create("demo.cast", el, {
+      cols: 120, rows: 32, autoPlay: true, loop: true, preload: true, fit: "width",
+      poster: "npt:0:9", idleTimeLimit: 2, theme: "tokyo-night"
     });
   })();
 </script>
