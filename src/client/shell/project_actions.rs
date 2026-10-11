@@ -1434,13 +1434,8 @@ impl ClientShellState {
             known,
             command: run_agent.then(|| "cc".to_owned()),
             since: std::time::Instant::now(),
+            switch_pending: endpoint_id != self.active_endpoint_id,
         }));
-        if endpoint_id != self.active_endpoint_id {
-            outcome.actions.push(ClientShellAction::ActivateEndpoint {
-                endpoint_id,
-                target: None,
-            });
-        }
     }
 
     /// Periodic sheprd work, from the client loop's 100 ms timer.
@@ -1499,10 +1494,19 @@ impl ClientShellState {
             .endpoint_by_id(&launch.endpoint_id)
             .and_then(|endpoint| {
                 let snapshot = endpoint.snapshot.as_deref()?;
-                let workspace = snapshot.workspaces.iter().find(|workspace| {
-                    workspace.label == launch.label
-                        && !launch.known.contains(&workspace.workspace_id)
-                })?;
+                let new = |workspace: &&crate::protocol::ClientShellWorkspace| {
+                    !launch.known.contains(&workspace.workspace_id)
+                };
+                // By name; else the one workspace that wasn't there before.
+                let workspace = snapshot
+                    .workspaces
+                    .iter()
+                    .filter(new)
+                    .find(|workspace| workspace.label == launch.label)
+                    .or_else(|| {
+                        let mut fresh = snapshot.workspaces.iter().filter(new);
+                        fresh.next().filter(|_| fresh.next().is_none())
+                    })?;
                 let pane_id = snapshot
                     .panes
                     .iter()
@@ -1511,6 +1515,17 @@ impl ClientShellState {
                 Some((workspace.workspace_id.clone(), pane_id))
             });
         let Some((workspace_id, pane_id)) = created else {
+            // The other machine's snapshot hasn't shown it yet: after 3 s switch there anyway.
+            if launch.switch_pending && launch.since.elapsed().as_secs() >= 3 {
+                outcome.actions.push(ClientShellAction::ActivateEndpoint {
+                    endpoint_id: launch.endpoint_id.clone(),
+                    target: None,
+                });
+                projects::set_launch(Some(projects::PendingLaunch {
+                    switch_pending: false,
+                    ..launch
+                }));
+            }
             return;
         };
         projects::set_launch(None);
