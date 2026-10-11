@@ -1456,7 +1456,7 @@ impl ClientShellState {
         if self.work_panel == super::work_panel::FULL {
             super::work_panel::request_summary(&self.endpoints, &self.active_endpoint_id);
         }
-        outcome.actions.extend(self.tick_sheprd_launch());
+        self.tick_sheprd_launch(outcome);
         for (endpoint_id, pane_id) in projects::take_focus_requests() {
             self.focus_or_activate(
                 endpoint_id,
@@ -1482,17 +1482,18 @@ impl ClientShellState {
         }
     }
 
-    /// Once the workspace created above shows up, type the agent command into
-    /// its first pane (and stop waiting after a minute).
-    fn tick_sheprd_launch(&mut self) -> Vec<ClientShellAction> {
+    /// Once the workspace created above shows up, focus it (switching to another
+    /// machine alone lands on that machine's last focused workspace) and type the
+    /// agent command into its first pane. Stop waiting after a minute.
+    fn tick_sheprd_launch(&mut self, outcome: &mut ClientShellInput) {
         let Some(launch) = projects::launch() else {
-            return Vec::new();
+            return;
         };
         if launch.since.elapsed().as_secs() > 60 {
             projects::set_launch(None);
-            return Vec::new();
+            return;
         }
-        let pane_id = self
+        let created = self
             .endpoint_by_id(&launch.endpoint_id)
             .and_then(|endpoint| {
                 let snapshot = endpoint.snapshot.as_deref()?;
@@ -1500,18 +1501,25 @@ impl ClientShellState {
                     workspace.label == launch.label
                         && !launch.known.contains(&workspace.workspace_id)
                 })?;
-                snapshot
+                let pane_id = snapshot
                     .panes
                     .iter()
                     .find(|pane| pane.workspace_id == workspace.workspace_id)
-                    .map(|pane| pane.pane_id.clone())
+                    .map(|pane| pane.pane_id.clone())?;
+                Some((workspace.workspace_id.clone(), pane_id))
             });
-        let Some(pane_id) = pane_id else {
-            return Vec::new();
+        let Some((workspace_id, pane_id)) = created else {
+            return;
         };
         projects::set_launch(None);
+        self.focus_or_activate(
+            launch.endpoint_id.clone(),
+            ClientEndpointFocusTarget::Workspace(workspace_id),
+            outcome,
+        );
+        outcome.repaint = true;
         let Some(command) = launch.command else {
-            return Vec::new();
+            return;
         };
         if let Some(mut run) =
             self.herdr_cli(&launch.endpoint_id, &["pane", "run", &pane_id, &command])
@@ -1521,7 +1529,6 @@ impl ClientShellState {
                 let _ = run.status();
             });
         }
-        Vec::new()
     }
 
     /// Quiet projects: drop a notification (toast and sound) when the agent's
