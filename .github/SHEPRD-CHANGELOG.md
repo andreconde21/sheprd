@@ -5,6 +5,8 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.3-36 (2026-10-11)
+
 ### Added
 - **Ctrl+click opens anything.** Any file path, not only Markdown: text and code open in the
   editor split at the line (`src/main.rs:42`); images and PDFs open in the desktop viewer, copied
