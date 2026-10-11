@@ -892,6 +892,21 @@ pub(super) fn toggle_todo(key: &str) {
 /// Runs the reference source's command for `id` off the UI thread; the body arrives via
 /// `take_task_body` (shown as a peek).
 pub(super) fn open_task(id: String) {
+    open_task_in(id, None);
+}
+
+/// Where a reference was clicked, for the `{ssh}` and `{cwd}` placeholders of its source's
+/// commands (`command = "{ssh} git -C {cwd} show --stat {id}"`). `ssh` is empty for a local pane.
+#[derive(Clone, Debug, Default)]
+pub(super) struct RefContext {
+    pub(super) ssh: String,
+    pub(super) cwd: String,
+}
+
+/// [`open_task`], with the clicked pane's machine and folder for the placeholders.
+pub(super) fn open_task_in(id: String, context: Option<RefContext>) {
+    let task_command = |id: &str| ref_command_in(id, |source| source.command.as_deref(), context.as_ref());
+    let task_open = |id: &str| ref_command_in(id, |source| source.open.as_deref(), context.as_ref());
     match task_command(&id) {
         Some(command) => {
             std::thread::spawn(move || {
@@ -1075,6 +1090,24 @@ pub(super) fn task_command(id: &str) -> Option<String> {
     ref_command(id, |source| source.command.as_deref())
 }
 
+/// The command whose output previews a reference on Ctrl+hover: the source's `preview`, else its
+/// reader `command` (the preview shows the title and subtitle of that output).
+pub(super) fn ref_preview_command(id: &str, context: Option<&RefContext>) -> Option<String> {
+    ref_command_in(
+        id,
+        |source| source.preview.as_deref().or(source.command.as_deref()),
+        context,
+    )
+}
+
+/// The patterns of every reference source, compiled, for scanning a whole screen at once.
+pub(super) fn ref_patterns() -> Vec<regex::Regex> {
+    ref_sources()
+        .iter()
+        .filter_map(|source| regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok())
+        .collect()
+}
+
 /// The `open` command of the reference source matching `id` (opens the card in another app, e.g.
 /// `xdg-open 'obsidian://…{id}'`), used when the source has no reader `command`.
 pub(super) fn task_open(id: &str) -> Option<String> {
@@ -1088,28 +1121,54 @@ struct RefSource {
     command: Option<String>,
     #[serde(default)]
     open: Option<String>,
+    #[serde(default)]
+    preview: Option<String>,
 }
 
-fn ref_command(id: &str, pick: impl Fn(&RefSource) -> Option<&str>) -> Option<String> {
+fn ref_sources() -> Vec<RefSource> {
     #[derive(Deserialize)]
     struct Config {
         #[serde(default)]
         refs: Vec<RefSource>,
     }
+    let path = crate::config::config_dir().join("sheprd-refs.toml");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<Config>(&text).ok())
+        .map(|config| config.refs)
+        .unwrap_or_default()
+}
+
+fn ref_command(id: &str, pick: impl Fn(&RefSource) -> Option<&str>) -> Option<String> {
+    ref_command_in(id, pick, None)
+}
+
+fn ref_command_in(
+    id: &str,
+    pick: impl Fn(&RefSource) -> Option<&str>,
+    context: Option<&RefContext>,
+) -> Option<String> {
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "#_-./".contains(c))
     {
         return None;
     }
-    let path = crate::config::config_dir().join("sheprd-refs.toml");
-    let config: Config = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    config.refs.iter().find_map(|source| {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    ref_sources().iter().find_map(|source| {
         let pattern = regex::Regex::new(&format!("^(?:{})$", source.pattern)).ok()?;
         if !pattern.is_match(id) {
             return None;
         }
-        pick(source).map(|command| command.replace("{id}", id))
+        pick(source).map(|command| {
+            command
+                .replace("{id}", id)
+                .replace("{ssh}", context.map_or("", |context| context.ssh.as_str()))
+                .replace(
+                    "{cwd}",
+                    &context.map_or_else(|| ".".to_owned(), |context| quote(&context.cwd)),
+                )
+        })
     })
 }
 

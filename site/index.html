@@ -184,6 +184,7 @@
     <a href="#features">What it adds</a>
     <a href="#messaging">Agents talking</a>
     <a href="#refs">Your tracker</a>
+    <a href="#changes">What's new</a>
     <a href="https://github.com/andreconde21/sheprd">GitHub</a>
   </nav>
 </header>
@@ -302,9 +303,9 @@
         <p>Closing the laptop? Move a Claude Code agent to the server: sheprd checks the repo there, carries your uncommitted changes as a commit or a patch, and resumes the same conversation on the other machine.</p>
       </article>
       <article class="feature">
-        <span class="glyph">plan.md</span>
-        <h3>Documents in your editor</h3>
-        <p>Ctrl+click a Markdown path an agent printed and it opens in your editor, in a split next to that agent, on its machine. Agents can open the plans they write for you too.</p>
+        <span class="glyph">src/main.rs:42</span>
+        <h3>Ctrl+click opens anything</h3>
+        <p>A path an agent printed opens in your editor at the line, in a split next to that agent, on its machine. Images and PDFs open in your viewer, <code>localhost:3000</code> on the server opens through an SSH tunnel, and <kbd>prefix+i</kbd> labels everything on screen so you never reach for the mouse.</p>
       </article>
       <article class="feature">
         <span class="glyph">laptop ⇄ server</span>
@@ -362,7 +363,7 @@ delivered to server/api (w8:p1, was working)</pre>
         <h2>Plug in your own tracker.</h2>
         <p class="lede">sheprd doesn't know your tracker. You describe what a reference looks like and the command that prints one. GitHub issues, Linear, a folder of markdown: anything with a command line works.</p>
         <ul class="notes">
-          <li><b>Ctrl+click</b> a reference in any agent's output to read it.</li>
+          <li><b>Ctrl+click</b> a reference in any agent's output to read it; <b>hold Ctrl</b> over it to see its title.</li>
           <li><b>The reader</b> turns front matter into a header and renders the markdown. Scroll with the wheel, arrows or PgUp/PgDn; Esc closes.</li>
           <li><b>Mentioned:</b> right-click an agent to see the references it talked about.</li>
         </ul>
@@ -397,6 +398,17 @@ command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
     </div>
   </section>
 
+  <section class="section" id="changes">
+    <div style="display:grid;gap:12px">
+      <span class="eyebrow">Releases</span>
+      <h2>What's new</h2>
+    </div>
+    <ul class="herdr-list">
+      <li><strong>Next release.</strong> Ctrl+click opens any file (code at the line, images and PDFs in your viewer, fetched from the server when needed); <code>localhost</code> links on a server open through an SSH tunnel; hint mode (<kbd>prefix+i</kbd>); Ctrl+Alt+click copies; hold Ctrl over a reference to preview it; <code>{ssh}</code> and <code>{cwd}</code> in reference commands. A new workspace on another machine now opens that workspace.</li>
+    </ul>
+    <p class="lede">Every release with its notes: <a href="https://github.com/andreconde21/sheprd/releases">GitHub releases</a>.</p>
+  </section>
+
   <section class="section" id="keys">
     <div style="display:grid;gap:12px">
       <span class="eyebrow">Defaults, no config needed</span>
@@ -415,7 +427,9 @@ command  = <span class="s">"cat ~/notes/tasks/{id}.md"</span></pre>
           <tr><td><kbd>prefix+/</kbd></td><td>Filter the sidebar</td></tr>
           <tr><td><kbd>prefix+.</kbd></td><td>Project menu for the focused workspace</td></tr>
           <tr><td><kbd>prefix+alt+h</kbd></td><td>Show or conceal hidden workspaces</td></tr>
-          <tr><td><kbd>ctrl+click</kbd></td><td>Open the reference or Markdown document under the mouse</td></tr>
+          <tr><td><kbd>prefix+i</kbd></td><td>Hint mode: type a label to open, in capitals to copy</td></tr>
+          <tr><td><kbd>ctrl+click</kbd></td><td>Open the path, link or reference under the mouse</td></tr>
+          <tr><td><kbd>ctrl+alt+click</kbd></td><td>Copy it instead</td></tr>
         </tbody>
       </table>
     </div>
