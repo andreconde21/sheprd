@@ -5,6 +5,8 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.3-37 (2026-10-11)
+
 ### Fixed
 - New workspace on another machine (footer **new** → on Local while on a remote workspace): sheprd
   now waits for the workspace to exist and switches straight to it, instead of switching first and
