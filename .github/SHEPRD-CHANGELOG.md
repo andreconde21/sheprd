@@ -5,6 +5,20 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+### Fixed
+- `sheprd promote` publishes the release under its `sheprd-v*` tag. It used to set
+  `GITHUB_REF_NAME`, which GitHub ignores, so the release came out named `main` and
+  `sheprd update` could not find it.
+
+## sheprd-v0.9.5-1 (2026-10-17)
+
+### Changed
+- Based on herdr v0.9.5 (was v0.9.3): herdr's v0.9.4 and v0.9.5 fixes and features, such as
+  crash-safe session saves, the server surviving the shell that started it, prefix keys with input
+  methods, and Claude Code questions showing as blocked in named sessions.
+- Clickable desktop notifications keep sheprd's notify-send + Hyprland focus on Linux; herdr's new
+  native clickable notifications are used on Windows.
+
 ## sheprd-v0.9.3-37 (2026-10-11)
 
 ### Fixed
