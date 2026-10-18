@@ -112,7 +112,7 @@ struct AgentInfo {
     agent_key: String,
 }
 
-fn agent_title(agent: &crate::protocol::ClientShellAgent) -> String {
+pub(super) fn agent_title(agent: &crate::protocol::ClientShellAgent) -> String {
     [
         agent.terminal_title_stripped.as_deref(),
         agent.title.as_deref(),

@@ -760,6 +760,15 @@ pub(super) fn observe_activity(endpoint: &ClientShellEndpoint) {
 }
 
 /// Seconds since the agent last changed state, if known.
+/// When the agent last changed state (unix seconds), if sheprd saw it change.
+pub(super) fn idle_since(key: &str) -> Option<u64> {
+    let store = activity().lock().unwrap_or_else(|e| e.into_inner());
+    store
+        .agents
+        .get(key)
+        .and_then(|(_, at)| (*at > 0).then_some(*at))
+}
+
 pub(super) fn idle_secs(key: &str) -> Option<u64> {
     let store = activity().lock().unwrap_or_else(|e| e.into_inner());
     store
