@@ -5,6 +5,8 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-3 (2026-10-18)
+
 ### Fixed
 - The message relay comes back after a quick sheprd restart. The new window's relay found the
   lock still held by the old one (which notices its sheprd quit within 5 s) and gave up, leaving
