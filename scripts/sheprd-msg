@@ -511,15 +511,21 @@ def relay_one(label, host):
 
 
 def cmd_relay(_args):
-    # One relay per machine: a second sheprd window finds the lock taken and leaves.
-    os.makedirs(STATE, exist_ok=True)
-    lock = open(os.path.join(STATE, "relay.lock"), "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return
     # Started by the sheprd client: stop when it exits (we get reparented).
     parent = os.getppid()
+    # One relay per machine. The lock may still be held by the relay of a sheprd that just quit
+    # (it notices within 5 s) or by another sheprd window: wait for it while our sheprd runs,
+    # instead of leaving this window without a relay.
+    os.makedirs(STATE, exist_ok=True)
+    lock = open(os.path.join(STATE, "relay.lock"), "w")
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if os.getppid() != parent:
+                return
+            time.sleep(2)
 
     def watch_parent():
         while os.getppid() == parent:
