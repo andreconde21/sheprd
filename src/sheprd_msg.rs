@@ -65,8 +65,8 @@ pub fn run_cli(args: &[String]) -> ! {
 }
 
 /// Starts the relay once per client process. It delivers messages queued on machines that cannot
-/// reach this one, holds its own lock (a second window's relay exits at once) and stops when this
-/// process exits.
+/// reach this one, holds its own lock (a second window's relay, or one started right after a
+/// restart, waits for it) and stops when this process exits.
 pub fn ensure_relay() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     if cfg!(test) {

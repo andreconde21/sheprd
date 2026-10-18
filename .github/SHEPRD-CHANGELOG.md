@@ -5,6 +5,12 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+### Fixed
+- The message relay comes back after a quick sheprd restart. The new window's relay found the
+  lock still held by the old one (which notices its sheprd quit within 5 s) and gave up, leaving
+  the machine without a relay, and the shared view unsent, until the next restart. It now waits
+  for the lock while its sheprd runs, so a second window also takes over when the first closes.
+
 ## sheprd-v0.9.5-2 (2026-10-18)
 
 ### Added
