@@ -5,6 +5,14 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-2 (2026-10-18)
+
+### Added
+- The shared view (`share_view = true`) now carries each agent's sidebar row: its title, whether
+  it is in the active view, its number, when it went idle, context size and to-dos (view sync
+  contract v3). Conductore names agents the way sheprd does (no more rows all reading
+  "Projects") and keeps recently idle agents in its active view.
+
 ### Fixed
 - `sheprd promote` publishes the release under its `sheprd-v*` tag. It used to set
   `GITHUB_REF_NAME`, which GitHub ignores, so the release came out named `main` and
