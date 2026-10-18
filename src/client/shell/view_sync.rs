@@ -2,8 +2,8 @@
 //! `docs/sheprd-view-sync.md` in conductore-mobile).
 //!
 //! Opt-in with `share_view = true` in sidebar.toml. On this machine (the hub) sheprd then:
-//! - writes `~/.local/state/sheprd/view.json` (layout, per-agent presence and marks, order,
-//!   focus) when it changes and at least every 30 s; `sheprd-msg relay` copies it to the other
+//! - writes `~/.local/state/sheprd/view.json` (layout, per-agent presence, marks and sidebar
+//!   row, order, focus) when it changes and at least every 30 s; `sheprd-msg relay` copies it to the other
 //!   machines with their own `self` key;
 //! - drains `~/.local/state/sheprd/view-updates.jsonl` (marks written by such apps, collected
 //!   here by the relay from the other machines) and applies them to sidebar.toml: v1 marks, and
@@ -82,6 +82,20 @@ pub(super) fn view_json(
     }
     let mut agents = BTreeMap::new();
     let mut focus = None;
+    // The numbers sheprd's sidebar shows (prefix+alt+N), in its navigation order.
+    let numbers = super::aggregate_navigation::aggregate_agent_rows(
+        endpoints,
+        active_endpoint_id,
+        crate::config::AgentPanelSortConfig::Spaces,
+    )
+    .into_iter()
+    .filter(|row| !row.endpoint.stale())
+    .enumerate()
+    .map(|(index, row)| {
+        let endpoint = &endpoints[row.endpoint.endpoint_index];
+        (projects::agent_key(endpoint, &row.agent.pane_id), index + 1)
+    })
+    .collect::<std::collections::HashMap<_, _>>();
     for endpoint in endpoints
         .iter()
         .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
@@ -95,16 +109,32 @@ pub(super) fn view_json(
                 focus = Some(key.clone());
             }
             let seq = agent.state_change_seq;
+            let presence = layout.presence(&key, seq, agent.agent_status);
+            let kept = layout.is_kept(&key);
+            let removed = layout.is_idled(&key, seq);
+            // The sidebar's row, as sheprd_sidebar::build_rows computes it (contract v3).
+            let idle_since = (presence == projects::Presence::Idle)
+                .then(|| projects::idle_since(&key))
+                .flatten();
+            let recent = idle_since
+                .is_some_and(|at| unix_now().saturating_sub(at) < layout.recent_secs())
+                && !removed;
             agents.insert(
                 key.clone(),
                 serde_json::json!({
-                    "presence": presence_name(layout.presence(&key, seq, agent.agent_status)),
+                    "presence": presence_name(presence),
                     "state_seq": seq,
                     "unread": layout.is_unread(&key),
                     "dismissed": layout.is_dismissed(&key, seq),
-                    "kept": layout.is_kept(&key),
+                    "kept": kept,
                     // Extra v1 key (readers ignore unknown keys): taken out of the active view.
-                    "removed": layout.is_idled(&key, seq),
+                    "removed": removed,
+                    "title": super::sheprd_sidebar::agent_title(agent),
+                    "active": presence.is_active() || kept || recent,
+                    "number": numbers.get(&key),
+                    "idle_since": idle_since,
+                    "ctx": projects::agent_context_tokens(agent),
+                    "todo": projects::agent_todo(agent).map(|((done, total), _)| [done, total]),
                 }),
             );
         }
@@ -130,6 +160,7 @@ pub(super) fn view_json(
                 "unread": layout.is_unread(&key),
                 "dismissed": false,
                 "kept": layout.is_kept(&key),
+                "active": layout.is_kept(&key),
             })
         });
     }
@@ -140,6 +171,8 @@ pub(super) fn view_json(
         "version": 1,
         // Contract v2: this sheprd applies layout edits, and lists the ones it refused.
         "updates": 2,
+        // Contract v3: each agent also carries its sidebar row (title, active, number, ...).
+        "rows": 3,
         "rejected": rejected()
             .iter()
             .map(|(id, why)| serde_json::json!({ "id": id, "why": why }))
