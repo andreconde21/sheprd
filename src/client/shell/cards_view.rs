@@ -460,7 +460,7 @@ pub(super) fn render(
                         body.x + 3,
                         vy,
                         body.width.saturating_sub(3),
-                        &format!("! not sent: {reason}"),
+                        &format!("! {reason}"),
                         base.fg(palette.red),
                     );
                     vy = vy.saturating_add(1);

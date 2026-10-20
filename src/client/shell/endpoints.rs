@@ -227,6 +227,7 @@ impl ClientShellState {
         {
             endpoint.work_ledger = None;
         }
+        self.clear_ledger_refusals(endpoint_id);
         if endpoint_id == &self.active_endpoint_id {
             let pending = self.pending_requests.keys().cloned().collect::<Vec<_>>();
             for request_id in pending {

@@ -2030,15 +2030,12 @@ async fn run_client_loop(
                         let mut repaint = repaint || dispatch_repaint;
                         // andreconde fork (sheprd): only the active lane drains on dispatch; a
                         // card answer queued behind this one on another machine goes now.
-                        if write_stream.active_id() != &endpoint_id {
-                            let cancelled =
-                                endpoint_commands.send_next(&endpoint_id, &mut write_stream);
-                            if let Some(shell) = state.shell.as_mut() {
-                                for request_id in cancelled {
-                                    repaint |= shell.cancel_endpoint_request(&request_id);
-                                }
-                            }
-                        }
+                        repaint |= shell_runtime::drain_ledger_lane(
+                            &endpoint_id,
+                            &mut endpoint_commands,
+                            &mut write_stream,
+                            state.shell.as_mut(),
+                        );
                         if replay_mouse.is_empty() {
                             if repaint {
                                 if let Some(frame) = state.shell.as_mut().and_then(|shell| {
@@ -2466,13 +2463,12 @@ async fn run_client_loop(
                         (effects, outcome, frame)
                     };
                     for endpoint_id in idle_lanes {
-                        let cancelled =
-                            endpoint_commands.send_next(&endpoint_id, &mut write_stream);
-                        if let Some(shell) = state.shell.as_mut() {
-                            for request_id in cancelled {
-                                shell.cancel_endpoint_request(&request_id);
-                            }
-                        }
+                        shell_runtime::drain_ledger_lane(
+                            &endpoint_id,
+                            &mut endpoint_commands,
+                            &mut write_stream,
+                            state.shell.as_mut(),
+                        );
                     }
                     handle_shell_notification_effects(
                         effects,

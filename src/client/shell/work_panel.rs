@@ -488,7 +488,7 @@ pub(super) fn render(
                     x + 1,
                     y,
                     width - 1,
-                    &format!("! not sent: {reason}"),
+                    &format!("! {reason}"),
                     base.fg(palette.red),
                 );
                 y += 1;

@@ -234,6 +234,16 @@ fn quote_answer(text: &str) -> String {
     quoted
 }
 
+/// A chosen option in a sent line: as is, or quoted like free text when it holds a separator
+/// (or starts with a quote) and would read as more than one answer.
+fn send_option(option: &str) -> String {
+    if option.contains(" · ") || option.contains(" → ") || option.starts_with('"') {
+        quote_answer(option)
+    } else {
+        option.to_owned()
+    }
+}
+
 /// A question as a sent line's hint: one line, without the separators the line itself uses.
 fn send_hint(text: &str) -> String {
     text.split_whitespace()
@@ -941,7 +951,7 @@ impl WorkLedger {
                 };
                 let answer = match (answer.option, answer.text.as_ref()) {
                     (Some(index), _) => match question.options.get(index) {
-                        Some(option) => option.clone(),
+                        Some(option) => send_option(option),
                         None => continue,
                     },
                     (None, Some(text)) => quote_answer(text),
@@ -1817,6 +1827,34 @@ mod tests {
         assert_eq!(ledger.acknowledge(), vec!["CAL-40".to_owned()]);
         assert!(ledger.answers().is_empty());
         assert!(ledger.acknowledge().is_empty());
+    }
+
+    #[test]
+    fn options_with_a_separator_are_quoted_in_the_sent_line() {
+        let mut ledger = WorkLedger::default();
+        ledger
+            .ask(
+                "SHE-1",
+                ask("Plan?", &["a · b", "x → y", "plain"], None),
+                None,
+                1,
+            )
+            .unwrap();
+        ledger
+            .ask("SHE-1", ask("Other?", &["plain"], None), None, 2)
+            .unwrap();
+        ledger.stage("SHE-1", 1, option(0)).unwrap();
+        ledger.stage("SHE-1", 2, option(0)).unwrap();
+        assert_eq!(
+            ledger.compose_send().unwrap().text,
+            "SHE-1 Q1 (Plan?) → \"a · b\" · Q2 (Other?) → plain"
+        );
+        ledger.stage("SHE-1", 1, option(1)).unwrap();
+        assert!(ledger
+            .compose_send()
+            .unwrap()
+            .text
+            .starts_with("SHE-1 Q1 (Plan?) → \"x → y\" · "));
     }
 
     #[test]

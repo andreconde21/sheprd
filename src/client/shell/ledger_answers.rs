@@ -448,15 +448,16 @@ impl PendingLedgerRequest {
 
 /// A refusal as the panel marks it, in a few words.
 fn refusal_reason(code: &str, message: &str) -> String {
-    match code {
-        "agent_blocked" => "waiting on a dialog".into(),
-        "agent_not_ready" => "no agent running".into(),
-        "endpoint_busy" => "machine busy".into(),
-        "endpoint_timeout" | "endpoint_cancelled" | "server_unavailable" => {
-            "no reply from the machine".into()
-        }
-        _ => message.to_owned(),
-    }
+    let why = match code {
+        "agent_blocked" => "waiting on a dialog",
+        "agent_not_ready" => "no agent running",
+        "endpoint_busy" => "machine busy",
+        // Interrupted after it left: the server may have typed the answers already.
+        "endpoint_cancelled" => return "may have been sent: check the card".into(),
+        "endpoint_timeout" | "server_unavailable" => "no reply from the machine",
+        _ => message,
+    };
+    format!("not sent: {why}")
 }
 
 /// A refusal as a notice: who refused (`machine/agent`), why, and what happens to the answers.
@@ -474,6 +475,9 @@ fn refusal_notice(who: &str, code: &str, message: &str, send: bool) -> String {
             format!("{who} has no agent running: answers kept, send again once it runs")
         }
         "endpoint_busy" => format!("{who} is busy with another action: {next}"),
+        "endpoint_cancelled" if send => {
+            format!("{who} was interrupted: the answers may have been sent, check the card")
+        }
         "endpoint_timeout" | "endpoint_cancelled" | "server_unavailable" => {
             format!("{who} did not answer: {next}")
         }
@@ -521,6 +525,21 @@ impl ClientShellState {
             crate::api::schema::Method::LedgerSend(params) => Some(params.pane_id.clone()),
             _ => None,
         };
+        // The answers changed: an old refusal no longer describes them.
+        match &method {
+            crate::api::schema::Method::LedgerStage(params) => {
+                self.ledger_refusals
+                    .remove(&(endpoint_id.clone(), params.pane_id.clone()));
+            }
+            crate::api::schema::Method::LedgerDismiss(params) => match &params.pane_id {
+                Some(pane_id) => {
+                    self.ledger_refusals
+                        .remove(&(endpoint_id.clone(), pane_id.clone()));
+                }
+                None => self.clear_ledger_refusals(endpoint_id),
+            },
+            _ => {}
+        }
         let id = format!("{LEDGER_REQUEST_PREFIX}{}", self.next_request_id);
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending_ledger_requests.insert(
@@ -536,6 +555,12 @@ impl ClientShellState {
             boot_id,
             request: Box::new(crate::api::schema::Request { id, method }),
         });
+    }
+
+    /// Forgets why a machine's sends were refused: it went away, or every pane changed.
+    pub(crate) fn clear_ledger_refusals(&mut self, endpoint_id: &ClientEndpointId) {
+        self.ledger_refusals
+            .retain(|(refused_on, _), _| refused_on != endpoint_id);
     }
 
     pub(crate) fn is_ledger_request(&self, request_id: &str) -> bool {
