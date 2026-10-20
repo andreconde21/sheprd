@@ -24,6 +24,11 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
   sheprd_sum_1..3       what got done recently, one line each (opt-in model summary)
   sheprd_sum_at         when that summary was made (HH:MM)
 
+Card ledger (`sheprd card`, shown as CARDS in the right panel): agents that never write it get
+inferred entries, one per subagent task with a reference id (title, running/done/stopped), and
+the open questions of the last message on the workspace's card (else on "session"). An explicit
+`sheprd card` write always wins; on an older sheprd the tokens above still carry it all.
+
 Model summaries run in the background with `summary_command` from ~/.config/herdr/sheprd-hook.toml
 (any command that reads a prompt on stdin and prints the answer: `codex exec -`, `ollama run
 llama3.2`, `llm -m gpt-4o-mini`), else Claude Haiku when `claude` is installed. sheprd asks for one
@@ -71,6 +76,7 @@ KEEP_DAYS = 7
 MAX_TODOS = 12
 MAX_TIMELINE = 10
 MAX_VALUE = 80
+LEDGER_ID = re.compile(r"^[A-Za-z0-9#._-]{1,32}$")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 COMMAND_TOOLS = {"Bash"}
 
@@ -331,7 +337,7 @@ def work(transcript, session, patterns, cache):
             key=os.path.getmtime, reverse=True,
         )[:WORK_SCAN]
     except OSError:
-        return {}, None
+        return {}, None, []
     tasks = {}
     for meta_path in metas:
         try:
@@ -380,7 +386,7 @@ def work(transcript, session, patterns, cache):
         head = f"{task['key']}|"
         out[f"sheprd_w_{i}"] = head + fit(task["label"], max(4, MAX_VALUE - len(head) - len(stages) - 1)) + "|" + stages
     if not ordered:
-        return {}, None
+        return {}, None, []
     os.makedirs(WORK_DIR, exist_ok=True)
     path = os.path.join(WORK_DIR, f"{session}.json")
     with open(path + ".tmp", "w") as handle:
@@ -388,7 +394,76 @@ def work(transcript, session, patterns, cache):
     os.replace(path + ".tmp", path)
     short = path.replace(os.path.expanduser("~"), "~", 1)
     out["sheprd_wf"] = short if len(short) <= MAX_VALUE else path[-MAX_VALUE:]
-    return out, path
+    return out, path, ordered
+
+
+def ledger_status(task):
+    """A task's state for the card ledger, from its stages."""
+    states = [stage["state"] for stage in task["stages"]]
+    if "r" in states:
+        return "running"
+    if states and all(state == "d" for state in states):
+        return "done"
+    return "stopped"
+
+
+def workspace_card(cache):
+    """The card the pane's workspace was started for (its `card` token), looked up once."""
+    if "ledger_card" not in cache:
+        cache["ledger_card"] = ""
+        workspace = os.environ.get("HERDR_WORKSPACE_ID")
+        herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+        if workspace:
+            try:
+                result = subprocess.run([herdr, "workspace", "get", workspace],
+                                        capture_output=True, text=True, timeout=5, check=False)
+                tokens = json.loads(result.stdout or "{}").get("result", {}).get("workspace", {}).get("tokens", {})
+                card = next((v for k, v in tokens.items() if k.lstrip("$") == "card"), "")
+                cache["ledger_card"] = card if LEDGER_ID.match(card or "") else ""
+            except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+                pass
+    return cache["ledger_card"] or "session"
+
+
+def ledger_updates(tasks, questions, question_item):
+    """Inferred `sheprd card update` arguments per card: tasks with an id, and the questions."""
+    updates = {}
+    for task in tasks:
+        key = task.get("key") or ""
+        if LEDGER_ID.match(key):
+            updates[key] = ["--title", fit(task["label"], 120), "--status", ledger_status(task)]
+    if questions is not None:
+        args = updates.setdefault(question_item, [])
+        if question_item == "session" and "--title" not in args:
+            args += ["--title", "this session"]
+        if questions:
+            for question in questions:
+                args += ["--inferred-question", fit(question, 400)]
+        else:
+            args.append("--clear-questions")
+    return updates
+
+
+def report_ledger(pane, updates, cache):
+    """Sends the inferred card updates that changed since the last turn. Stops for the session
+    when the server has no card ledger."""
+    if cache.get("ledger_unsupported"):
+        return
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    sent = cache.setdefault("ledger_sent", {})
+    for item, args in sorted(updates.items()):
+        if sent.get(item) == args:
+            continue
+        try:
+            result = subprocess.run([herdr, "card", "update", item, "--inferred", "--pane", pane, *args],
+                                    capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return
+        if "no card ledger" in (result.stderr or ""):
+            cache["ledger_unsupported"] = True
+            return
+        if result.returncode == 0:
+            sent[item] = args
 
 
 def last_assistant_text(transcript):
@@ -592,6 +667,11 @@ def summarize(key, text, pane, size, from_pane=False, keep_text=None):
             else:
                 out[f"sheprd_todo_{i}"] = ""
     os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(summary_path(key)) as handle:
+            asked_before = bool(json.load(handle).get("questions"))
+    except (OSError, ValueError, AttributeError):
+        asked_before = False
     record = {"tokens": out, "size": size, "questions": questions}
     if keep_text is not None:
         record["text"] = keep_text
@@ -599,6 +679,10 @@ def summarize(key, text, pane, size, from_pane=False, keep_text=None):
         json.dump(record, handle)
     os.replace(summary_path(key) + ".tmp", summary_path(key))
     report(pane, {k: v for k, v in out.items() if v}, [k for k, v in out.items() if not v])
+    if from_pane and (questions or asked_before):
+        # Another agent's questions, from its pane: on the card ledger too, so the panel's CARDS
+        # section (which replaces the token questions) still shows them.
+        report_ledger(pane, ledger_updates([], questions, "session"), {})
 
 
 def report(pane, values, clear):
@@ -672,7 +756,7 @@ def main():
 
     current = tokens(cache)
     current["sheprd_session"] = session
-    work_tokens, _ = work(transcript, session, task_patterns(), cache)
+    work_tokens, _, work_tasks = work(transcript, session, task_patterns(), cache)
     current.update(work_tokens)
     event = hook.get("hook_event_name", "")
     if event == "Stop":
@@ -691,10 +775,20 @@ def main():
         json.dump(cache, handle)
     os.replace(tmp, cache_path)
 
+    asked = cache.get("questions", []) if event in ("Stop", "PostToolUse") else None
+    question_item = workspace_card(cache) if asked is not None else "session"
+    if not asked and "--inferred-question" not in cache.get("ledger_sent", {}).get(question_item, []):
+        asked = None  # nothing asked before: no card just to clear it
+    ledger = ledger_updates(work_tasks, asked, question_item)
+
     if os.environ.get("SHEPRD_HOOK_DRY"):
-        print(json.dumps({"set": current, "clear": stale}, ensure_ascii=False, indent=1))
+        print(json.dumps({"set": current, "clear": stale, "ledger": ledger}, ensure_ascii=False, indent=1))
         return
     report(pane, current, stale)
+    report_ledger(pane, ledger, cache)
+    with open(tmp, "w") as handle:
+        json.dump(cache, handle)
+    os.replace(tmp, cache_path)
 
 
 def install():

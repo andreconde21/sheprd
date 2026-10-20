@@ -366,6 +366,25 @@ A successful start returns only after the expected agent owns the same terminal 
 
 Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter.
 
+## Card ledger
+
+```bash
+herdr card update <ID> [--title TEXT] [--status TEXT] [--summary TEXT] [--link URL] [--pane ID] [--json]
+herdr card ask <ID> <TEXT> [--option TEXT]... [--recommend N] [--pane ID] [--json]
+herdr card decide <ID> <TEXT> [--pane ID] [--json]
+herdr card done <ID> [--summary TEXT] [--pane ID] [--json]
+herdr card remove <ID> [--pane ID] [--json]
+herdr card list [--pane ID] [--json]
+```
+
+An agent keeps a ledger per card it works on: its status, a short summary, open questions with suggested answers, and the decisions it took. The work panel shows it as one collapsible row per card, cards with questions first. A card ID is opaque text of 1 to 32 characters from `A-Z a-z 0-9 # . _ -` (for example `SHE-12`, `CAL-40` or `#123`); Herdr knows no tracker.
+
+Commands write to the calling pane (`HERDR_PANE_ID`) unless `--pane` names another; with `--machine`, `--pane` is required. `card list` lists the calling pane, or every pane with a ledger when run outside one. `update` sets only the fields it is given; an empty `--status` or `--link` clears it, and a new status reopens a done card. `ask` prints the question ID; `--recommend` takes an option number starting at 1. Asking the same open question again returns the existing ID. `done` creates the card if needed.
+
+Limits per pane: 48 cards (a full ledger drops its oldest done card, then its oldest inferred one), 8 open questions per card with up to 6 options of 80 characters, 32 decisions (oldest dropped), summaries of 800 characters. The ledger is saved with the session, so it survives server restarts and live handoff, and closes with its pane.
+
+Hooks can seed entries for agents that never call these commands with `update --inferred`, plus `--inferred-question TEXT` (repeatable) or `--clear-questions` to replace the inferred questions. Inferred entries are shown dimmed and never change an entry an agent wrote: an explicit write to an inferred card takes it over and drops the inferred questions. Servers without the ledger reject these commands with a message to update.
+
 ## Direct terminal attach
 
 ```bash
