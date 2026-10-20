@@ -838,6 +838,12 @@ impl ClientShellState {
                     WorkHit::Details { title, details } => {
                         super::projects::push_task_body(title, Some(details))
                     }
+                    WorkHit::ToggleLedgerItem { pane_id, item_id } => {
+                        let key = (self.active_endpoint_id.clone(), pane_id, item_id);
+                        if !self.expanded_ledger_items.remove(&key) {
+                            self.expanded_ledger_items.insert(key);
+                        }
+                    }
                     WorkHit::Expand => {
                         self.work_panel = super::work_panel::FULL;
                         self.invalidate_pane_surface();

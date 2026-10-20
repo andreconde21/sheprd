@@ -22,6 +22,8 @@ pub(crate) struct ClientShellEndpoint {
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
+    /// andreconde fork (sheprd): the card ledger the server pushed, when it has one (SHE-100008).
+    pub(crate) work_ledger: Option<super::work_ledger_view::WorkLedgerView>,
 }
 
 pub(super) struct MachineHit {
@@ -141,6 +143,7 @@ impl ClientShellState {
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
+                work_ledger: previous.and_then(|endpoint| endpoint.work_ledger.clone()),
             });
         }
 
@@ -186,6 +189,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.work_ledger = None;
         }
     }
 
@@ -390,6 +394,31 @@ impl ClientShellState {
                 .agent_presentation
                 .receive_completions(Some(generation), projection);
         }
+    }
+
+    /// andreconde fork (sheprd): keeps the newest card ledger push per connection (SHE-100008).
+    pub(crate) fn set_endpoint_work_ledger(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        ledger: crate::protocol::endpoint::EndpointWorkLedger,
+    ) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        if endpoint.work_ledger.as_ref().is_some_and(|view| {
+            !view.superseded_by(Some(generation), &ledger.boot_id, ledger.revision)
+        }) {
+            return;
+        }
+        endpoint.work_ledger = Some(super::work_ledger_view::WorkLedgerView::from_wire(
+            Some(generation),
+            ledger,
+        ));
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
@@ -797,5 +826,6 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
         methods: None,
+        work_ledger: None,
     }
 }

@@ -248,6 +248,8 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    /// andreconde fork (sheprd): expanded card rows in the work panel (SHE-100008).
+    pub(super) expanded_ledger_items: &'a HashSet<(ClientEndpointId, String, String)>,
 }
 
 pub(super) fn render_shell(
@@ -338,6 +340,7 @@ pub(super) fn render_shell(
             layout.work_panel,
             state.endpoints,
             state.active_endpoint_id,
+            state.expanded_ledger_items,
             config,
             &mut hits,
         );

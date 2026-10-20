@@ -10,6 +10,8 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
+    /// andreconde fork (sheprd): the card ledger (SHE-100008).
+    WorkLedger(crate::protocol::endpoint::EndpointWorkLedger),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -24,6 +26,11 @@ pub(crate) fn decode_endpoint_control(
     if kind == crate::protocol::endpoint::AGENT_COMPLETIONS_KIND {
         return Ok(serde_json::from_str(data)
             .map(EndpointControlMessage::AgentCompletions)
+            .unwrap_or(EndpointControlMessage::Ignored));
+    }
+    if kind == crate::protocol::endpoint::WORK_LEDGER_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::WorkLedger)
             .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind == crate::protocol::endpoint::AGENT_VIEW_PROJECTION_KIND {
@@ -104,6 +111,46 @@ mod tests {
         assert!(matches!(
             decode_endpoint_control(&kind, "invalid").unwrap(),
             EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn work_ledger_control_round_trips_and_bad_payloads_are_ignored() {
+        let mut ledger = crate::work_ledger::WorkLedger::default();
+        ledger
+            .decide("SHE-12", "Use Checkout".into(), None, 1)
+            .unwrap();
+        let projection = crate::protocol::endpoint::EndpointWorkLedger {
+            boot_id: "boot".into(),
+            revision: 2,
+            panes: [(
+                "w1:p1".to_owned(),
+                ledger.sorted_items().into_iter().cloned().collect(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::work_ledger_message(&projection).unwrap()
+        else {
+            panic!("expected optional control");
+        };
+        let EndpointControlMessage::WorkLedger(decoded) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("expected work ledger");
+        };
+        assert_eq!(decoded, projection);
+        assert!(matches!(
+            decode_endpoint_control(&kind, "invalid").unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+        // A future field on an item does not drop the ledger.
+        let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        value["panes"]["w1:p1"][0]["answered"] = serde_json::json!(true);
+        assert!(matches!(
+            decode_endpoint_control(&kind, &value.to_string()).unwrap(),
+            EndpointControlMessage::WorkLedger(_)
         ));
     }
 

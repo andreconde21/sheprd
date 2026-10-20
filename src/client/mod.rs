@@ -2183,6 +2183,16 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::WorkLedger(ledger)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_work_ledger(
+                                        &endpoint_id,
+                                        generation,
+                                        ledger,
+                                    );
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

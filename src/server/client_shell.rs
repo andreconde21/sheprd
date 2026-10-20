@@ -14,6 +14,43 @@ pub(super) fn snapshot(
     snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
 }
 
+/// andreconde fork (sheprd): which public pane owns each non-empty card ledger (SHE-100008).
+pub(crate) type WorkLedgerOwners = Vec<(String, crate::terminal::TerminalId)>;
+
+pub(super) fn work_ledger_owners(app: &app::App) -> WorkLedgerOwners {
+    app.ledger_owners()
+        .into_iter()
+        .map(|(_, pane_id, terminal_id)| (pane_id, terminal_id))
+        .collect()
+}
+
+pub(super) fn work_ledger_projection(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    owners: &WorkLedgerOwners,
+) -> protocol::endpoint::EndpointWorkLedger {
+    protocol::endpoint::EndpointWorkLedger {
+        boot_id: boot_id.to_owned(),
+        revision,
+        panes: owners
+            .iter()
+            .filter_map(|(pane_id, terminal_id)| {
+                let terminal = app.state.terminals.get(terminal_id)?;
+                Some((
+                    pane_id.clone(),
+                    terminal
+                        .work_ledger
+                        .sorted_items()
+                        .into_iter()
+                        .cloned()
+                        .collect(),
+                ))
+            })
+            .collect(),
+    }
+}
+
 pub(super) fn snapshot_with_completions(
     app: &app::App,
     boot_id: &str,

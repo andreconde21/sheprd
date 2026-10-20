@@ -8333,3 +8333,111 @@ fn no_handle_internal_event_bypass_in_module() {
         bypass_lines.join("\n  ")
     );
 }
+
+/// andreconde fork (sheprd): the card ledger reaches client shells beside the snapshot, only when
+/// it changed, and not at all while no pane has one (SHE-100008).
+#[tokio::test]
+async fn client_shell_gets_the_card_ledger_only_when_it_changes() {
+    use crate::api::schema::{LedgerItemTarget, LedgerUpdateParams, Method, Request};
+
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("ledger")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 78,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    let _initial = client_shell_snapshot(&control_rx);
+    assert!(
+        control_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no ledger message while no pane has one"
+    );
+
+    let pane_id = server
+        .app
+        .public_pane_id(
+            0,
+            server.app.state.workspaces[0]
+                .focused_pane_id()
+                .expect("focused pane"),
+        )
+        .expect("public pane id");
+    // Snapshots may go out too (an API write can change shell state); only ledger pushes count.
+    let ledger_pushes = |receiver: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        let mut pushes = Vec::new();
+        while let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(200)) {
+            if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+                if kind == protocol::endpoint::WORK_LEDGER_KIND {
+                    pushes.push(
+                        serde_json::from_str::<protocol::endpoint::EndpointWorkLedger>(&data)
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        pushes
+    };
+
+    let response = server.app.handle_api_request(Request {
+        id: "update".into(),
+        method: Method::LedgerUpdate(LedgerUpdateParams {
+            pane_id: pane_id.clone(),
+            item_id: "SHE-12".into(),
+            title: Some("Stripe checkout".into()),
+            status: None,
+            summary: None,
+            link: None,
+            inferred: false,
+            inferred_questions: None,
+        }),
+    });
+    assert!(response.contains("\"changed\":true"), "{response}");
+    server.render_and_stream();
+    let mut pushes = ledger_pushes(&control_rx);
+    assert_eq!(pushes.len(), 1);
+    let pushed = pushes.remove(0);
+    assert_eq!(pushed.boot_id, "test-boot");
+    assert_eq!(pushed.panes[&pane_id][0].id, "SHE-12");
+    let first_revision = pushed.revision;
+
+    server.render_and_stream();
+    assert!(
+        ledger_pushes(&control_rx).is_empty(),
+        "an unchanged ledger is not resent"
+    );
+
+    server.app.handle_api_request(Request {
+        id: "remove".into(),
+        method: Method::LedgerRemove(LedgerItemTarget {
+            pane_id,
+            item_id: "SHE-12".into(),
+        }),
+    });
+    server.render_and_stream();
+    let mut pushes = ledger_pushes(&control_rx);
+    assert_eq!(pushes.len(), 1);
+    let cleared = pushes.remove(0);
+    assert!(cleared.revision > first_revision);
+    assert!(
+        cleared.panes.is_empty(),
+        "the last removal clears the client"
+    );
+    server.render_and_stream();
+    assert!(ledger_pushes(&control_rx).is_empty());
+}

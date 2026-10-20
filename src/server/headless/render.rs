@@ -1,5 +1,62 @@
 use super::*;
 
+/// andreconde fork (sheprd): pushes the card ledger to a client shell when it changed
+/// (SHE-100008). Steady state is one integer compare per frame; the pane owners are re-checked
+/// only when a snapshot went out, since that is when pane ids can have moved. Nothing is sent
+/// while no pane has a ledger, so clients of a server without one see no extra traffic. Err: the
+/// client is gone.
+pub(super) fn push_work_ledger_if_due(
+    app: &app::App,
+    boot_id: &str,
+    client: &mut crate::server::clients::ClientConnection,
+    snapshot_sent: bool,
+) -> Result<(), ()> {
+    let revision = app.state.work_ledger_revision;
+    let owners = match client.shell_work_ledger.as_ref() {
+        Some((sent_revision, _)) if *sent_revision == revision && !snapshot_sent => return Ok(()),
+        Some((sent_revision, sent_owners)) => {
+            let owners = crate::server::client_shell::work_ledger_owners(app);
+            if *sent_revision == revision && owners == *sent_owners {
+                return Ok(());
+            }
+            owners
+        }
+        None => crate::server::client_shell::work_ledger_owners(app),
+    };
+    let was_empty = client
+        .shell_work_ledger
+        .as_ref()
+        .is_none_or(|(_, sent_owners)| sent_owners.is_empty());
+    if owners.is_empty() && was_empty {
+        client.shell_work_ledger = Some((revision, owners));
+        return Ok(());
+    }
+    client.shell_work_ledger_pushes = client.shell_work_ledger_pushes.saturating_add(1);
+    let projection = crate::server::client_shell::work_ledger_projection(
+        app,
+        boot_id,
+        client.shell_work_ledger_pushes,
+        &owners,
+    );
+    client.shell_work_ledger = Some((revision, owners));
+    let framed = match crate::protocol::endpoint::work_ledger_message(&projection)
+        .map_err(|err| err.to_string())
+        .and_then(|message| {
+            HeadlessServer::frame_server_message(&message).map_err(|err| err.to_string())
+        }) {
+        Ok(framed) => framed,
+        Err(err) => {
+            // An oversized ledger is skipped, not fatal: the shell keeps working without it.
+            warn!(err = %err, "failed to frame the card ledger");
+            return Ok(());
+        }
+    };
+    match client.writer.as_ref() {
+        Some(writer) if writer.control.send(framed).is_ok() => Ok(()),
+        _ => Err(()),
+    }
+}
+
 impl HeadlessServer {
     pub(super) fn note_interactive_input(&mut self, pane_id: crate::layout::PaneId, now: Instant) {
         self.interactive_input_deadlines
@@ -645,6 +702,7 @@ impl HeadlessServer {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
                 candidate.revision = client.shell_projection_revision;
+                let mut snapshot_sent = false;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
@@ -727,6 +785,18 @@ impl HeadlessServer {
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_completions = Some(completions);
                     client.shell_agent_view = agent_view;
+                    snapshot_sent = true;
+                }
+                if push_work_ledger_if_due(
+                    &self.app,
+                    &self.client_shell_boot_id,
+                    client,
+                    snapshot_sent,
+                )
+                .is_err()
+                {
+                    broken_clients.push(client_id);
+                    continue;
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

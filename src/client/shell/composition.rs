@@ -93,6 +93,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            expanded_ledger_items: &self.expanded_ledger_items,
         };
         // andreconde fork (sheprd): the sheprd sidebar while connecting too, so startup never
         // flashes herdr's sidebar; unit tests keep the stock renderers they were written for.
@@ -285,6 +286,7 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                expanded_ledger_items: &self.expanded_ledger_items,
             },
         );
         self.hits.panes = surface
