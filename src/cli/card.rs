@@ -54,6 +54,9 @@ pub(super) fn run_card_command(args: &[String]) -> std::io::Result<i32> {
         return Ok(1);
     }
     let result = &response["result"];
+    if let Some(warning) = dropped_warning(result) {
+        eprintln!("{warning}");
+    }
     if json {
         println!(
             "{}",
@@ -67,6 +70,21 @@ pub(super) fn run_card_command(args: &[String]) -> std::io::Result<i32> {
         _ => {}
     }
     Ok(0)
+}
+
+/// A full ledger let other cards go to make room for this write: say which.
+fn dropped_warning(result: &serde_json::Value) -> Option<String> {
+    let dropped = result["dropped"]
+        .as_array()?
+        .iter()
+        .filter_map(text)
+        .collect::<Vec<_>>();
+    (!dropped.is_empty()).then(|| {
+        format!(
+            "warning: the pane's card ledger was full; dropped {}",
+            dropped.join(", ")
+        )
+    })
 }
 
 /// An older server rejects the `ledger.*` methods as an invalid request.
@@ -455,5 +473,15 @@ mod tests {
             ]}]}),
         );
         assert_eq!(text, "w1:p1\n  SHE-1  red  ]52;c;Zm9v \n    a b 2J\n");
+    }
+
+    #[test]
+    fn dropped_cards_are_named_in_a_warning() {
+        assert_eq!(
+            dropped_warning(&serde_json::json!({"changed": true, "dropped": ["SHE-1", "SHE-2"]}))
+                .as_deref(),
+            Some("warning: the pane's card ledger was full; dropped SHE-1, SHE-2")
+        );
+        assert_eq!(dropped_warning(&serde_json::json!({"changed": true})), None);
     }
 }

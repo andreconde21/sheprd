@@ -10894,10 +10894,16 @@
               "type": "object"
             },
             {
-              "description": "andreconde fork (sheprd): a card ledger item after a write (SHE-100008). `changed` is\nfalse for a write that matched what was there, or an inferred write to an explicit item.",
+              "description": "andreconde fork (sheprd): a card ledger item after a write (SHE-100008). `changed` is\nfalse for a write that matched what was there, or an inferred write to an explicit item.\n`dropped` names other cards a full ledger let go to make room.",
               "properties": {
                 "changed": {
                   "type": "boolean"
+                },
+                "dropped": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 "item": {
                   "$ref": "#/schemas/success_response/$defs/LedgerItem"
@@ -10920,6 +10926,12 @@
             },
             {
               "properties": {
+                "dropped": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "item_id": {
                   "type": "string"
                 },

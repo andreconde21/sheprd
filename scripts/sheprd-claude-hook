@@ -50,6 +50,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 
 CACHE_DIR = os.path.expanduser("~/.cache/sheprd/claude-hook")
@@ -77,7 +78,8 @@ KEEP_DAYS = 7
 MAX_TODOS = 12
 MAX_TIMELINE = 10
 MAX_VALUE = 80
-LEDGER_ID = re.compile(r"^[A-Za-z0-9#._-]{1,32}$")
+LEDGER_ID = re.compile(r"^[A-Za-z0-9#._][A-Za-z0-9#._-]{0,31}$")  # no leading "-": not a flag
+LEDGER_REPROBE = 3600  # seconds before trying a server that had no card ledger again
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 COMMAND_TOOLS = {"Bash"}
 
@@ -414,7 +416,8 @@ def ledger_state_path(key):
 
 def load_ledger_state(key):
     """What this session already put on the card ledger: `sent` (args per card), `card` (the
-    workspace's card, once looked up) and `unsupported` (the server has no ledger)."""
+    workspace's card, once looked up), `seq` (the newest batch sent) and `unsupported` (when
+    the server last said it has no ledger)."""
     try:
         with open(ledger_state_path(key)) as handle:
             state = json.load(handle)
@@ -467,10 +470,18 @@ def task_updates(tasks):
     return updates
 
 
+def ledger_unsupported(state):
+    """The server said it has no card ledger within the last hour."""
+    try:
+        return time.time() - float(state.get("unsupported") or 0) < LEDGER_REPROBE
+    except (TypeError, ValueError):
+        return False
+
+
 def ledger_plan(state, tasks, asked, question_item):
     """The inferred card updates not sent yet: the tasks' (from `task_updates`) and, when `asked`
     is a list, the open questions on `question_item` (an empty list clears earlier ones)."""
-    if state.get("unsupported"):
+    if ledger_unsupported(state):
         return {}
     sent = state.get("sent", {})
     updates = {key: list(args) for key, args in tasks.items()}
@@ -486,11 +497,23 @@ def ledger_plan(state, tasks, asked, question_item):
     return {key: args for key, args in updates.items() if sent.get(key) != args}
 
 
-def send_ledger(key, pane, tasks, asked, question_item=None):
+def send_ledger(key, pane, tasks, asked, question_item=None, seq=None):
     """Sends the inferred card updates that changed (in the background: from `start_ledger` or a
-    summary). An older server or sheprd without the ledger stops it for the session."""
+    summary). One batch at a time per session, and a batch older than the last one sent is
+    dropped, so a slow turn never lands after a newer one. A server without the ledger pauses
+    it for an hour."""
+    import fcntl
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    # The state file itself is replaced on save, so the lock lives next to it.
+    with open(ledger_state_path(key) + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _send_ledger_locked(key, pane, tasks, asked, question_item,
+                            time.time_ns() if seq is None else seq)
+
+
+def _send_ledger_locked(key, pane, tasks, asked, question_item, seq):
     state = load_ledger_state(key)
-    if state.get("unsupported"):
+    if ledger_unsupported(state) or seq < state.get("seq", 0):
         return
     if question_item is None:
         question_item = workspace_card(state) if asked is not None else "session"
@@ -503,11 +526,12 @@ def send_ledger(key, pane, tasks, asked, question_item=None):
         except (OSError, subprocess.SubprocessError):
             break
         stderr = (result.stderr or "").lower()
-        if result.returncode == 2 or "no card ledger" in stderr or "unknown command" in stderr:
-            state["unsupported"] = True
+        if "no card ledger" in stderr or "unknown command" in stderr:
+            state["unsupported"] = time.time()
             break
         if result.returncode == 0:
             sent[item] = args
+    state["seq"] = seq
     save_ledger_state(key, state)
 
 
@@ -527,7 +551,7 @@ def start_ledger(session, pane, tasks, asked):
         start_new_session=True, text=True,
     )
     try:
-        child.stdin.write(json.dumps({"tasks": tasks, "asked": asked}))
+        child.stdin.write(json.dumps({"tasks": tasks, "asked": asked, "seq": time.time_ns()}))
         child.stdin.close()
     except OSError:
         pass
@@ -906,7 +930,8 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--ledger"] and len(sys.argv) == 4:
         try:
             payload = json.load(sys.stdin)
-            send_ledger(sys.argv[2], sys.argv[3], payload.get("tasks", {}), payload.get("asked"))
+            send_ledger(sys.argv[2], sys.argv[3], payload.get("tasks", {}), payload.get("asked"),
+                        seq=payload.get("seq"))
         except Exception:  # noqa: BLE001 - background, never visible
             pass
         sys.exit(0)

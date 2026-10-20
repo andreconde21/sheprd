@@ -8,7 +8,7 @@ use crate::api::schema::{
 };
 use crate::app::App;
 use crate::layout::PaneId;
-use crate::work_ledger::{LedgerError, LedgerQuestionInput, LedgerUpdate, WorkLedger};
+use crate::work_ledger::{LedgerError, LedgerQuestionInput, LedgerUpdate, LedgerWrite, WorkLedger};
 
 use super::responses::{encode_error, encode_success};
 
@@ -94,10 +94,10 @@ impl App {
         id: String,
         target: &LedgerTarget,
         item_id: &str,
-        result: Option<Result<bool, LedgerError>>,
+        result: Option<Result<LedgerWrite<bool>, LedgerError>>,
     ) -> String {
-        let changed = match result {
-            Some(Ok(changed)) => changed,
+        let (changed, dropped) = match result {
+            Some(Ok(write)) => (write.value, write.dropped),
             Some(Err(error)) => return ledger_error(id, error),
             None => return pane_not_found(id, &target.public_pane_id),
         };
@@ -117,6 +117,7 @@ impl App {
                     pane_id: target.public_pane_id.clone(),
                     item,
                     changed,
+                    dropped,
                 },
             ),
             None => encode_error(id, "ledger_item_not_found", "card is not in the ledger"),
@@ -160,7 +161,10 @@ impl App {
             ledger.ask(&item_id, input, session, now)
         });
         match result {
-            Some(Ok((question_id, changed))) => {
+            Some(Ok(LedgerWrite {
+                value: (question_id, changed),
+                dropped,
+            })) => {
                 if changed {
                     self.ledger_changed(&target, &item_id);
                 }
@@ -170,6 +174,7 @@ impl App {
                         pane_id: target.public_pane_id,
                         item_id,
                         question_id,
+                        dropped,
                     },
                 )
             }

@@ -114,6 +114,13 @@ pub(crate) struct LedgerUpdate {
     pub(crate) inferred_questions: Option<Vec<LedgerQuestionInput>>,
 }
 
+/// What a write returned, and the other cards it pushed out of a full ledger to make room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LedgerWrite<T> {
+    pub(crate) value: T,
+    pub(crate) dropped: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LedgerError {
     InvalidId(String),
@@ -145,7 +152,9 @@ pub(crate) fn waiting_on_user(item: &LedgerItem) -> bool {
 }
 
 pub(crate) fn validate_item_id(id: &str) -> Result<(), LedgerError> {
+    // A leading '-' would read as a flag on the command line.
     let valid = !id.is_empty()
+        && !id.starts_with('-')
         && id.chars().count() <= MAX_ITEM_ID_CHARS
         && id
             .chars()
@@ -154,7 +163,7 @@ pub(crate) fn validate_item_id(id: &str) -> Result<(), LedgerError> {
         Ok(())
     } else {
         Err(LedgerError::InvalidId(format!(
-            "card id must be 1-{MAX_ITEM_ID_CHARS} characters of A-Z a-z 0-9 # . _ -"
+            "card id must be 1-{MAX_ITEM_ID_CHARS} characters of A-Z a-z 0-9 # . _ -, not starting with -"
         )))
     }
 }
@@ -329,19 +338,26 @@ impl WorkLedger {
         serde_json::to_vec(&self.items).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    /// Runs one write and keeps the ledger within `MAX_PANE_BYTES`: the oldest decisions go
-    /// first, then old cards as `entry` would drop them. A write that still does not fit is
+    /// Runs one write and keeps the ledger within `MAX_PANE_BYTES`: the written card's own
+    /// oldest decisions go first (never its newest), then other cards as `entry` would drop
+    /// them. Other cards' decisions are never touched. A write that still does not fit is
     /// undone; an inferred one is dropped quietly (`Ok(None)`), an explicit one is refused.
     fn within_budget<T>(
         &mut self,
         keep: &str,
         inferred: bool,
         write: impl FnOnce(&mut Self) -> Result<T, LedgerError>,
-    ) -> Result<Option<T>, LedgerError> {
+    ) -> Result<Option<LedgerWrite<T>>, LedgerError> {
         let before = self.clone();
-        let result = write(self)?;
+        let value = match write(self) {
+            Ok(value) => value,
+            Err(error) => {
+                *self = before;
+                return Err(error);
+            }
+        };
         while self.serialized_len() > MAX_PANE_BYTES {
-            if !inferred && self.drop_oldest_decision() {
+            if !inferred && self.drop_oldest_decision(keep) {
                 continue;
             }
             match self.eviction_candidate(keep, inferred) {
@@ -354,26 +370,30 @@ impl WorkLedger {
                         return Ok(None);
                     }
                     return Err(LedgerError::Limit(format!(
-                        "a pane's cards may take at most {} KiB; shorten them or remove some",
+                        "a pane's cards may take at most {} KiB; shorten this card or remove some",
                         MAX_PANE_BYTES / 1024
                     )));
                 }
             }
         }
-        Ok(Some(result))
+        // Cards that made room, by the item limit or the byte budget.
+        let dropped = before
+            .items
+            .keys()
+            .filter(|id| !self.items.contains_key(*id))
+            .cloned()
+            .collect();
+        Ok(Some(LedgerWrite { value, dropped }))
     }
 
-    fn drop_oldest_decision(&mut self) -> bool {
-        let Some(item) = self
-            .items
-            .values_mut()
-            .filter(|item| !item.decisions.is_empty())
-            .min_by_key(|item| item.decisions[0].decided_at_ms)
-        else {
-            return false;
-        };
-        item.decisions.remove(0);
-        true
+    fn drop_oldest_decision(&mut self, id: &str) -> bool {
+        match self.items.get_mut(id) {
+            Some(item) if item.decisions.len() > 1 => {
+                item.decisions.remove(0);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn update(
@@ -382,13 +402,16 @@ impl WorkLedger {
         update: LedgerUpdate,
         session: Option<&str>,
         now_ms: u64,
-    ) -> Result<bool, LedgerError> {
+    ) -> Result<LedgerWrite<bool>, LedgerError> {
         let inferred = update.inferred;
         Ok(self
             .within_budget(id, inferred, |ledger| {
                 ledger.apply_update(id, update, session, now_ms)
             })?
-            .unwrap_or(false))
+            .unwrap_or(LedgerWrite {
+                value: false,
+                dropped: Vec::new(),
+            }))
     }
 
     fn apply_update(
@@ -509,7 +532,7 @@ impl WorkLedger {
         input: LedgerQuestionInput,
         session: Option<&str>,
         now_ms: u64,
-    ) -> Result<(u32, bool), LedgerError> {
+    ) -> Result<LedgerWrite<(u32, bool)>, LedgerError> {
         explicit(self.within_budget(id, false, |ledger| {
             ledger.apply_ask(id, input, session, now_ms)
         })?)
@@ -569,7 +592,7 @@ impl WorkLedger {
         text: String,
         session: Option<&str>,
         now_ms: u64,
-    ) -> Result<bool, LedgerError> {
+    ) -> Result<LedgerWrite<bool>, LedgerError> {
         explicit(self.within_budget(id, false, |ledger| {
             ledger.apply_decide(id, text, session, now_ms)
         })?)
@@ -612,7 +635,7 @@ impl WorkLedger {
         summary: Option<String>,
         session: Option<&str>,
         now_ms: u64,
-    ) -> Result<bool, LedgerError> {
+    ) -> Result<LedgerWrite<bool>, LedgerError> {
         explicit(self.within_budget(id, false, |ledger| {
             ledger.apply_complete(id, summary, session, now_ms)
         })?)
@@ -657,7 +680,7 @@ fn explicit<T>(value: Option<T>) -> Result<T, LedgerError> {
 }
 
 /// Keeps one client push within `MAX_MESSAGE_BYTES`: done cards lose their details first, then
-/// go; then every card loses its summary and decisions; then whole panes go, the last first.
+/// go; then every card loses its summary and decisions; then whole panes go, the largest first.
 pub(crate) fn fit_message(panes: &mut BTreeMap<String, Vec<LedgerItem>>) {
     let size = |panes: &BTreeMap<String, Vec<LedgerItem>>| {
         serde_json::to_vec(panes).map_or(usize::MAX, |bytes| bytes.len())
@@ -688,7 +711,23 @@ pub(crate) fn fit_message(panes: &mut BTreeMap<String, Vec<LedgerItem>>) {
             return;
         }
     }
-    while size(panes) > MAX_MESSAGE_BYTES && panes.pop_last().is_some() {}
+    let mut total = size(panes);
+    let mut by_size = panes
+        .iter()
+        .map(|(pane_id, items)| {
+            // The pane's items, its quoted key, a colon and a comma.
+            let bytes = serde_json::to_vec(items).map_or(usize::MAX, |bytes| bytes.len());
+            (bytes.saturating_add(pane_id.len() + 4), pane_id.clone())
+        })
+        .collect::<Vec<_>>();
+    by_size.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    for (bytes, pane_id) in by_size {
+        if total <= MAX_MESSAGE_BYTES {
+            break;
+        }
+        panes.remove(&pane_id);
+        total = total.saturating_sub(bytes);
+    }
 }
 
 fn sort_group(item: &LedgerItem) -> u8 {
@@ -748,6 +787,8 @@ mod tests {
             "has space",
             "a/b",
             "ü",
+            "-x",
+            "--pane",
             &"x".repeat(MAX_ITEM_ID_CHARS + 1),
         ] {
             assert!(validate_item_id(id).is_err(), "{id}");
@@ -758,11 +799,15 @@ mod tests {
     fn update_creates_changes_and_reports_no_op() {
         let mut ledger = WorkLedger::default();
         assert_eq!(
-            ledger.update("SHE-1", explicit("Stripe"), Some("s1"), 10),
+            ledger
+                .update("SHE-1", explicit("Stripe"), Some("s1"), 10)
+                .map(|write| write.value),
             Ok(true)
         );
         assert_eq!(
-            ledger.update("SHE-1", explicit("Stripe"), Some("s1"), 20),
+            ledger
+                .update("SHE-1", explicit("Stripe"), Some("s1"), 20)
+                .map(|write| write.value),
             Ok(false)
         );
         let item = ledger.get("SHE-1").unwrap();
@@ -779,13 +824,23 @@ mod tests {
             link: Some("https://example.test/SHE-1".into()),
             ..LedgerUpdate::default()
         };
-        assert_eq!(ledger.update("SHE-1", cleared, None, 30), Ok(true));
+        assert_eq!(
+            ledger
+                .update("SHE-1", cleared, None, 30)
+                .map(|write| write.value),
+            Ok(true)
+        );
         let clear = LedgerUpdate {
             status: Some(String::new()),
             link: Some(String::new()),
             ..LedgerUpdate::default()
         };
-        assert_eq!(ledger.update("SHE-1", clear, None, 40), Ok(true));
+        assert_eq!(
+            ledger
+                .update("SHE-1", clear, None, 40)
+                .map(|write| write.value),
+            Ok(true)
+        );
         let item = ledger.get("SHE-1").unwrap();
         assert_eq!((item.status.as_deref(), item.link.as_deref()), (None, None));
     }
@@ -826,18 +881,22 @@ mod tests {
                 None,
                 1,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         let (second, _) = ledger
             .ask("SHE-1", ask("Which plan?", &[], None), None, 2)
-            .unwrap();
+            .unwrap()
+            .value;
         assert_eq!((first, second), (1, 2));
         assert_eq!(
-            ledger.ask(
-                "SHE-1",
-                ask("Use Stripe?", &["yes", "no"], Some(0)),
-                None,
-                3
-            ),
+            ledger
+                .ask(
+                    "SHE-1",
+                    ask("Use Stripe?", &["yes", "no"], Some(0)),
+                    None,
+                    3
+                )
+                .map(|write| write.value),
             Ok((1, false))
         );
         // Re-asking with other options replaces it under a fresh id.
@@ -848,7 +907,8 @@ mod tests {
                 None,
                 4,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert_eq!((third, changed), (3, true));
         let ids = ledger
             .get("SHE-1")
@@ -878,11 +938,15 @@ mod tests {
     fn decisions_dedupe_and_drop_the_oldest() {
         let mut ledger = WorkLedger::default();
         assert_eq!(
-            ledger.decide("SHE-1", "Use Stripe".into(), None, 1),
+            ledger
+                .decide("SHE-1", "Use Stripe".into(), None, 1)
+                .map(|write| write.value),
             Ok(true)
         );
         assert_eq!(
-            ledger.decide("SHE-1", "Use Stripe".into(), None, 2),
+            ledger
+                .decide("SHE-1", "Use Stripe".into(), None, 2)
+                .map(|write| write.value),
             Ok(false)
         );
         for index in 0..MAX_DECISIONS {
@@ -899,7 +963,9 @@ mod tests {
     fn explicit_wins_over_inferred() {
         let mut ledger = WorkLedger::default();
         assert_eq!(
-            ledger.update("SHE-1", inferred("running", Some(&["ok?"])), None, 1),
+            ledger
+                .update("SHE-1", inferred("running", Some(&["ok?"])), None, 1)
+                .map(|write| write.value),
             Ok(true)
         );
         assert!(ledger.get("SHE-1").unwrap().inferred);
@@ -913,7 +979,9 @@ mod tests {
         assert_eq!(item.questions[0].text, "Real question?");
         // Inferred writes to an explicit item are accepted no-ops.
         assert_eq!(
-            ledger.update("SHE-1", inferred("done", Some(&["x?"])), None, 3),
+            ledger
+                .update("SHE-1", inferred("done", Some(&["x?"])), None, 3)
+                .map(|write| write.value),
             Ok(false)
         );
         assert_eq!(ledger.get("SHE-1").unwrap().updated_at_ms, 2);
@@ -936,7 +1004,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(questions, vec![(2, "b?"), (3, "c?")]);
         assert_eq!(
-            ledger.update("session", inferred("running", Some(&["b?", "c?"])), None, 3),
+            ledger
+                .update("session", inferred("running", Some(&["b?", "c?"])), None, 3)
+                .map(|write| write.value),
             Ok(false)
         );
         ledger
@@ -971,7 +1041,13 @@ mod tests {
         ));
         ledger.complete("C-5", None, None, 101).unwrap();
         ledger.complete("C-3", None, None, 102).unwrap();
-        ledger.update("NEW-1", explicit("t"), None, 103).unwrap();
+        assert_eq!(
+            ledger
+                .update("NEW-1", explicit("t"), None, 103)
+                .unwrap()
+                .dropped,
+            vec!["C-5".to_owned()]
+        );
         assert!(ledger.get("C-5").is_none() && ledger.get("C-3").is_some());
         assert_eq!(ledger.len(), MAX_ITEMS);
     }
@@ -999,10 +1075,17 @@ mod tests {
     fn complete_and_reopen() {
         let mut ledger = WorkLedger::default();
         assert_eq!(
-            ledger.complete("SHE-1", Some("shipped".into()), None, 1),
+            ledger
+                .complete("SHE-1", Some("shipped".into()), None, 1)
+                .map(|write| write.value),
             Ok(true)
         );
-        assert_eq!(ledger.complete("SHE-1", None, None, 2), Ok(false));
+        assert_eq!(
+            ledger
+                .complete("SHE-1", None, None, 2)
+                .map(|write| write.value),
+            Ok(false)
+        );
         let reopen = LedgerUpdate {
             status: Some("fixing review".into()),
             ..LedgerUpdate::default()
@@ -1061,7 +1144,9 @@ mod tests {
         }
         ledger.complete("C-0", None, None, 100).unwrap();
         assert_eq!(
-            ledger.update("GUESS-1", inferred("dev", None), None, 101),
+            ledger
+                .update("GUESS-1", inferred("dev", None), None, 101)
+                .map(|write| write.value),
             Ok(false)
         );
         assert!(ledger.get("GUESS-1").is_none() && ledger.get("C-0").is_some());
@@ -1071,7 +1156,9 @@ mod tests {
             .update("GUESS-1", inferred("dev", None), None, 102)
             .unwrap();
         assert_eq!(
-            ledger.update("GUESS-2", inferred("dev", None), None, 103),
+            ledger
+                .update("GUESS-2", inferred("dev", None), None, 103)
+                .map(|write| write.value),
             Ok(true)
         );
         assert!(ledger.get("GUESS-1").is_none() && ledger.get("C-0").is_some());
@@ -1084,14 +1171,25 @@ mod tests {
             .ask("SHE-1", ask("Monthly?", &[], None), None, 1)
             .unwrap();
         ledger.update("SHE-2", explicit("t"), None, 2).unwrap();
-        assert_eq!(ledger.complete("SHE-1", None, None, 3), Ok(true));
+        assert_eq!(
+            ledger
+                .complete("SHE-1", None, None, 3)
+                .map(|write| write.value),
+            Ok(true)
+        );
         let item = ledger.get("SHE-1").unwrap();
         assert!(item.done && item.questions.is_empty());
         assert_eq!(ledger.sorted_items()[1].id, "SHE-1", "done sorts last");
     }
 
-    /// Fills one card to every per-field limit with 4-byte characters.
-    fn fill_card(ledger: &mut WorkLedger, id: &str, now_ms: u64) -> Result<(), LedgerError> {
+    /// Fills one card to every per-field limit with 4-byte characters; returns the cards it
+    /// pushed out.
+    fn fill_card(
+        ledger: &mut WorkLedger,
+        id: &str,
+        now_ms: u64,
+    ) -> Result<Vec<String>, LedgerError> {
+        let mut dropped = Vec::new();
         let wide = |count: usize| "\u{1d11e}".repeat(count);
         let update = LedgerUpdate {
             title: Some(wide(MAX_TITLE_CHARS)),
@@ -1100,20 +1198,24 @@ mod tests {
             link: Some(wide(MAX_LINK_CHARS)),
             ..LedgerUpdate::default()
         };
-        ledger.update(id, update, None, now_ms)?;
+        dropped.extend(ledger.update(id, update, None, now_ms)?.dropped);
         for index in 0..MAX_OPEN_QUESTIONS {
             let options = (0..MAX_OPTIONS)
                 .map(|option| format!("{option}{}", wide(MAX_OPTION_CHARS - 1)))
                 .collect::<Vec<_>>();
             let options = options.iter().map(String::as_str).collect::<Vec<_>>();
             let text = format!("{index}{}", wide(MAX_TEXT_CHARS - 1));
-            ledger.ask(id, ask(&text, &options, Some(0)), None, now_ms)?;
+            dropped.extend(
+                ledger
+                    .ask(id, ask(&text, &options, Some(0)), None, now_ms)?
+                    .dropped,
+            );
         }
         for index in 0..MAX_DECISIONS {
             let text = format!("{index:02}{}", wide(MAX_DECISION_CHARS - 2));
-            ledger.decide(id, text, None, now_ms)?;
+            dropped.extend(ledger.decide(id, text, None, now_ms)?.dropped);
         }
-        Ok(())
+        Ok(dropped)
     }
 
     #[test]
@@ -1130,9 +1232,45 @@ mod tests {
             assert!(ledger.serialized_len() <= MAX_PANE_BYTES);
         }
         assert!(refused > 0, "full cards cannot all fit");
-        // Decisions went before any card did.
-        assert!(ledger.get("C-0").is_some());
-        assert!(ledger.get("C-0").unwrap().decisions.is_empty());
+        assert_eq!(
+            ledger.get("C-0").unwrap().decisions.len(),
+            MAX_DECISIONS,
+            "a write never trims another card"
+        );
+    }
+
+    #[test]
+    fn a_write_only_trims_its_own_card_and_names_what_it_dropped() {
+        let mut ledger = WorkLedger::default();
+        fill_card(&mut ledger, "SHE-1", 1).unwrap();
+        fill_card(&mut ledger, "SHE-2", 2).unwrap();
+        let before = ledger.get("SHE-1").unwrap().decisions.clone();
+        // SHE-3 fits only by giving up some of its own decisions.
+        fill_card(&mut ledger, "SHE-3", 3).unwrap();
+        assert!(ledger.get("SHE-3").unwrap().decisions.len() < MAX_DECISIONS);
+        assert_eq!(ledger.get("SHE-1").unwrap().decisions, before);
+        assert_eq!(ledger.get("SHE-2").unwrap().decisions.len(), MAX_DECISIONS);
+
+        // No room left and nothing that may go: refused, nothing else touched.
+        let big = || LedgerUpdate {
+            summary: Some("\u{1d11e}".repeat(MAX_SUMMARY_CHARS)),
+            ..LedgerUpdate::default()
+        };
+        assert!(matches!(
+            ledger.update("SHE-4", big(), None, 4),
+            Err(LedgerError::Limit(_))
+        ));
+        assert!(ledger.get("SHE-4").is_none());
+        assert_eq!(ledger.get("SHE-1").unwrap().decisions, before);
+
+        // A done card may make room, and the write names it.
+        ledger.complete("SHE-2", None, None, 5).unwrap();
+        assert_eq!(
+            fill_card(&mut ledger, "SHE-4", 6),
+            Ok(vec!["SHE-2".to_owned()])
+        );
+        assert_eq!(ledger.get("SHE-1").unwrap().decisions, before);
+        assert!(ledger.serialized_len() <= MAX_PANE_BYTES);
     }
 
     #[test]
@@ -1153,9 +1291,9 @@ mod tests {
         assert!(serde_json::to_vec(&panes).unwrap().len() > crate::protocol::MAX_FRAME_SIZE);
         fit_message(&mut panes);
         assert!(serde_json::to_vec(&panes).unwrap().len() <= MAX_MESSAGE_BYTES);
-        assert!(panes.contains_key("w1:p00"), "the first panes stay");
+        assert!(!panes.is_empty());
         assert!(
-            panes["w1:p00"].iter().all(|item| !item.done),
+            panes.values().flatten().all(|item| !item.done),
             "done cards went first"
         );
 
@@ -1163,5 +1301,29 @@ mod tests {
         let before = small.clone();
         fit_message(&mut small);
         assert_eq!(small, before, "a push that fits is left alone");
+    }
+
+    #[test]
+    fn the_largest_panes_go_first_when_a_push_is_too_big() {
+        let mut ledger = WorkLedger::default();
+        for index in 0..MAX_ITEMS {
+            let _ = fill_card(&mut ledger, &format!("C-{index}"), index as u64);
+        }
+        let full = ledger
+            .sorted_items()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let small = full[..1].to_vec();
+        // Key order would drop "w1:p9" first; size order drops the full panes.
+        let mut panes = (0..20)
+            .map(|pane| (format!("w1:p{pane}"), full.clone()))
+            .collect::<BTreeMap<_, _>>();
+        panes.insert("w1:p9".into(), small.clone());
+        panes.insert("w1:p10".into(), small);
+        fit_message(&mut panes);
+        assert!(serde_json::to_vec(&panes).unwrap().len() <= MAX_MESSAGE_BYTES);
+        assert!(panes.len() < 20, "some panes had to go");
+        assert!(panes.contains_key("w1:p9") && panes.contains_key("w1:p10"));
     }
 }
