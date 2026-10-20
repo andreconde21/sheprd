@@ -960,7 +960,8 @@ impl ClientShellState {
                     self.save_rename_overlay(outcome);
                 }
             } else if matches!(rename.target, ClientRenameTarget::OpenHint)
-                && rename.input.as_str().chars().count() >= super::open_anything::hint_label_len()
+                && rename.input.as_str().chars().count()
+                    >= super::open_anything::hint_label_len()
             {
                 // andreconde fork (sheprd): hint mode acts once a whole label is typed.
                 self.save_rename_overlay(outcome);
@@ -987,7 +988,8 @@ impl ClientShellState {
                     self.save_rename_overlay(outcome);
                 }
             } else if matches!(rename.target, ClientRenameTarget::OpenHint)
-                && rename.input.as_str().chars().count() >= super::open_anything::hint_label_len()
+                && rename.input.as_str().chars().count()
+                    >= super::open_anything::hint_label_len()
             {
                 // andreconde fork (sheprd): hint mode acts once a whole label is typed.
                 self.save_rename_overlay(outcome);

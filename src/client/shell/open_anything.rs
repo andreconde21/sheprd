@@ -28,10 +28,7 @@ impl Thing {
         match self {
             Thing::Url(url) => url.clone(),
             Thing::Ref(id) => id.clone(),
-            Thing::File {
-                path,
-                line: Some(line),
-            } => format!("{path}:{line}"),
+            Thing::File { path, line: Some(line) } => format!("{path}:{line}"),
             Thing::File { path, line: None } => path.clone(),
         }
     }
@@ -303,9 +300,9 @@ fn tunnel_and_open(target: String, scheme: String, port: u16, rest: String) -> O
     let local = {
         let mut tunnels = tunnels().lock().unwrap_or_else(|e| e.into_inner());
         let key = (target.clone(), port);
-        let alive = tunnels
-            .get_mut(&key)
-            .and_then(|(local, child)| matches!(child.try_wait(), Ok(None)).then_some(*local));
+        let alive = tunnels.get_mut(&key).and_then(|(local, child)| {
+            matches!(child.try_wait(), Ok(None)).then_some(*local)
+        });
         match alive {
             Some(local) => local,
             None => {
@@ -363,9 +360,7 @@ fn cache_dir() -> std::path::PathBuf {
 
 fn expand_home(path: &str) -> String {
     match (path.strip_prefix('~'), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {
-            format!("{home}{rest}")
-        }
+        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
         _ => path.to_owned(),
     }
 }
@@ -535,11 +530,7 @@ impl ClientShellState {
             let Some(rows) = self.pane_text(&hit.pane_id) else {
                 continue;
             };
-            for (row, line) in rows
-                .iter()
-                .enumerate()
-                .take(usize::from(hit.inner_rect.height))
-            {
+            for (row, line) in rows.iter().enumerate().take(usize::from(hit.inner_rect.height)) {
                 for item in things_in_line(line, &refs) {
                     found.push((hit.pane_id.clone(), hit.inner_rect, row as u16, item));
                 }
@@ -661,7 +652,9 @@ impl ClientShellState {
                 line.chars().take(100).collect::<String>()
             });
             let mut state = preview_state().lock().unwrap_or_else(|e| e.into_inner());
-            state.cache.insert(id, line.filter(|line| !line.is_empty()));
+            state
+                .cache
+                .insert(id, line.filter(|line| !line.is_empty()));
             state.dirty = true;
         });
     }
@@ -703,7 +696,9 @@ impl ClientShellState {
                 }
                 buffer[(x, y)].set_symbol(&ch.to_string()).set_style(style);
             }
-            occlusion.cover(Rect::new(x, y, text.chars().count() as u16, 1).intersection(area));
+            occlusion.cover(
+                Rect::new(x, y, text.chars().count() as u16, 1).intersection(area),
+            );
         };
         if let Some(typed) = typed {
             let label_style = Style::default()
@@ -759,16 +754,10 @@ mod tests {
         assert_eq!(
             things,
             vec![
-                Thing::File {
-                    path: "src/main.rs".into(),
-                    line: Some(42)
-                },
+                Thing::File { path: "src/main.rs".into(), line: Some(42) },
                 Thing::Url("https://x.dev/a".into()),
                 Thing::Ref("SHE-100007".into()),
-                Thing::File {
-                    path: "shot.png".into(),
-                    line: None
-                },
+                Thing::File { path: "shot.png".into(), line: None },
             ]
         );
         assert_eq!((found[0].start, found[0].end), (5, 19));
@@ -776,26 +765,12 @@ mod tests {
 
     #[test]
     fn plain_words_are_not_paths() {
-        for token in [
-            "e.g",
-            "v0.9.3",
-            "example.com",
-            "README",
-            "1.2",
-            "github.com/a/b",
-            "a=b.rs",
-        ] {
+        for token in ["e.g", "v0.9.3", "example.com", "README", "1.2", "github.com/a/b", "a=b.rs"] {
             assert_eq!(file_target(token), None, "{token}");
         }
         assert_eq!(file_target("plan.md"), Some(("plan.md".into(), None)));
-        assert_eq!(
-            file_target("~/x/y.rs:3:9"),
-            Some(("~/x/y.rs".into(), Some(3)))
-        );
-        assert_eq!(
-            file_target("file:///abs/r.pdf"),
-            Some(("/abs/r.pdf".into(), None))
-        );
+        assert_eq!(file_target("~/x/y.rs:3:9"), Some(("~/x/y.rs".into(), Some(3))));
+        assert_eq!(file_target("file:///abs/r.pdf"), Some(("/abs/r.pdf".into(), None)));
         assert_eq!(file_target("a/.env"), Some(("a/.env".into(), None)));
     }
 
@@ -813,10 +788,7 @@ mod tests {
             local_url_parts("https://[::1]:8443/x"),
             Some(("https".into(), 8443, "/x".into()))
         );
-        assert_eq!(
-            local_url_parts("http://localhost/"),
-            Some(("http".into(), 80, "/".into()))
-        );
+        assert_eq!(local_url_parts("http://localhost/"), Some(("http".into(), 80, "/".into())));
         assert_eq!(local_url_parts("https://example.com:3000/"), None);
     }
 

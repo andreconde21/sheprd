@@ -488,9 +488,7 @@ impl ClientShellState {
                     };
                     let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
                     // --line goes first: an older sheprd-doc takes the last bare word as the path.
-                    let line = line
-                        .map(|line| format!("--line {line} "))
-                        .unwrap_or_default();
+                    let line = line.map(|line| format!("--line {line} ")).unwrap_or_default();
                     let script = format!(
                         "PATH=\"$HOME/.local/bin:$PATH\"; sheprd-doc {line}{} --pane {} --cwd {} --session {}",
                         quote(&path),
@@ -1135,9 +1133,10 @@ impl ClientShellState {
                 // link or reference under the mouse; ctrl+click opens a file or a reference
                 // (SHE-100007). Links go on to the server's link handling below.
                 let thing = self.thing_at(&hit.pane_id, viewport_row, col);
-                if mouse.modifiers.intersects(
-                    crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT,
-                ) {
+                if mouse
+                    .modifiers
+                    .intersects(crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT)
+                {
                     if let Some(thing) = thing.as_ref() {
                         self.last_pane_click = None;
                         self.copy_thing(thing, outcome);
