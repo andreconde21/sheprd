@@ -5,6 +5,7 @@ pub mod commands;
 pub mod common;
 pub mod events;
 pub mod integrations;
+pub mod ledger;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -19,6 +20,7 @@ pub use commands::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
+pub use ledger::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
@@ -249,6 +251,19 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
+    // andreconde fork (sheprd): the card ledger (SHE-100008).
+    #[serde(rename = "ledger.update")]
+    LedgerUpdate(LedgerUpdateParams),
+    #[serde(rename = "ledger.ask")]
+    LedgerAsk(LedgerAskParams),
+    #[serde(rename = "ledger.decide")]
+    LedgerDecide(LedgerDecideParams),
+    #[serde(rename = "ledger.complete")]
+    LedgerComplete(LedgerCompleteParams),
+    #[serde(rename = "ledger.remove")]
+    LedgerRemove(LedgerItemTarget),
+    #[serde(rename = "ledger.list")]
+    LedgerList(LedgerListParams),
 }
 
 #[cfg(test)]

@@ -723,6 +723,30 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ledger_updated",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "item_id"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -753,7 +777,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "ledger_updated"
           ],
           "type": "string"
         },
@@ -2351,6 +2376,187 @@
           "required": [
             "path",
             "ratio"
+          ],
+          "type": "object"
+        },
+        "LedgerAskParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "recommended": {
+              "description": "Index into `options` of the suggested answer (0-based).",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        "LedgerCompleteParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id"
+          ],
+          "type": "object"
+        },
+        "LedgerDecideParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        "LedgerItemTarget": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id"
+          ],
+          "type": "object"
+        },
+        "LedgerListParams": {
+          "properties": {
+            "pane_id": {
+              "description": "One pane; every pane with a ledger when omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LedgerQuestionInput": {
+          "description": "A question as a writer sends it.",
+          "properties": {
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "recommended": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "LedgerUpdateParams": {
+          "properties": {
+            "inferred": {
+              "description": "Seeded from what a hook saw rather than written by the agent; never overrides an\nexplicit item.",
+              "type": "boolean"
+            },
+            "inferred_questions": {
+              "description": "With `inferred`: replaces the item's inferred questions (an empty list clears them).",
+              "items": {
+                "$ref": "#/schemas/request/$defs/LedgerQuestionInput"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "status": {
+              "description": "Free text (e.g. \"dev\", \"review\", \"blocked\"). An empty string clears it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id"
           ],
           "type": "object"
         },
@@ -4260,6 +4466,19 @@
               "properties": {
                 "type": {
                   "const": "layout.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "andreconde fork (sheprd): a card ledger item changed (SHE-100008).",
+              "properties": {
+                "type": {
+                  "const": "ledger.updated",
                   "type": "string"
                 }
               },
@@ -6312,6 +6531,102 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.ask",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerAskParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.decide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerDecideParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.complete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerCompleteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -7436,6 +7751,30 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ledger_updated",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "item_id"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -7481,7 +7820,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "ledger_updated"
           ],
           "type": "string"
         },
@@ -7773,6 +8113,155 @@
               "type": "object"
             }
           ]
+        },
+        "LedgerDecision": {
+          "properties": {
+            "decided_at_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "LedgerItem": {
+          "properties": {
+            "agent_session": {
+              "description": "The agent session that wrote it last, when the pane reported one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "decisions": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/LedgerDecision"
+              },
+              "type": "array"
+            },
+            "done": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "inferred": {
+              "description": "Seeded by the hook from what it saw, not written by the agent.",
+              "type": "boolean"
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "next_question_id": {
+              "default": 0,
+              "description": "Question ids are never reused within an item, so an answer (SHE-100009) can name one.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "questions": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/LedgerQuestion"
+              },
+              "type": "array"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "LedgerPaneInfo": {
+          "properties": {
+            "items": {
+              "description": "Waiting on the user first, then active, then done.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/LedgerItem"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "items"
+          ],
+          "type": "object"
+        },
+        "LedgerQuestion": {
+          "properties": {
+            "asked_at_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "inferred": {
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "recommended": {
+              "description": "Index into `options` of the suggested answer (0-based).",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text"
+          ],
+          "type": "object"
         },
         "NotificationShowReason": {
           "enum": [
@@ -10405,6 +10894,112 @@
               "type": "object"
             },
             {
+              "description": "andreconde fork (sheprd): a card ledger item after a write (SHE-100008). `changed` is\nfalse for a write that matched what was there, or an inferred write to an explicit item.\n`dropped` names other cards a full ledger let go to make room.",
+              "properties": {
+                "changed": {
+                  "type": "boolean"
+                },
+                "dropped": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/LedgerItem"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ledger_item",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "item",
+                "changed"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "dropped": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "item_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "question_id": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "ledger_question_asked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "item_id",
+                "question_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "removed": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "ledger_item_removed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "item_id",
+                "removed"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "panes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LedgerPaneInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "ledger_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panes"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "ok",
@@ -10449,6 +11044,11 @@
             "surface_interest": {
               "default": false,
               "description": "Whether this server supports explicit client-shell surface interest.",
+              "type": "boolean"
+            },
+            "work_ledger": {
+              "default": false,
+              "description": "andreconde fork (sheprd): supports the `ledger.*` card ledger methods (SHE-100008).",
               "type": "boolean"
             }
           },

@@ -3,6 +3,8 @@
 //! (dev ✓  adv ●  chr ·), from the `sheprd_w_*` tokens of sheprd-claude-hook. Click an id for the
 //! card (the `[[refs]]` command), a stage for its report, ↗ for the pages a browser stage opened.
 //! Full, mini (one mark per task) or hidden: prefix+shift+b cycles.
+//! Above the tasks, the card ledger (SHE-100008): one row per card the agent reported, waiting
+//! on you first; click a row for its summary, decisions and questions.
 
 use super::projects;
 use super::render::{display_width, put_text};
@@ -45,6 +47,11 @@ pub(super) enum WorkHit {
         stage: String,
     },
     Expand,
+    /// Expand or collapse a card ledger row (client presentation state only).
+    ToggleLedgerItem {
+        pane_id: String,
+        item_id: String,
+    },
     /// A link the tool that started the workspace reported (`card_link`), opened in its app.
     Link(String),
     /// Answer the focused agent's question (opens the reply prompt).
@@ -205,6 +212,7 @@ pub(super) fn render(
     area: Rect,
     endpoints: &[ClientShellEndpoint],
     active: &ClientEndpointId,
+    expanded: &HashSet<(ClientEndpointId, String, String)>,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
@@ -234,13 +242,28 @@ pub(super) fn render(
         None => (None, None),
     };
     let tasks = agent.map(tasks).unwrap_or_default();
+    // The focused agent's card ledger, prepared when it arrived (no work per frame here).
+    let ledger = agent.and_then(|agent| {
+        endpoints
+            .iter()
+            .find(|e| e.endpoint_id == *active)?
+            .work_ledger
+            .as_ref()?
+            .pane(&agent.pane_id)
+    });
     let file = agent
         .and_then(|agent| projects::agent_token(agent, "sheprd_wf"))
         .map(str::to_owned);
     let (x, width) = (area.x + 1, area.width.saturating_sub(1));
     if area.width <= MINI_WIDTH {
-        // Mini: one mark per task; click opens the full panel.
-        for (row, task) in tasks.iter().enumerate().take(usize::from(area.height)) {
+        // Mini: a "?" when a card waits on you, then one mark per task; click opens the full panel.
+        let mut first = area.y;
+        if ledger.is_some_and(|ledger| ledger.open_questions > 0) {
+            put_text(buffer, x, first, width, " ?", base.fg(palette.yellow));
+            first += 1;
+        }
+        let room = usize::from(area.bottom().saturating_sub(first));
+        for (row, task) in tasks.iter().enumerate().take(room) {
             let state = if task.stages.iter().any(|(_, s)| *s == 'r') {
                 'r'
             } else if task.stages.iter().any(|(_, s)| *s == 'f') {
@@ -250,7 +273,7 @@ pub(super) fn render(
             } else {
                 's'
             };
-            let y = area.y + row as u16;
+            let y = first + row as u16;
             put_text(
                 buffer,
                 x,
@@ -405,11 +428,207 @@ pub(super) fn render(
             y += 1;
         }
     }
+    // The card ledger: one row per card, waiting on you first. With it, questions live on their
+    // card and the token-based section below stays out.
+    if let Some(ledger) = ledger {
+        if y + 1 < area.bottom() {
+            y += 1;
+            let label = if ledger.open_questions > 0 {
+                format!(" CARDS · ?{}", ledger.open_questions)
+            } else {
+                " CARDS".to_owned()
+            };
+            let style = if ledger.open_questions > 0 {
+                heading.fg(palette.yellow)
+            } else {
+                heading
+            };
+            put_text(buffer, x, y, width, &label, style);
+            y += 1;
+        }
+        let right = x + width;
+        let inner = width.saturating_sub(4);
+        for row in &ledger.rows {
+            if y >= area.bottom() {
+                return;
+            }
+            let item = &row.item;
+            let key = (active.clone(), agent.pane_id.clone(), item.id.clone());
+            let open = expanded.contains(&key);
+            // Inferred rows (the hook's guess) are dimmed and marked "~".
+            let text_style = if item.inferred {
+                base.fg(palette.overlay1)
+            } else {
+                base
+            };
+            put_text(
+                buffer,
+                x + 1,
+                y,
+                1,
+                if open { "▾" } else { "▸" },
+                base.fg(palette.overlay1),
+            );
+            let mut cx = x + 3;
+            let id = if item.inferred {
+                format!("~{}", item.id)
+            } else {
+                item.id.clone()
+            };
+            let id_width = display_width(&id).min(right.saturating_sub(cx));
+            put_text(
+                buffer,
+                cx,
+                y,
+                id_width,
+                &id,
+                text_style
+                    .fg(if item.inferred {
+                        palette.overlay1
+                    } else {
+                        palette.accent
+                    })
+                    .add_modifier(Modifier::BOLD),
+            );
+            hits.work_panel.push((
+                Rect::new(cx, y, id_width, 1),
+                WorkHit::Card(item.id.clone()),
+            ));
+            cx += id_width + 1;
+            let (glyph, color) = match row.state {
+                super::work_ledger_view::LedgerRowState::Done => ("✓", palette.green),
+                _ if item.inferred => ("●", palette.overlay1),
+                _ => ("●", palette.accent),
+            };
+            let questions = if item.questions.is_empty() {
+                String::new()
+            } else {
+                format!(" ?{}", item.questions.len())
+            };
+            let marks_width = 1 + display_width(&questions);
+            let label_width = right.saturating_sub(cx).saturating_sub(marks_width + 1);
+            put_text(buffer, cx, y, label_width, &item.title, text_style);
+            let mx = right.saturating_sub(marks_width);
+            if mx > cx {
+                put_text(buffer, mx, y, 1, glyph, base.fg(color));
+                put_text(
+                    buffer,
+                    mx + 1,
+                    y,
+                    marks_width - 1,
+                    &questions,
+                    base.fg(palette.yellow),
+                );
+            }
+            // Pushed after the id's hit: a click on the id opens the card, anywhere else toggles.
+            hits.work_panel.push((
+                Rect::new(x, y, width, 1),
+                WorkHit::ToggleLedgerItem {
+                    pane_id: agent.pane_id.clone(),
+                    item_id: item.id.clone(),
+                },
+            ));
+            y += 1;
+            if !open {
+                continue;
+            }
+            let mut detail = Vec::new();
+            if let Some(status) = &item.status {
+                detail.push((format!("· {status}"), base.fg(palette.overlay1)));
+            }
+            for line in wrap(&item.summary, usize::from(inner)).into_iter().take(3) {
+                detail.push((line, text_style));
+            }
+            for decision in &item.decisions {
+                for (n, line) in wrap(&decision.text, usize::from(inner.saturating_sub(2)))
+                    .into_iter()
+                    .take(2)
+                    .enumerate()
+                {
+                    let bullet = if n == 0 { "✓ " } else { "  " };
+                    detail.push((format!("{bullet}{line}"), base.fg(palette.green)));
+                }
+            }
+            for question in &item.questions {
+                for (n, line) in wrap(&question.text, usize::from(inner.saturating_sub(2)))
+                    .into_iter()
+                    .take(2)
+                    .enumerate()
+                {
+                    let bullet = if n == 0 { "? " } else { "  " };
+                    detail.push((format!("{bullet}{line}"), base.fg(palette.yellow)));
+                }
+                for (index, option) in question.options.iter().enumerate() {
+                    let star = if question.recommended == Some(index) {
+                        " ★"
+                    } else {
+                        ""
+                    };
+                    detail.push((format!("  {}) {option}{star}", index + 1), base));
+                }
+            }
+            for (line, style) in detail {
+                if y >= area.bottom() {
+                    return;
+                }
+                put_text(buffer, x + 3, y, inner + 1, &line, style);
+                y += 1;
+            }
+            // The subagent task for this card: its stage line, with the same report links.
+            if let Some(task) = tasks.iter().find(|task| task.key == item.id) {
+                if y >= area.bottom() {
+                    return;
+                }
+                stage_line(
+                    buffer,
+                    x + 3,
+                    right,
+                    y,
+                    task,
+                    file.as_ref(),
+                    &machine,
+                    palette,
+                    base,
+                    hits,
+                );
+                y += 1;
+            }
+            let link = item.link.as_ref().filter(|link| {
+                ["obsidian://", "https://", "http://"]
+                    .iter()
+                    .any(|scheme| link.starts_with(scheme))
+            });
+            if !item.questions.is_empty() || link.is_some() {
+                if y >= area.bottom() {
+                    return;
+                }
+                let mut lx = x + 3;
+                if !item.questions.is_empty() {
+                    put_text(buffer, lx, y, 7, "↩ reply", base.fg(palette.accent));
+                    hits.work_panel.push((
+                        Rect::new(lx, y, 7, 1),
+                        WorkHit::Reply {
+                            pane_id: agent.pane_id.clone(),
+                        },
+                    ));
+                    lx += 9;
+                }
+                if let Some(link) = link {
+                    if lx + 6 <= right {
+                        put_text(buffer, lx, y, 6, "↗ open", base.fg(palette.accent));
+                        hits.work_panel
+                            .push((Rect::new(lx, y, 6, 1), WorkHit::Link(link.clone())));
+                    }
+                }
+                y += 1;
+            }
+        }
+    }
     // Questions in its last message that wait on you.
     let questions = (1..=3)
         .filter_map(|i| projects::agent_token(agent, &format!("sheprd_q_{i}")))
         .collect::<Vec<_>>();
-    if !questions.is_empty() && y + 1 < area.bottom() {
+    if ledger.is_none() && !questions.is_empty() && y + 1 < area.bottom() {
         y += 1;
         put_text(
             buffer,
@@ -485,12 +704,17 @@ pub(super) fn render(
             }
         }
     }
+    // Tasks a card row already shows stay out of TASKS.
+    let tasks = tasks
+        .iter()
+        .filter(|task| ledger.is_none_or(|ledger| !ledger.ids.contains(&task.key)))
+        .collect::<Vec<_>>();
     if !tasks.is_empty() && y + 2 < area.bottom() {
         y += 1;
         put_text(buffer, x, y, width, " TASKS", heading);
         y += 1;
     }
-    for task in &tasks {
+    for task in tasks {
         if y + 1 >= area.bottom() {
             break;
         }
@@ -515,56 +739,18 @@ pub(super) fn render(
         let rest = (x + width).saturating_sub(cx);
         put_text(buffer, cx, y, rest, &task.label, base);
         // Line 2: stages (click opens that stage's report; ↗ opens the pages a browser stage used).
-        let mut sx = x + 2;
-        let line = y + 1;
-        for (stage, state) in &task.stages {
-            let text = format!("{} {}", short_stage(stage), mark(*state));
-            let w = display_width(&text);
-            if sx + w > x + width {
-                break;
-            }
-            put_text(
-                buffer,
-                sx,
-                line,
-                w,
-                &short_stage(stage),
-                base.fg(palette.overlay1),
-            );
-            put_text(
-                buffer,
-                sx + w - 1,
-                line,
-                1,
-                mark(*state),
-                base.fg(mark_color(*state, palette)),
-            );
-            if let Some(file) = &file {
-                let hit = WorkHit::Stage {
-                    machine: machine.clone(),
-                    file: file.clone(),
-                    key: task.key.clone(),
-                    label: task.label.clone(),
-                    stage: stage.clone(),
-                };
-                hits.work_panel.push((Rect::new(sx, line, w, 1), hit));
-            }
-            sx += w + 2;
-            if task.browsed.contains(stage) && *state == 'd' && sx + 1 <= x + width {
-                if let Some(file) = &file {
-                    put_text(buffer, sx - 1, line, 1, "↗", base.fg(palette.accent));
-                    let hit = WorkHit::Url {
-                        machine: machine.clone(),
-                        file: file.clone(),
-                        key: task.key.clone(),
-                        label: task.label.clone(),
-                        stage: stage.clone(),
-                    };
-                    hits.work_panel.push((Rect::new(sx - 1, line, 1, 1), hit));
-                    sx += 1;
-                }
-            }
-        }
+        stage_line(
+            buffer,
+            x + 2,
+            x + width,
+            y + 1,
+            task,
+            file.as_ref(),
+            &machine,
+            palette,
+            base,
+            hits,
+        );
         y += 3;
     }
     // Timeline: the latest prompts it got, oldest first, as many as fit.
@@ -577,6 +763,70 @@ pub(super) fn render(
         for line in timeline.iter().skip(skip) {
             put_text(buffer, x + 1, y, width - 1, line, base.fg(palette.overlay1));
             y += 1;
+        }
+    }
+}
+
+/// A task's stages on one line from `sx` to `right`: a click on a stage opens its report, ↗ the
+/// last page a browser stage opened.
+fn stage_line(
+    buffer: &mut Buffer,
+    mut sx: u16,
+    right: u16,
+    line: u16,
+    task: &WorkTask,
+    file: Option<&String>,
+    machine: &Option<String>,
+    palette: &Palette,
+    base: Style,
+    hits: &mut ShellHitMap,
+) {
+    for (stage, state) in &task.stages {
+        let text = format!("{} {}", short_stage(stage), mark(*state));
+        let w = display_width(&text);
+        if sx + w > right {
+            break;
+        }
+        put_text(
+            buffer,
+            sx,
+            line,
+            w,
+            &short_stage(stage),
+            base.fg(palette.overlay1),
+        );
+        put_text(
+            buffer,
+            sx + w - 1,
+            line,
+            1,
+            mark(*state),
+            base.fg(mark_color(*state, palette)),
+        );
+        if let Some(file) = file {
+            let hit = WorkHit::Stage {
+                machine: machine.clone(),
+                file: file.clone(),
+                key: task.key.clone(),
+                label: task.label.clone(),
+                stage: stage.clone(),
+            };
+            hits.work_panel.push((Rect::new(sx, line, w, 1), hit));
+        }
+        sx += w + 2;
+        if task.browsed.contains(stage) && *state == 'd' && sx < right {
+            if let Some(file) = file {
+                put_text(buffer, sx - 1, line, 1, "↗", base.fg(palette.accent));
+                let hit = WorkHit::Url {
+                    machine: machine.clone(),
+                    file: file.clone(),
+                    key: task.key.clone(),
+                    label: task.label.clone(),
+                    stage: stage.clone(),
+                };
+                hits.work_panel.push((Rect::new(sx - 1, line, 1, 1), hit));
+                sx += 1;
+            }
         }
     }
 }
@@ -907,6 +1157,200 @@ mod tests {
         assert_eq!((no_id.key.as_str(), no_id.stages[0].1), ("", 's'));
         assert_eq!(parse_task("garbage"), None);
         assert_eq!(parse_task("A|b|"), None);
+    }
+
+    /// The focused agent on the local endpoint, with an optional card ledger pushed for its pane.
+    fn panel_endpoint(
+        ledger: Option<crate::work_ledger::WorkLedger>,
+        tokens: Vec<(String, String)>,
+    ) -> ClientShellEndpoint {
+        let mut snapshot = crate::client::shell::tests::snapshot();
+        snapshot.agents = vec![crate::protocol::ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("orchestrator".into()),
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens,
+            focused: true,
+        }];
+        let mut endpoint = super::super::endpoints::local_endpoint();
+        endpoint.snapshot = Some(Box::new(snapshot));
+        endpoint.work_ledger = ledger.map(|ledger| {
+            super::super::work_ledger_view::WorkLedgerView::from_wire(
+                None,
+                crate::protocol::endpoint::EndpointWorkLedger {
+                    boot_id: "boot-1".into(),
+                    revision: 1,
+                    panes: [(
+                        "pane_1".to_owned(),
+                        ledger.sorted_items().into_iter().cloned().collect(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )
+        });
+        endpoint
+    }
+
+    fn sample_ledger() -> crate::work_ledger::WorkLedger {
+        let mut ledger = crate::work_ledger::WorkLedger::default();
+        ledger
+            .update(
+                "SHE-12",
+                crate::work_ledger::LedgerUpdate {
+                    title: Some("Stripe checkout".into()),
+                    summary: Some("Checkout session wired, webhooks next.".into()),
+                    ..Default::default()
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        ledger
+            .ask(
+                "SHE-12",
+                crate::work_ledger::LedgerQuestionInput {
+                    text: "Monthly or yearly?".into(),
+                    options: vec!["monthly".into(), "yearly".into()],
+                    recommended: Some(1),
+                },
+                None,
+                2,
+            )
+            .unwrap();
+        ledger
+            .decide("SHE-12", "Use Checkout".into(), None, 3)
+            .unwrap();
+        ledger
+            .update(
+                "CAL-4",
+                crate::work_ledger::LedgerUpdate {
+                    title: Some("guessed".into()),
+                    status: Some("running".into()),
+                    inferred: true,
+                    ..Default::default()
+                },
+                None,
+                4,
+            )
+            .unwrap();
+        ledger
+    }
+
+    fn render_panel(
+        endpoint: &ClientShellEndpoint,
+        expanded: &HashSet<(ClientEndpointId, String, String)>,
+        width: u16,
+    ) -> (Vec<String>, ShellHitMap) {
+        let area = Rect::new(0, 0, width, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut hits = ShellHitMap::default();
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        render(
+            &mut buffer,
+            area,
+            std::slice::from_ref(endpoint),
+            &ClientEndpointId::Local,
+            expanded,
+            &config,
+            &mut hits,
+        );
+        let lines = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        (lines, hits)
+    }
+
+    #[test]
+    fn card_rows_replace_token_questions_waiting_first_and_inferred_dimmed() {
+        let endpoint = panel_endpoint(
+            Some(sample_ledger()),
+            vec![("sheprd_q_1".into(), "token question?".into())],
+        );
+        let (lines, hits) = render_panel(&endpoint, &HashSet::new(), FULL_WIDTH);
+        let text = lines.join("\n");
+        assert!(text.contains("CARDS · ?1"), "{text}");
+        assert!(!text.contains("WAITING ON YOU"), "{text}");
+        let card = lines.iter().position(|l| l.contains("SHE-12")).unwrap();
+        let inferred = lines.iter().position(|l| l.contains("~CAL-4")).unwrap();
+        assert!(card < inferred, "waiting on you first:\n{text}");
+        assert!(
+            lines[card].contains("▸") && lines[card].contains("● ?1"),
+            "{text}"
+        );
+        // Collapsed: no details.
+        assert!(!text.contains("Monthly or yearly?"), "{text}");
+        let id_hit = hits
+            .work_panel
+            .iter()
+            .position(|(_, hit)| *hit == WorkHit::Card("SHE-12".into()))
+            .unwrap();
+        let toggle_hit = hits
+            .work_panel
+            .iter()
+            .position(|(_, hit)| {
+                *hit == WorkHit::ToggleLedgerItem {
+                    pane_id: "pane_1".into(),
+                    item_id: "SHE-12".into(),
+                }
+            })
+            .unwrap();
+        assert!(id_hit < toggle_hit, "the id click wins over the row toggle");
+    }
+
+    #[test]
+    fn expanded_card_shows_summary_decisions_questions_and_reply() {
+        let endpoint = panel_endpoint(Some(sample_ledger()), Vec::new());
+        let expanded = HashSet::from([(
+            ClientEndpointId::Local,
+            "pane_1".to_owned(),
+            "SHE-12".to_owned(),
+        )]);
+        let (lines, hits) = render_panel(&endpoint, &expanded, FULL_WIDTH);
+        let text = lines.join("\n");
+        assert!(text.contains("▾ SHE-12"), "{text}");
+        assert!(text.contains("Checkout session wired"), "{text}");
+        assert!(text.contains("✓ Use Checkout"), "{text}");
+        assert!(text.contains("? Monthly or yearly?"), "{text}");
+        assert!(
+            text.contains("1) monthly") && text.contains("2) yearly ★"),
+            "{text}"
+        );
+        assert!(hits.work_panel.iter().any(|(_, hit)| *hit
+            == WorkHit::Reply {
+                pane_id: "pane_1".into()
+            }));
+    }
+
+    #[test]
+    fn without_a_ledger_the_token_sections_stay() {
+        let endpoint = panel_endpoint(None, vec![("sheprd_q_1".into(), "token question?".into())]);
+        let (lines, _) = render_panel(&endpoint, &HashSet::new(), FULL_WIDTH);
+        let text = lines.join("\n");
+        assert!(text.contains("WAITING ON YOU"), "{text}");
+        assert!(!text.contains("CARDS"), "{text}");
+    }
+
+    #[test]
+    fn mini_panel_flags_open_questions() {
+        let endpoint = panel_endpoint(Some(sample_ledger()), Vec::new());
+        let (lines, _) = render_panel(&endpoint, &HashSet::new(), MINI_WIDTH);
+        assert_eq!(lines[0].trim(), "│ ?");
     }
 
     #[test]

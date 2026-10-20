@@ -1019,6 +1019,9 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_hidden: bool,
     /// andreconde fork (sheprd): work panel state (work_panel::HIDDEN / MINI / FULL).
     pub(super) work_panel: u8,
+    /// andreconde fork (sheprd): expanded card rows in the work panel, by machine, pane and
+    /// card id (SHE-100008). Presentation only: never sent to the server or saved.
+    pub(super) expanded_ledger_items: HashSet<(ClientEndpointId, String, String)>,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
@@ -1196,6 +1199,7 @@ impl ClientShellState {
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_hidden: preferences.sidebar_hidden,
             work_panel: preferences.work_panel,
+            expanded_ledger_items: HashSet::new(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,

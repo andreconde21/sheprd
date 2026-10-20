@@ -2020,6 +2020,16 @@ impl HeadlessServer {
                 }
                 self.send_to_client(client_id, completion_message);
                 self.send_to_client(client_id, snapshot_message);
+                // andreconde fork (sheprd): the card ledger follows the first snapshot. A failed
+                // send means the client is already gone; its teardown runs elsewhere.
+                if let Some(connection) = self.clients.get_mut(&client_id) {
+                    let _ = render::push_work_ledger_if_due(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        connection,
+                        true,
+                    );
+                }
                 if surface_active {
                     self.foreground_client_id = Some(client_id);
                 }

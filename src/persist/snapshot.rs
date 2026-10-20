@@ -111,6 +111,12 @@ pub struct PaneSnapshot {
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// andreconde fork (sheprd): the card ledger survives restarts and handoff (SHE-100008).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::work_ledger::WorkLedger::is_empty"
+    )]
+    pub work_ledger: crate::work_ledger::WorkLedger,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +394,9 @@ fn capture_tab(
                 agent_session,
                 agent_resume,
                 launch_argv,
+                work_ledger: terminal
+                    .map(|terminal| terminal.work_ledger.clone())
+                    .unwrap_or_default(),
             },
         );
     }
@@ -707,6 +716,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                work_ledger: Default::default(),
             },
         );
         panes.insert(
@@ -719,6 +729,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                work_ledger: Default::default(),
             },
         );
 
@@ -820,6 +831,37 @@ mod tests {
 
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+    }
+
+    /// andreconde fork (sheprd): session files and handoff manifests (both this JSON) carry the
+    /// card ledger; ones written without it still load (SHE-100008).
+    #[test]
+    fn pane_snapshot_carries_the_work_ledger_and_old_ones_load() {
+        let old: PaneSnapshot = serde_json::from_value(serde_json::json!({"cwd": "/tmp"})).unwrap();
+        assert!(old.work_ledger.is_empty());
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert!(encoded.get("work_ledger").is_none());
+
+        let mut ledger = crate::work_ledger::WorkLedger::default();
+        ledger
+            .ask(
+                "SHE-12",
+                crate::work_ledger::LedgerQuestionInput {
+                    text: "Monthly or yearly?".into(),
+                    options: vec!["monthly".into(), "yearly".into()],
+                    recommended: Some(1),
+                },
+                None,
+                5,
+            )
+            .unwrap();
+        let pane = PaneSnapshot {
+            work_ledger: ledger.clone(),
+            ..old
+        };
+        let decoded: PaneSnapshot =
+            serde_json::from_str(&serde_json::to_string(&pane).unwrap()).unwrap();
+        assert_eq!(decoded.work_ledger, ledger);
     }
 
     #[test]
@@ -1405,6 +1447,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                work_ledger: Default::default(),
             },
         );
         panes.insert(
@@ -1419,6 +1462,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                work_ledger: Default::default(),
             },
         );
 

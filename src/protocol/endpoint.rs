@@ -31,6 +31,20 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+/// andreconde fork (sheprd): the card ledger, an optional control beside the snapshot
+/// (SHE-100008). Older clients ignore the unknown kind.
+pub const WORK_LEDGER_CAPABILITY: &str = "work_ledger";
+pub const WORK_LEDGER_KIND: &str = "endpoint.work-ledger.v1";
+
+/// Every pane's card ledger, by public pane id, items in panel order. `revision` grows with
+/// each push on a connection; a client keeps the newest per boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointWorkLedger {
+    pub boot_id: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub panes: std::collections::BTreeMap<String, Vec<crate::work_ledger::LedgerItem>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -122,6 +136,13 @@ pub fn agent_completions_message(
     })
 }
 
+pub fn work_ledger_message(ledger: &EndpointWorkLedger) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: WORK_LEDGER_KIND.into(),
+        data: serde_json::to_string(ledger)?,
+    })
+}
+
 pub fn agent_view_projection_message(
     boot_id: &str,
     revision: u64,
@@ -174,6 +195,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                WORK_LEDGER_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -385,6 +407,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                WORK_LEDGER_CAPABILITY.to_string(),
             ]
         );
     }

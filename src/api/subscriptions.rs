@@ -130,6 +130,7 @@ impl ActiveSubscription {
             Subscription::WorkspaceMetadataUpdated {} => {
                 Ok(event_subscription(EventKind::WorkspaceMetadataUpdated))
             }
+            Subscription::LedgerUpdated {} => Ok(event_subscription(EventKind::LedgerUpdated)),
             Subscription::WorkspaceRenamed {} => {
                 Ok(event_subscription(EventKind::WorkspaceRenamed))
             }

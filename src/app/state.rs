@@ -888,6 +888,9 @@ pub struct AppState {
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// andreconde fork (sheprd): bumped on every card ledger change, so client fanout can tell
+    /// with one compare whether to push the ledger again (SHE-100008).
+    pub(crate) work_ledger_revision: u64,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1122,6 +1125,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            work_ledger_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

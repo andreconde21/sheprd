@@ -24,6 +24,12 @@ characters and a report at 16 tokens, hence many short tokens sent in batches.
   sheprd_sum_1..3       what got done recently, one line each (opt-in model summary)
   sheprd_sum_at         when that summary was made (HH:MM)
 
+Card ledger (`sheprd card`, shown as CARDS in the right panel): agents that never write it get
+inferred entries, one per subagent task with a reference id (title, running/done/stopped), and
+the open questions of the last message on the workspace's card (else on "session"). An explicit
+`sheprd card` write always wins; on an older sheprd the tokens above still carry it all. A
+background process per turn sends them, only when something changed, so the agent never waits.
+
 Model summaries run in the background with `summary_command` from ~/.config/herdr/sheprd-hook.toml
 (any command that reads a prompt on stdin and prints the answer: `codex exec -`, `ollama run
 llama3.2`, `llm -m gpt-4o-mini`), else Claude Haiku when `claude` is installed. sheprd asks for one
@@ -44,6 +50,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 
 CACHE_DIR = os.path.expanduser("~/.cache/sheprd/claude-hook")
@@ -71,6 +78,8 @@ KEEP_DAYS = 7
 MAX_TODOS = 12
 MAX_TIMELINE = 10
 MAX_VALUE = 80
+LEDGER_ID = re.compile(r"^[A-Za-z0-9#._][A-Za-z0-9#._-]{0,31}$")  # no leading "-": not a flag
+LEDGER_REPROBE = 3600  # seconds before trying a server that had no card ledger again
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 COMMAND_TOOLS = {"Bash"}
 
@@ -331,7 +340,7 @@ def work(transcript, session, patterns, cache):
             key=os.path.getmtime, reverse=True,
         )[:WORK_SCAN]
     except OSError:
-        return {}, None
+        return {}, None, []
     tasks = {}
     for meta_path in metas:
         try:
@@ -380,7 +389,7 @@ def work(transcript, session, patterns, cache):
         head = f"{task['key']}|"
         out[f"sheprd_w_{i}"] = head + fit(task["label"], max(4, MAX_VALUE - len(head) - len(stages) - 1)) + "|" + stages
     if not ordered:
-        return {}, None
+        return {}, None, []
     os.makedirs(WORK_DIR, exist_ok=True)
     path = os.path.join(WORK_DIR, f"{session}.json")
     with open(path + ".tmp", "w") as handle:
@@ -388,7 +397,164 @@ def work(transcript, session, patterns, cache):
     os.replace(path + ".tmp", path)
     short = path.replace(os.path.expanduser("~"), "~", 1)
     out["sheprd_wf"] = short if len(short) <= MAX_VALUE else path[-MAX_VALUE:]
-    return out, path
+    return out, path, ordered
+
+
+def ledger_status(task):
+    """A task's state for the card ledger, from its stages."""
+    states = [stage["state"] for stage in task["stages"]]
+    if "r" in states:
+        return "running"
+    if states and all(state == "d" for state in states):
+        return "done"
+    return "stopped"
+
+
+def ledger_state_path(key):
+    return os.path.join(CACHE_DIR, f"{key}.ledger.json")
+
+
+def load_ledger_state(key):
+    """What this session already put on the card ledger: `sent` (args per card), `card` (the
+    workspace's card, once looked up), `seq` (the newest batch sent) and `unsupported` (when
+    the server last said it has no ledger)."""
+    try:
+        with open(ledger_state_path(key)) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def save_ledger_state(key, state):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp = ledger_state_path(key) + f".{os.getpid()}.tmp"
+    with open(tmp, "w") as handle:
+        json.dump(state, handle)
+    os.replace(tmp, ledger_state_path(key))
+
+
+def workspace_card(state):
+    """The card the pane's workspace was started for (its `card` token), else "session". Only a
+    lookup that worked is remembered; a failed one is tried again next turn."""
+    if "card" not in state:
+        workspace = os.environ.get("HERDR_WORKSPACE_ID")
+        if not workspace:
+            state["card"] = ""
+        else:
+            herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+            try:
+                result = subprocess.run([herdr, "workspace", "get", workspace],
+                                        capture_output=True, text=True, timeout=5, check=False)
+                if result.returncode == 0:
+                    tokens = json.loads(result.stdout or "{}").get("result", {}).get("workspace", {}).get("tokens", {})
+                    card = next((v for k, v in tokens.items() if k.lstrip("$") == "card"), "")
+                    state["card"] = card if LEDGER_ID.match(card or "") else ""
+            except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+                pass
+    return state.get("card") or "session"
+
+
+def one_line(text, limit):
+    """Ledger text: one line without control characters (the server refuses those)."""
+    return fit("".join(c if c.isprintable() else " " for c in str(text)), limit)
+
+
+def task_updates(tasks):
+    """Inferred `sheprd card update` arguments for the subagent tasks that have a card id."""
+    updates = {}
+    for task in tasks:
+        key = task.get("key") or ""
+        if LEDGER_ID.match(key):
+            updates[key] = ["--title", one_line(task["label"], 120), "--status", ledger_status(task)]
+    return updates
+
+
+def ledger_unsupported(state):
+    """The server said it has no card ledger within the last hour."""
+    try:
+        return time.time() - float(state.get("unsupported") or 0) < LEDGER_REPROBE
+    except (TypeError, ValueError):
+        return False
+
+
+def ledger_plan(state, tasks, asked, question_item):
+    """The inferred card updates not sent yet: the tasks' (from `task_updates`) and, when `asked`
+    is a list, the open questions on `question_item` (an empty list clears earlier ones)."""
+    if ledger_unsupported(state):
+        return {}
+    sent = state.get("sent", {})
+    updates = {key: list(args) for key, args in tasks.items()}
+    if asked is not None and (asked or "--inferred-question" in sent.get(question_item, [])):
+        args = updates.setdefault(question_item, [])
+        if question_item == "session" and "--title" not in args:
+            args += ["--title", "this session"]
+        if asked:
+            for question in asked:
+                args += ["--inferred-question", one_line(question, 400)]
+        else:
+            args.append("--clear-questions")
+    return {key: args for key, args in updates.items() if sent.get(key) != args}
+
+
+def send_ledger(key, pane, tasks, asked, question_item=None, seq=None):
+    """Sends the inferred card updates that changed (in the background: from `start_ledger` or a
+    summary). One batch at a time per session, and a batch older than the last one sent is
+    dropped, so a slow turn never lands after a newer one. A server without the ledger pauses
+    it for an hour."""
+    import fcntl
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    # The state file itself is replaced on save, so the lock lives next to it.
+    with open(ledger_state_path(key) + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _send_ledger_locked(key, pane, tasks, asked, question_item,
+                            time.time_ns() if seq is None else seq)
+
+
+def _send_ledger_locked(key, pane, tasks, asked, question_item, seq):
+    state = load_ledger_state(key)
+    if ledger_unsupported(state) or seq < state.get("seq", 0):
+        return
+    if question_item is None:
+        question_item = workspace_card(state) if asked is not None else "session"
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    sent = state.setdefault("sent", {})
+    for item, args in sorted(ledger_plan(state, tasks, asked, question_item).items()):
+        try:
+            result = subprocess.run([herdr, "card", "update", item, "--inferred", "--pane", pane, *args],
+                                    capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            break
+        stderr = (result.stderr or "").lower()
+        if "no card ledger" in stderr or "unknown command" in stderr:
+            state["unsupported"] = time.time()
+            break
+        if result.returncode == 0:
+            sent[item] = args
+    state["seq"] = seq
+    save_ledger_state(key, state)
+
+
+def start_ledger(session, pane, tasks, asked):
+    """Hands the card updates to one background process per turn when there is anything to send,
+    so the agent never waits on the server."""
+    state = load_ledger_state(session)
+    if asked is not None and "card" not in state:
+        due = True  # the workspace's card is looked up in the background
+    else:
+        due = bool(ledger_plan(state, tasks, asked, state.get("card") or "session"))
+    if not due:
+        return
+    child = subprocess.Popen(
+        [sys.executable, os.path.realpath(__file__), "--ledger", session, pane],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, text=True,
+    )
+    try:
+        child.stdin.write(json.dumps({"tasks": tasks, "asked": asked, "seq": time.time_ns()}))
+        child.stdin.close()
+    except OSError:
+        pass
 
 
 def last_assistant_text(transcript):
@@ -592,6 +758,11 @@ def summarize(key, text, pane, size, from_pane=False, keep_text=None):
             else:
                 out[f"sheprd_todo_{i}"] = ""
     os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(summary_path(key)) as handle:
+            asked_before = bool(json.load(handle).get("questions"))
+    except (OSError, ValueError, AttributeError):
+        asked_before = False
     record = {"tokens": out, "size": size, "questions": questions}
     if keep_text is not None:
         record["text"] = keep_text
@@ -599,6 +770,11 @@ def summarize(key, text, pane, size, from_pane=False, keep_text=None):
         json.dump(record, handle)
     os.replace(summary_path(key) + ".tmp", summary_path(key))
     report(pane, {k: v for k, v in out.items() if v}, [k for k, v in out.items() if not v])
+    if from_pane and (questions or asked_before):
+        # Another agent's questions, from its pane: on the card ledger too, so the panel's CARDS
+        # section (which replaces the token questions) still shows them.
+        # The workspace's card is this process's, not that pane's: they go on "session".
+        send_ledger(key, pane, {}, questions, "session")
 
 
 def report(pane, values, clear):
@@ -672,7 +848,7 @@ def main():
 
     current = tokens(cache)
     current["sheprd_session"] = session
-    work_tokens, _ = work(transcript, session, task_patterns(), cache)
+    work_tokens, _, work_tasks = work(transcript, session, task_patterns(), cache)
     current.update(work_tokens)
     event = hook.get("hook_event_name", "")
     if event == "Stop":
@@ -691,10 +867,16 @@ def main():
         json.dump(cache, handle)
     os.replace(tmp, cache_path)
 
+    asked = cache.get("questions", []) if event in ("Stop", "PostToolUse") else None
+    ledger_tasks = task_updates(work_tasks)
+
     if os.environ.get("SHEPRD_HOOK_DRY"):
-        print(json.dumps({"set": current, "clear": stale}, ensure_ascii=False, indent=1))
+        state = load_ledger_state(session)
+        ledger = ledger_plan(state, ledger_tasks, asked, workspace_card(state) if asked is not None else "session")
+        print(json.dumps({"set": current, "clear": stale, "ledger": ledger}, ensure_ascii=False, indent=1))
         return
     report(pane, current, stale)
+    start_ledger(session, pane, ledger_tasks, asked)
 
 
 def install():
@@ -744,6 +926,14 @@ if __name__ == "__main__":
             if os.environ.get("SHEPRD_HOOK_DEBUG"):
                 import traceback
                 traceback.print_exc()
+        sys.exit(0)
+    if sys.argv[1:2] == ["--ledger"] and len(sys.argv) == 4:
+        try:
+            payload = json.load(sys.stdin)
+            send_ledger(sys.argv[2], sys.argv[3], payload.get("tasks", {}), payload.get("asked"),
+                        seq=payload.get("seq"))
+        except Exception:  # noqa: BLE001 - background, never visible
+            pass
         sys.exit(0)
     if sys.argv[1:2] == ["--summarize"] and len(sys.argv) == 5:
         try:

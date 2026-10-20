@@ -36,4 +36,7 @@ pub struct ServerCapabilities {
     /// Supports connection-scoped `server.ssh_agent.register` on the local JSON API.
     #[serde(default)]
     pub ssh_agent_registration: bool,
+    /// andreconde fork (sheprd): supports the `ledger.*` card ledger methods (SHE-100008).
+    #[serde(default)]
+    pub work_ledger: bool,
 }

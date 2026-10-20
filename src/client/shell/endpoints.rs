@@ -22,6 +22,8 @@ pub(crate) struct ClientShellEndpoint {
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
+    /// andreconde fork (sheprd): the card ledger the server pushed, when it has one (SHE-100008).
+    pub(crate) work_ledger: Option<super::work_ledger_view::WorkLedgerView>,
 }
 
 pub(super) struct MachineHit {
@@ -141,6 +143,7 @@ impl ClientShellState {
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
+                work_ledger: previous.and_then(|endpoint| endpoint.work_ledger.clone()),
             });
         }
 
@@ -186,6 +189,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.work_ledger = None;
         }
     }
 
@@ -214,6 +218,15 @@ impl ClientShellState {
 
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
         self.set_endpoint_status(endpoint_id, ClientEndpointStatus::Reconnecting);
+        // andreconde fork (sheprd): the card ledger can change while the machine is away; the
+        // server pushes a fresh one on every new connection (SHE-100008).
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.work_ledger = None;
+        }
         if endpoint_id == &self.active_endpoint_id {
             let pending = self.pending_requests.keys().cloned().collect::<Vec<_>>();
             for request_id in pending {
@@ -390,6 +403,31 @@ impl ClientShellState {
                 .agent_presentation
                 .receive_completions(Some(generation), projection);
         }
+    }
+
+    /// andreconde fork (sheprd): keeps the newest card ledger push per connection (SHE-100008).
+    pub(crate) fn set_endpoint_work_ledger(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        ledger: crate::protocol::endpoint::EndpointWorkLedger,
+    ) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        if endpoint.work_ledger.as_ref().is_some_and(|view| {
+            !view.superseded_by(Some(generation), &ledger.boot_id, ledger.revision)
+        }) {
+            return;
+        }
+        endpoint.work_ledger = Some(super::work_ledger_view::WorkLedgerView::from_wire(
+            Some(generation),
+            ledger,
+        ));
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
@@ -674,6 +712,14 @@ impl ClientShellState {
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
+        // andreconde fork (sheprd): a ledger from an older connection or server boot is stale.
+        if endpoint
+            .work_ledger
+            .as_ref()
+            .is_some_and(|view| view.is_from_other_connection(generation, &snapshot.boot_id))
+        {
+            endpoint.work_ledger = None;
+        }
         endpoint.snapshot = Some(snapshot);
         // andreconde fork (sheprd): remember when agents change state.
         super::projects::observe_activity(endpoint);
@@ -797,5 +843,6 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
         methods: None,
+        work_ledger: None,
     }
 }

@@ -63,6 +63,7 @@ mod terminal_theme;
 mod thread_spawn;
 mod ui;
 mod update;
+mod work_ledger;
 mod workspace;
 mod worktree;
 

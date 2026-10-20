@@ -451,6 +451,7 @@ fn unavailable_restored_terminal(
     if let Some(pane) = pane {
         terminal.manual_label = pane.label.clone();
         terminal.launch_argv = pane.launch_argv.clone();
+        terminal.work_ledger = pane.work_ledger.clone();
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
         }
@@ -538,6 +539,9 @@ fn restore_tab(
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_work_ledger = saved_pane
+            .map(|p| p.work_ledger.clone())
+            .unwrap_or_default();
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
         let saved_history =
@@ -593,6 +597,7 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.work_ledger = saved_work_ledger;
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -688,6 +693,7 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                terminal.work_ledger = saved_work_ledger;
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1522,6 +1528,82 @@ mod tests {
         }
     }
 
+    /// andreconde fork (sheprd): the card ledger survives restart on the spawned and the
+    /// unavailable-pane restore paths (SHE-100008).
+    #[tokio::test]
+    async fn restore_carries_the_work_ledger_on_both_restore_paths() {
+        let mut snapshot: SessionSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut ledger = crate::work_ledger::WorkLedger::default();
+        ledger
+            .update(
+                "SHE-12",
+                crate::work_ledger::LedgerUpdate {
+                    title: Some("Stripe checkout".into()),
+                    ..Default::default()
+                },
+                Some("session-1"),
+                7,
+            )
+            .unwrap();
+        ledger
+            .decide("SHE-12", "Use Checkout".into(), None, 8)
+            .unwrap();
+        for workspace in &mut snapshot.workspaces {
+            workspace.identity_cwd = cwd.clone();
+            for tab in &mut workspace.tabs {
+                for pane in tab.panes.values_mut() {
+                    pane.cwd = cwd.clone();
+                    pane.work_ledger = ledger.clone();
+                }
+            }
+        }
+        let missing = cwd.join("__herdr_missing_ledger_restore_directory__");
+        assert!(!missing.exists());
+        snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&1)
+            .unwrap()
+            .cwd = missing;
+        let (events, _rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+        let unavailable = workspaces[0].tabs[0]
+            .terminal_id(workspaces[0].tabs[0].root_pane)
+            .unwrap();
+        let spawned = workspaces[1].tabs[0]
+            .terminal_id(workspaces[1].tabs[0].root_pane)
+            .unwrap();
+        assert!(terminals[unavailable].restore_error.is_some());
+        assert!(runtimes.get(spawned).is_some());
+        for terminal_id in [unavailable, spawned] {
+            assert_eq!(terminals[terminal_id].work_ledger, ledger);
+        }
+        let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+        for workspace in &captured.workspaces {
+            for tab in &workspace.tabs {
+                for pane in tab.panes.values() {
+                    assert_eq!(pane.work_ledger, ledger);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn restore_carries_persisted_agent_session_metadata() {
         let cwd = std::env::current_dir().unwrap();
@@ -1554,6 +1636,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            work_ledger: Default::default(),
                         },
                     )]),
                     zoomed: false,
@@ -1636,6 +1719,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                work_ledger: Default::default(),
                             },
                         ),
                         (
@@ -1648,6 +1732,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                work_ledger: Default::default(),
                             },
                         ),
                     ]),
@@ -1702,6 +1787,7 @@ mod tests {
                     agent_session: None,
                     agent_resume: None,
                     launch_argv: None,
+                    work_ledger: Default::default(),
                 },
             )
         };
@@ -1718,6 +1804,7 @@ mod tests {
             }),
             agent_resume: None,
             launch_argv: None,
+            work_ledger: Default::default(),
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1870,6 +1957,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            work_ledger: Default::default(),
                         },
                     )]),
                     zoomed: false,
@@ -2176,6 +2264,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                work_ledger: Default::default(),
             },
         );
         let mut history = SessionHistorySnapshot {

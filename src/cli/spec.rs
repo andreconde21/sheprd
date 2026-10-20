@@ -43,6 +43,7 @@ pub(super) fn command() -> Command {
         .subcommand(notification_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
+        .subcommand(card_command())
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
@@ -317,6 +318,69 @@ fn notification_command() -> Command {
                     "bottom-right",
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
+        )
+}
+
+/// andreconde fork (sheprd): the card ledger (SHE-100008).
+fn card_command() -> Command {
+    let pane = || option("pane", "PANE_ID").help("Pane to write to (default: the calling pane)");
+    Command::new("card")
+        .about("Report per-card status, questions and decisions to the work panel")
+        .subcommand(
+            Command::new("update")
+                .about("Set a card's title, status, summary or link")
+                .arg(required("id", "ID"))
+                .arg(option("title", "TEXT"))
+                .arg(option("status", "TEXT"))
+                .arg(option("summary", "TEXT"))
+                .arg(option("link", "URL"))
+                .arg(flag("inferred").help("Mark as inferred (never overrides an explicit card)"))
+                .arg(
+                    repeatable_option("inferred-question", "TEXT")
+                        .help("With --inferred: an open question (repeat)"),
+                )
+                .arg(flag("clear-questions").help("With --inferred: drop inferred questions"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("ask")
+                .about("Ask the user a question about a card")
+                .arg(required("id", "ID"))
+                .arg(required("question", "TEXT"))
+                .arg(repeatable_option("option", "TEXT").help("A suggested answer (repeat)"))
+                .arg(option("recommend", "N").help("The recommended option, from 1"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("decide")
+                .about("Record a decision taken for a card")
+                .arg(required("id", "ID"))
+                .arg(required("decision", "TEXT"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("done")
+                .about("Mark a card done")
+                .arg(required("id", "ID"))
+                .arg(option("summary", "TEXT"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("remove")
+                .about("Remove a card from the ledger")
+                .arg(required("id", "ID"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("List cards (the calling pane, or every pane outside one)")
+                .arg(pane())
+                .arg(flag("json")),
         )
 }
 
