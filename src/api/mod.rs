@@ -82,7 +82,20 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::LedgerDecide(_)
             | Method::LedgerComplete(_)
             | Method::LedgerRemove(_)
-    )
+            | Method::LedgerStage(_)
+            | Method::LedgerDismiss(_)
+            | Method::LedgerSend(_)
+    ) || ledger_read_acknowledges(&request.method)
+}
+
+/// andreconde fork (sheprd): reading the ledger changes it only when the read acknowledges
+/// answers; a plain `card list` or `card answers --peek` is read-only (SHE-100009).
+fn ledger_read_acknowledges(method: &Method) -> bool {
+    match method {
+        Method::LedgerList(params) => params.ack,
+        Method::LedgerAnswers(params) => !params.peek,
+        _ => false,
+    }
 }
 
 pub struct ApiRequestMessage {

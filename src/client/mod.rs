@@ -1983,6 +1983,20 @@ async fn run_client_loop(
                             || (false, Vec::new()),
                             |shell| {
                                 if completed.generation == generation
+                                    && shell.is_ledger_request(&completed.request_id)
+                                {
+                                    // andreconde fork (sheprd): card answers report back from
+                                    // any machine, not only the active one (SHE-100009).
+                                    (
+                                        shell.handle_ledger_result(
+                                            &completed.endpoint_id,
+                                            &completed.boot_id,
+                                            &completed.request_id,
+                                            completed.result,
+                                        ),
+                                        Vec::new(),
+                                    )
+                                } else if completed.generation == generation
                                     && shell.endpoint_is_active(&completed.endpoint_id)
                                 {
                                     shell.handle_endpoint_result(
@@ -2013,7 +2027,15 @@ async fn run_client_loop(
                             &mut state.detached_process_children,
                             &mut scheduled_activation,
                         )?;
-                        let repaint = repaint || dispatch_repaint;
+                        let mut repaint = repaint || dispatch_repaint;
+                        // andreconde fork (sheprd): only the active lane drains on dispatch; a
+                        // card answer queued behind this one on another machine goes now.
+                        repaint |= shell_runtime::drain_ledger_lane(
+                            &endpoint_id,
+                            &mut endpoint_commands,
+                            &mut write_stream,
+                            state.shell.as_mut(),
+                        );
                         if replay_mouse.is_empty() {
                             if repaint {
                                 if let Some(frame) = state.shell.as_mut().and_then(|shell| {
@@ -2184,12 +2206,22 @@ async fn run_client_loop(
                                 continue;
                             }
                             Ok(endpoint::EndpointControlMessage::WorkLedger(ledger)) => {
-                                if let Some(shell) = state.shell.as_mut() {
-                                    shell.set_endpoint_work_ledger(
-                                        &endpoint_id,
-                                        generation,
-                                        ledger,
-                                    );
+                                // andreconde fork (sheprd): a ledger change (an answer staged
+                                // from the panel, a card the agent wrote) comes without a
+                                // snapshot, so repaint the chrome that shows it, SHE-100009.
+                                let frame = state.shell.as_mut().and_then(|shell| {
+                                    shell
+                                        .set_endpoint_work_ledger(&endpoint_id, generation, ledger)
+                                        .then(|| {
+                                            shell.compose(
+                                                state.reported_size.0,
+                                                state.reported_size.1,
+                                            )
+                                        })
+                                        .flatten()
+                                });
+                                if let Some(frame) = frame {
+                                    state.present_frozen_chrome(frame);
                                 }
                                 continue;
                             }
@@ -2386,12 +2418,28 @@ async fn run_client_loop(
                             write_stream.accepts(&expired.endpoint_id, expired.generation)
                         })
                         .collect::<Vec<_>>();
+                    // andreconde fork (sheprd): a lane other than the active one only carries
+                    // card answers; once its command expired, the next one queued there goes.
+                    let idle_lanes = expired_endpoints
+                        .iter()
+                        .filter(|expired| &expired.endpoint_id != write_stream.active_id())
+                        .map(|expired| expired.endpoint_id.clone())
+                        .collect::<Vec<_>>();
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
                         // andreconde fork (sheprd): agent launch, notification clicks, peek expiry.
                         shell.tick_sheprd(&mut outcome);
                         for expired in expired_endpoints {
+                            if shell.is_ledger_request(&expired.request_id) {
+                                outcome.repaint |= shell.handle_ledger_result(
+                                    &expired.endpoint_id,
+                                    &expired.boot_id,
+                                    &expired.request_id,
+                                    expired.result,
+                                );
+                                continue;
+                            }
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;
                             }
@@ -2414,6 +2462,14 @@ async fn run_client_loop(
                             .flatten();
                         (effects, outcome, frame)
                     };
+                    for endpoint_id in idle_lanes {
+                        shell_runtime::drain_ledger_lane(
+                            &endpoint_id,
+                            &mut endpoint_commands,
+                            &mut write_stream,
+                            state.shell.as_mut(),
+                        );
+                    }
                     handle_shell_notification_effects(
                         effects,
                         &state.sound_config,

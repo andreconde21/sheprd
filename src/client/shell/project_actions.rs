@@ -260,7 +260,10 @@ pub(super) fn split_project_menu(
 }
 
 impl ClientShellState {
-    pub(super) fn endpoint_by_id(&self, endpoint_id: &ClientEndpointId) -> Option<&ClientShellEndpoint> {
+    pub(super) fn endpoint_by_id(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&ClientShellEndpoint> {
         self.endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
@@ -995,6 +998,18 @@ impl ClientShellState {
                     self.reply_to_agent(&endpoint_id, &pane_id, text);
                 }
             }
+            ClientRenameTarget::LedgerAnswer {
+                endpoint_id,
+                pane_id,
+                item_id,
+                question_id,
+                cards,
+            } => {
+                if let Some(cards) = cards {
+                    self.overlay = Some(ClientShellOverlay::Cards(cards));
+                }
+                self.save_ledger_answer(endpoint_id, pane_id, item_id, question_id, text, outcome);
+            }
             ClientRenameTarget::ProjectAssign { key } => {
                 projects::update(|layout| layout.assign(&key, text))
             }
@@ -1362,7 +1377,7 @@ impl ClientShellState {
     }
 
     /// Send one API request to a specific machine (not just the active one).
-    fn endpoint_request(
+    pub(super) fn endpoint_request(
         &mut self,
         endpoint_id: &ClientEndpointId,
         method: crate::api::schema::Method,

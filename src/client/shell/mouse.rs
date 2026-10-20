@@ -488,7 +488,9 @@ impl ClientShellState {
                     };
                     let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
                     // --line goes first: an older sheprd-doc takes the last bare word as the path.
-                    let line = line.map(|line| format!("--line {line} ")).unwrap_or_default();
+                    let line = line
+                        .map(|line| format!("--line {line} "))
+                        .unwrap_or_default();
                     let script = format!(
                         "PATH=\"$HOME/.local/bin:$PATH\"; sheprd-doc {line}{} --pane {} --cwd {} --session {}",
                         quote(&path),
@@ -838,12 +840,8 @@ impl ClientShellState {
                     WorkHit::Details { title, details } => {
                         super::projects::push_task_body(title, Some(details))
                     }
-                    WorkHit::ToggleLedgerItem { pane_id, item_id } => {
-                        let key = (self.active_endpoint_id.clone(), pane_id, item_id);
-                        if !self.expanded_ledger_items.remove(&key) {
-                            self.expanded_ledger_items.insert(key);
-                        }
-                    }
+                    WorkHit::Ledger(action) => self.run_ledger_action(action, outcome),
+                    WorkHit::OpenCards => self.open_cards_view(),
                     WorkHit::Expand => {
                         self.work_panel = super::work_panel::FULL;
                         self.invalidate_pane_surface();
@@ -1139,10 +1137,9 @@ impl ClientShellState {
                 // link or reference under the mouse; ctrl+click opens a file or a reference
                 // (SHE-100007). Links go on to the server's link handling below.
                 let thing = self.thing_at(&hit.pane_id, viewport_row, col);
-                if mouse
-                    .modifiers
-                    .intersects(crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT)
-                {
+                if mouse.modifiers.intersects(
+                    crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SHIFT,
+                ) {
                     if let Some(thing) = thing.as_ref() {
                         self.last_pane_click = None;
                         self.copy_thing(thing, outcome);
@@ -1789,6 +1786,35 @@ impl ClientShellState {
                         outcome.repaint = true;
                     }
                 }
+            }
+            return;
+        }
+        // andreconde fork (sheprd): the Cards view (SHE-100009).
+        if matches!(self.overlay, Some(ClientShellOverlay::Cards(_))) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_cards_view(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_cards_view(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(hit) = self
+                        .hits
+                        .cards
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .map(|(_, hit)| hit.clone())
+                    {
+                        self.handle_cards_click(hit, outcome);
+                    } else if !super::contains(self.hits.cards_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
             }
             return;
         }

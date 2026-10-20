@@ -4,11 +4,12 @@
 //! (`HERDR_PANE_ID`); `--pane` targets another, and is required with `--machine`.
 
 use crate::api::schema::{
-    LedgerAskParams, LedgerCompleteParams, LedgerDecideParams, LedgerItemTarget, LedgerListParams,
-    LedgerQuestionInput, LedgerUpdateParams, Method, Request,
+    LedgerAnswersParams, LedgerAskParams, LedgerCompleteParams, LedgerDecideParams,
+    LedgerDismissParams, LedgerItemTarget, LedgerListParams, LedgerQuestionInput,
+    LedgerUpdateParams, Method, Request,
 };
 
-const USAGE: &str = "usage: sheprd card <update|ask|decide|done|remove|list> …";
+const USAGE: &str = "usage: sheprd card <update|ask|decide|done|remove|list|answers|dismiss> …";
 
 pub(super) fn run_card_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(String::as_str) else {
@@ -16,7 +17,7 @@ pub(super) fn run_card_command(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
     let parsed = match subcommand {
-        "update" | "ask" | "decide" | "done" | "remove" | "list" => {
+        "update" | "ask" | "decide" | "done" | "remove" | "list" | "answers" | "dismiss" => {
             parse_card_args(subcommand, &args[1..])
         }
         "help" | "--help" | "-h" => {
@@ -67,6 +68,7 @@ pub(super) fn run_card_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "ask" => println!("{}", result["question_id"]),
         "list" => print!("{}", format_list(result)),
+        "answers" => print!("{}", format_answers(result)),
         _ => {}
     }
     Ok(0)
@@ -121,6 +123,8 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
     let mut clear_questions = false;
     let mut options = Vec::new();
     let mut recommend = None;
+    let mut question = None;
+    let mut peek = false;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -158,6 +162,17 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
                     .ok_or_else(|| format!("--recommend takes an option number from 1: {raw}"))?;
                 recommend = Some(number - 1);
             }
+            "--question" if subcommand == "dismiss" => {
+                let raw = value(args, index, arg)?;
+                question = Some(
+                    raw.parse::<u32>()
+                        .map_err(|_| format!("--question takes a question id: {raw}"))?,
+                );
+            }
+            "--peek" if subcommand == "answers" => {
+                peek = true;
+                step = 1;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option for `card {subcommand}`: {other}"));
             }
@@ -171,7 +186,7 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
 
     let wanted = match subcommand {
         "ask" | "decide" => 2,
-        "list" => 0,
+        "list" | "answers" => 0,
         _ => 1,
     };
     if positional.len() != wanted {
@@ -182,6 +197,8 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
             "done" => "usage: sheprd card done <ID> [--summary S] [--pane P]".into(),
             "remove" => "usage: sheprd card remove <ID> [--pane P]".into(),
             "list" => "usage: sheprd card list [--pane P] [--json]".into(),
+            "answers" => "usage: sheprd card answers [--peek] [--pane P] [--json]".into(),
+            "dismiss" => "usage: sheprd card dismiss <ID> [--question N] [--pane P]".into(),
             _ => USAGE.into(),
         });
     }
@@ -192,10 +209,15 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
         return Err("--recommend must name one of the --option values".into());
     }
 
+    // The agent listing its own pane reads the answers sent to it (SHE-100009).
+    let own_pane = pane.is_none();
     let pane = pane.or_else(super::target::caller_pane_id);
     if subcommand == "list" {
         return Ok(CardCommand {
-            method: Method::LedgerList(LedgerListParams { pane_id: pane }),
+            method: Method::LedgerList(LedgerListParams {
+                ack: own_pane && pane.is_some(),
+                pane_id: pane,
+            }),
             json,
         });
     }
@@ -245,6 +267,12 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
             item_id,
             summary,
         }),
+        "answers" => Method::LedgerAnswers(LedgerAnswersParams { pane_id, peek }),
+        "dismiss" => Method::LedgerDismiss(LedgerDismissParams {
+            pane_id: Some(pane_id),
+            item_id: Some(item_id),
+            question_id: question,
+        }),
         _ => Method::LedgerRemove(LedgerItemTarget { pane_id, item_id }),
     };
     Ok(CardCommand { method, json })
@@ -283,8 +311,15 @@ fn format_list(result: &serde_json::Value) -> String {
             if item["done"].as_bool() == Some(true) {
                 line.push_str("  done");
             }
-            if !questions.is_empty() {
-                line.push_str(&format!("  ?{}", questions.len()));
+            let open = questions
+                .iter()
+                .filter(|question| {
+                    question["dismissed"].as_bool() != Some(true)
+                        && question["sent_at_ms"].is_null()
+                })
+                .count();
+            if open > 0 {
+                line.push_str(&format!("  ?{open}"));
             }
             if item["inferred"].as_bool() == Some(true) {
                 line.push_str("  (inferred)");
@@ -294,7 +329,10 @@ fn format_list(result: &serde_json::Value) -> String {
             if let Some(summary) = text(&item["summary"]) {
                 out.push_str(&format!("    {summary}\n"));
             }
-            for question in &questions {
+            for question in questions
+                .iter()
+                .filter(|question| question["dismissed"].as_bool() != Some(true))
+            {
                 let mut line = format!(
                     "    ? [{}] {}",
                     question["id"],
@@ -318,6 +356,9 @@ fn format_list(result: &serde_json::Value) -> String {
                         text(option).unwrap_or_default()
                     ));
                 }
+                if !question["sent_at_ms"].is_null() {
+                    line.push_str("  [answered]");
+                }
                 out.push_str(&line);
                 out.push('\n');
             }
@@ -335,6 +376,28 @@ fn format_list(result: &serde_json::Value) -> String {
     out
 }
 
+/// `card answers` as text: one line per answer, `ID Q<n> → answer`, dismissed ones marked.
+fn format_answers(result: &serde_json::Value) -> String {
+    let mut out = String::new();
+    for answer in result["answers"].as_array().into_iter().flatten() {
+        let id = text(&answer["item_id"]).unwrap_or_else(|| "?".into());
+        let question = text(&answer["question"]).unwrap_or_default();
+        let reply = match text(&answer["answer"]) {
+            Some(reply) => reply,
+            None if answer["dismissed"].as_bool() == Some(true) => "(dismissed)".into(),
+            None => "(no answer)".into(),
+        };
+        out.push_str(&format!(
+            "{id} Q{} {question}\n  → {reply}\n",
+            answer["question_id"]
+        ));
+    }
+    if out.is_empty() {
+        out.push_str("no answers\n");
+    }
+    out
+}
+
 fn print_card_help() {
     eprintln!("sheprd card commands (the card ledger the work panel shows):");
     eprintln!("  sheprd card update <ID> [--title T] [--status S] [--summary S] [--link URL]");
@@ -343,6 +406,8 @@ fn print_card_help() {
     eprintln!("  sheprd card done <ID> [--summary S]");
     eprintln!("  sheprd card remove <ID>");
     eprintln!("  sheprd card list [--json]");
+    eprintln!("  sheprd card answers [--peek] [--json]");
+    eprintln!("  sheprd card dismiss <ID> [--question N]");
     eprintln!(
         "The pane is the calling one; --pane <PANE_ID> targets another (required with --machine)."
     );
@@ -426,13 +491,78 @@ mod tests {
     }
 
     #[test]
+    fn parses_answers_and_dismiss() {
+        let command = parse_card_args("answers", &args(&["--peek", "--pane", "w1:p1"])).unwrap();
+        assert_eq!(
+            command.method,
+            Method::LedgerAnswers(LedgerAnswersParams {
+                pane_id: "w1:p1".into(),
+                peek: true,
+            })
+        );
+        let command = parse_card_args(
+            "dismiss",
+            &args(&["SHE-12", "--question", "2", "--pane", "w1:p1"]),
+        )
+        .unwrap();
+        assert_eq!(
+            command.method,
+            Method::LedgerDismiss(LedgerDismissParams {
+                pane_id: Some("w1:p1".into()),
+                item_id: Some("SHE-12".into()),
+                question_id: Some(2),
+            })
+        );
+        assert!(parse_card_args(
+            "dismiss",
+            &args(&["SHE-12", "--question", "x", "--pane", "p"])
+        )
+        .is_err());
+        assert!(parse_card_args("dismiss", &args(&["--pane", "p"])).is_err());
+        assert!(parse_card_args("answers", &args(&["--question", "1", "--pane", "p"])).is_err());
+    }
+
+    #[test]
+    fn answers_print_one_line_per_answer() {
+        let result = serde_json::json!({"answers": [
+            {"item_id": "SHE-12", "question_id": 1, "question": "Provider?", "answer": "Stripe"},
+            {"item_id": "SHE-12", "question_id": 2, "question": "Path?", "dismissed": true},
+        ]});
+        assert_eq!(
+            format_answers(&result),
+            "SHE-12 Q1 Provider?\n  → Stripe\nSHE-12 Q2 Path?\n  → (dismissed)\n"
+        );
+        assert_eq!(
+            format_answers(&serde_json::json!({"answers": []})),
+            "no answers\n"
+        );
+    }
+
+    #[test]
+    fn list_counts_only_open_questions() {
+        let result = serde_json::json!({"panes": [{"pane_id": "w1:p1", "items": [
+            {"id": "CAL-40", "questions": [
+                {"id": 1, "text": "Ship?", "sent_at_ms": 5},
+                {"id": 2, "text": "Zone?", "dismissed": true},
+                {"id": 3, "text": "Owner?"},
+            ]},
+            {"id": "SHE-12", "questions": [{"id": 1, "text": "Path?", "dismissed": true}]},
+        ]}]});
+        let out = format_list(&result);
+        assert!(out.contains("  CAL-40  ?1\n"), "{out}");
+        assert!(out.contains("  SHE-12\n"), "{out}");
+        assert!(!out.contains("Zone?"), "{out}");
+    }
+
+    #[test]
     fn list_json_flag_and_optional_pane() {
         let command = parse_card_args("list", &args(&["--json", "--pane", "w2:p3"])).unwrap();
         assert!(command.json);
         assert_eq!(
             command.method,
             Method::LedgerList(LedgerListParams {
-                pane_id: Some("w2:p3".into())
+                pane_id: Some("w2:p3".into()),
+                ack: false,
             })
         );
     }

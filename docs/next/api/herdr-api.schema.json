@@ -2379,6 +2379,41 @@
           ],
           "type": "object"
         },
+        "LedgerAnswer": {
+          "description": "An answer to a question: one of its options (0-based) or free text. A struct rather than an\nenum so later kinds stay optional fields that older readers skip.",
+          "properties": {
+            "option": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LedgerAnswersParams": {
+          "description": "The sent and dismissed answers of a pane's cards; they count as read unless `peek`.",
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "peek": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "LedgerAskParams": {
           "properties": {
             "item_id": {
@@ -2453,6 +2488,32 @@
           ],
           "type": "object"
         },
+        "LedgerDismissParams": {
+          "description": "Dismisses a question (`item_id` and `question_id`), a card (`item_id`), or every done card\nof the pane, or of every pane when `pane_id` is omitted too.",
+          "properties": {
+            "item_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "LedgerItemTarget": {
           "properties": {
             "item_id": {
@@ -2470,6 +2531,10 @@
         },
         "LedgerListParams": {
           "properties": {
+            "ack": {
+              "description": "The pane's agent is reading its own cards: its sent answers count as read (SHE-100009).\nNeeds `pane_id`.",
+              "type": "boolean"
+            },
             "pane_id": {
               "description": "One pane; every pane with a ledger when omitted.",
               "type": [
@@ -2503,6 +2568,51 @@
           },
           "required": [
             "text"
+          ],
+          "type": "object"
+        },
+        "LedgerSendParams": {
+          "description": "Types the pane's staged answers into it as one line, or every pane's (one line each) when\n`pane_id` is omitted.",
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LedgerStageParams": {
+          "description": "Stages the user's answer to a question (SHE-100009); `answer: null` unstages it.",
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/LedgerAnswer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "question_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id",
+            "item_id",
+            "question_id"
           ],
           "type": "object"
         },
@@ -6627,6 +6737,70 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.stage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerStageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.dismiss",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerDismissParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.send",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerSendParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ledger.answers",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LedgerAnswersParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -8114,6 +8288,66 @@
             }
           ]
         },
+        "LedgerAnswer": {
+          "description": "An answer to a question: one of its options (0-based) or free text. A struct rather than an\nenum so later kinds stay optional fields that older readers skip.",
+          "properties": {
+            "option": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LedgerAnswerInfo": {
+          "description": "A sent or dismissed answer as the agent reads it (`sheprd card answers`).",
+          "properties": {
+            "answer": {
+              "description": "The chosen option or the free text; absent for a dismissed question.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dismissed": {
+              "type": "boolean"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "question": {
+              "type": "string"
+            },
+            "question_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sent_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item_id",
+            "question_id",
+            "question"
+          ],
+          "type": "object"
+        },
         "LedgerDecision": {
           "properties": {
             "decided_at_ms": {
@@ -8224,11 +8458,26 @@
         },
         "LedgerQuestion": {
           "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/LedgerAnswer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The user's answer (SHE-100009): staged until `sent_at_ms` is set, then waiting for the\nagent to acknowledge it."
+            },
             "asked_at_ms": {
               "default": 0,
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "dismissed": {
+              "description": "The user chose not to answer. Hidden; kept so the hook does not ask it again.",
+              "type": "boolean"
             },
             "id": {
               "format": "uint32",
@@ -8253,6 +8502,15 @@
                 "null"
               ]
             },
+            "sent_at_ms": {
+              "description": "When the answer was typed into the agent's pane.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "text": {
               "type": "string"
             }
@@ -8260,6 +8518,47 @@
           "required": [
             "id",
             "text"
+          ],
+          "type": "object"
+        },
+        "LedgerSendFailure": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "LedgerSentPane": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "questions": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The line typed into the pane.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "text",
+            "questions"
           ],
           "type": "object"
         },
@@ -11000,6 +11299,73 @@
               "type": "object"
             },
             {
+              "description": "andreconde fork (sheprd): answering the cards' questions (SHE-100009).",
+              "properties": {
+                "dismissed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "ledger_dismissed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "dismissed"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "failed": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LedgerSendFailure"
+                  },
+                  "type": "array"
+                },
+                "sent": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LedgerSentPane"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "ledger_sent",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "sent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "answers": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LedgerAnswerInfo"
+                  },
+                  "type": "array"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ledger_answers",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "answers"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "ok",
@@ -11049,6 +11415,11 @@
             "work_ledger": {
               "default": false,
               "description": "andreconde fork (sheprd): supports the `ledger.*` card ledger methods (SHE-100008).",
+              "type": "boolean"
+            },
+            "work_ledger_answers": {
+              "default": false,
+              "description": "andreconde fork (sheprd): supports answering card questions: `ledger.stage`,\n`ledger.dismiss`, `ledger.send` and `ledger.answers` (SHE-100009).",
               "type": "boolean"
             }
           },

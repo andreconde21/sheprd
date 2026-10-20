@@ -227,6 +227,7 @@ impl ClientShellState {
         {
             endpoint.work_ledger = None;
         }
+        self.clear_ledger_refusals(endpoint_id);
         if endpoint_id == &self.active_endpoint_id {
             let pending = self.pending_requests.keys().cloned().collect::<Vec<_>>();
             for request_id in pending {
@@ -406,28 +407,30 @@ impl ClientShellState {
     }
 
     /// andreconde fork (sheprd): keeps the newest card ledger push per connection (SHE-100008).
+    /// True when it was kept, so the caller repaints: a push can arrive without a snapshot.
     pub(crate) fn set_endpoint_work_ledger(
         &mut self,
         endpoint_id: &ClientEndpointId,
         generation: u64,
         ledger: crate::protocol::endpoint::EndpointWorkLedger,
-    ) {
+    ) -> bool {
         let Some(endpoint) = self
             .endpoints
             .iter_mut()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         else {
-            return;
+            return false;
         };
         if endpoint.work_ledger.as_ref().is_some_and(|view| {
             !view.superseded_by(Some(generation), &ledger.boot_id, ledger.revision)
         }) {
-            return;
+            return false;
         }
         endpoint.work_ledger = Some(super::work_ledger_view::WorkLedgerView::from_wire(
             Some(generation),
             ledger,
         ));
+        true
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(

@@ -842,6 +842,12 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.open_cards_view",
+          "type": "keybinding",
+          "default": "\"prefix+shift+c\"",
+          "description": "Open the Cards view: every machine's card ledger, full screen."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",

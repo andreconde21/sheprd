@@ -10,6 +10,8 @@ pub(super) fn dispatch_client_shell_actions(
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
+    // andreconde fork (sheprd): machines other than the active one with card answers queued.
+    let mut ledger_lanes: Vec<endpoint::ClientEndpointId> = Vec::new();
     for action in actions {
         match action {
             shell::ClientShellAction::Endpoint {
@@ -29,6 +31,22 @@ pub(super) fn dispatch_client_shell_actions(
                                 )))
                 }) {
                     endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                } else if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
+                    // Card answers change no surface there, so the Cards view sends them on that
+                    // machine's own lane without making it active (SHE-100009).
+                    endpoints.active_id() != &endpoint_id
+                        && matches!(
+                            request.method,
+                            crate::api::schema::Method::LedgerStage(_)
+                                | crate::api::schema::Method::LedgerDismiss(_)
+                                | crate::api::schema::Method::LedgerSend(_)
+                        )
+                }) {
+                    let generation = connection.generation;
+                    if !ledger_lanes.contains(&endpoint_id) {
+                        ledger_lanes.push(endpoint_id.clone());
+                    }
+                    endpoint_commands.enqueue(endpoint_id, generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
@@ -64,6 +82,14 @@ pub(super) fn dispatch_client_shell_actions(
             }
         }
     }
+    for endpoint_id in ledger_lanes {
+        repaint |= drain_ledger_lane(
+            &endpoint_id,
+            endpoint_commands,
+            endpoints,
+            shell.as_deref_mut(),
+        );
+    }
     // A source-off-first handoff leaves the registry's committed identity pointing at a
     // deliberately surface-inactive source. Do not drain its retained queue into a server that
     // must reject it; completion below resumes the committed owner's lane.
@@ -77,6 +103,29 @@ pub(super) fn dispatch_client_shell_actions(
         }
     }
     Ok((replay_mouse, repaint))
+}
+
+/// andreconde fork (sheprd): sends the next command queued on a machine's lane when it is not
+/// the active machine (only card answers queue there, SHE-100009), and cancels those that cannot
+/// go. Only the active lane drains on dispatch, so this runs after each of its responses and
+/// expiries too. True when the shell repaints.
+pub(super) fn drain_ledger_lane(
+    endpoint_id: &endpoint::ClientEndpointId,
+    endpoint_commands: &mut endpoint_commands::EndpointCommands,
+    endpoints: &mut endpoint::EndpointRegistry,
+    shell: Option<&mut shell::ClientShellState>,
+) -> bool {
+    if endpoints.active_id() == endpoint_id {
+        return false;
+    }
+    let cancelled = endpoint_commands.send_next(endpoint_id, endpoints);
+    let mut repaint = false;
+    if let Some(shell) = shell {
+        for request_id in cancelled {
+            repaint |= shell.cancel_endpoint_request(&request_id);
+        }
+    }
+    repaint
 }
 
 pub(super) fn client_shell_resize_message(

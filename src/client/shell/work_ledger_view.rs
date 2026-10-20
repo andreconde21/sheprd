@@ -18,6 +18,8 @@ pub(super) enum LedgerRowState {
 pub(super) struct LedgerRow {
     pub(super) item: LedgerItem,
     pub(super) state: LedgerRowState,
+    /// Questions still waiting on the user (staged ones included).
+    pub(super) open_questions: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -27,6 +29,9 @@ pub(super) struct PaneLedger {
     /// Item ids, so the TASKS section can leave out tasks a card row already shows.
     pub(super) ids: HashSet<String>,
     pub(super) open_questions: usize,
+    /// Answers staged and not sent yet (SHE-100009): the "send N" button.
+    pub(super) staged: usize,
+    pub(super) done: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,7 +52,11 @@ impl WorkLedgerView {
             .into_iter()
             .map(|(pane_id, items)| {
                 let ids = items.iter().map(|item| item.id.clone()).collect();
-                let open_questions = items.iter().map(|item| item.questions.len()).sum();
+                let staged = items
+                    .iter()
+                    .flat_map(|item| &item.questions)
+                    .filter(|question| question.is_staged())
+                    .count();
                 let rows = items
                     .into_iter()
                     .map(|item| LedgerRow {
@@ -58,15 +67,27 @@ impl WorkLedgerView {
                         } else {
                             LedgerRowState::Active
                         },
+                        open_questions: item
+                            .questions
+                            .iter()
+                            .filter(|question| question.is_open())
+                            .count(),
                         item,
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                let open_questions = rows.iter().map(|row| row.open_questions).sum();
+                let done = rows
+                    .iter()
+                    .filter(|row| row.state == LedgerRowState::Done)
+                    .count();
                 (
                     pane_id,
                     PaneLedger {
                         rows,
                         ids,
                         open_questions,
+                        staged,
+                        done,
                     },
                 )
             })
@@ -96,6 +117,11 @@ impl WorkLedgerView {
 
     pub(super) fn pane(&self, pane_id: &str) -> Option<&PaneLedger> {
         self.panes.get(pane_id).filter(|pane| !pane.rows.is_empty())
+    }
+
+    /// Every pane with cards, by pane id (the Cards view orders them by the snapshot's agents).
+    pub(super) fn panes(&self) -> impl Iterator<Item = (&String, &PaneLedger)> {
+        self.panes.iter().filter(|(_, pane)| !pane.rows.is_empty())
     }
 }
 

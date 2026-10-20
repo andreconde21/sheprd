@@ -103,6 +103,10 @@ pub(super) struct ShellHitMap {
     pub(super) sheprd_board: Rect,
     /// Work panel: card ids, stages and page links.
     pub(super) work_panel: Vec<(Rect, super::work_panel::WorkHit)>,
+    /// The Cards view's popup, controls and rows, and how far it scrolls (SHE-100009).
+    pub(super) cards_popup: Rect,
+    pub(super) cards: Vec<(Rect, super::cards_view::CardsHit)>,
+    pub(super) cards_max_scroll: u16,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
@@ -310,6 +314,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    Cards,
 }
 
 #[derive(Debug)]
@@ -362,6 +367,15 @@ pub(super) enum ClientRenameTarget {
     ReplyAgent {
         endpoint_id: ClientEndpointId,
         pane_id: String,
+    },
+    /// sheprd: a free-text answer to stage on a card's question (SHE-100009); the Cards view
+    /// it came from comes back when the prompt closes.
+    LedgerAnswer {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        item_id: String,
+        question_id: u32,
+        cards: Option<super::cards_view::ClientCardsOverlay>,
     },
 }
 
@@ -736,6 +750,8 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    /// andreconde fork (sheprd): the full-screen Cards view (SHE-100009).
+    Cards(super::cards_view::ClientCardsOverlay),
 }
 
 impl ClientShellOverlay {
@@ -754,6 +770,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::Cards(_) => ClientShellOverlayKind::Cards,
         }
     }
 }
@@ -1022,6 +1039,11 @@ pub(crate) struct ClientShellState {
     /// andreconde fork (sheprd): expanded card rows in the work panel, by machine, pane and
     /// card id (SHE-100008). Presentation only: never sent to the server or saved.
     pub(super) expanded_ledger_items: HashSet<(ClientEndpointId, String, String)>,
+    /// andreconde fork (sheprd): card answer requests in flight, on any machine (SHE-100009).
+    pub(super) pending_ledger_requests:
+        HashMap<String, super::ledger_answers::PendingLedgerRequest>,
+    /// andreconde fork (sheprd): why a pane's answers were not sent the last time.
+    pub(super) ledger_refusals: super::ledger_answers::LedgerRefusals,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
@@ -1200,6 +1222,8 @@ impl ClientShellState {
             sidebar_hidden: preferences.sidebar_hidden,
             work_panel: preferences.work_panel,
             expanded_ledger_items: HashSet::new(),
+            pending_ledger_requests: HashMap::new(),
+            ledger_refusals: HashMap::new(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,

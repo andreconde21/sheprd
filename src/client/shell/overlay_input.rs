@@ -573,6 +573,35 @@ impl ClientShellState {
             return;
         }
 
+        // andreconde fork (sheprd): the Cards view (SHE-100009) is mouse-first; keys scroll,
+        // switch the filter and close it.
+        if matches!(self.overlay, Some(ClientShellOverlay::Cards(_))) {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_cards_view(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_cards_view(1),
+                KeyCode::PageUp => self.scroll_cards_view(-10),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_cards_view(10),
+                KeyCode::Home => self.scroll_cards_view(-i32::from(u16::MAX)),
+                KeyCode::End => self.scroll_cards_view(i32::from(u16::MAX)),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    if let Some(ClientShellOverlay::Cards(cards)) = self.overlay.as_mut() {
+                        cards.filter = cards.filter.next(key.code == KeyCode::Tab);
+                        cards.scroll = 0;
+                    }
+                }
+                KeyCode::Char('a') => {
+                    if let Some(ClientShellOverlay::Cards(cards)) = self.overlay.as_mut() {
+                        cards.all_agents = !cards.all_agents;
+                        cards.scroll = 0;
+                    }
+                }
+                _ => return,
+            }
+            outcome.repaint = true;
+            return;
+        }
+
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
             match key.code {
                 KeyCode::Esc => {
@@ -943,7 +972,17 @@ impl ClientShellState {
             return;
         }
         if key.code == KeyCode::Esc {
-            self.overlay = None;
+            // andreconde fork (sheprd): an answer prompt goes back to the Cards view it came from.
+            self.overlay = match self.overlay.take() {
+                Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                    target:
+                        ClientRenameTarget::LedgerAnswer {
+                            cards: Some(cards), ..
+                        },
+                    ..
+                })) => Some(ClientShellOverlay::Cards(cards)),
+                _ => None,
+            };
             outcome.repaint = true;
             return;
         }
@@ -960,8 +999,7 @@ impl ClientShellState {
                     self.save_rename_overlay(outcome);
                 }
             } else if matches!(rename.target, ClientRenameTarget::OpenHint)
-                && rename.input.as_str().chars().count()
-                    >= super::open_anything::hint_label_len()
+                && rename.input.as_str().chars().count() >= super::open_anything::hint_label_len()
             {
                 // andreconde fork (sheprd): hint mode acts once a whole label is typed.
                 self.save_rename_overlay(outcome);
@@ -988,8 +1026,7 @@ impl ClientShellState {
                     self.save_rename_overlay(outcome);
                 }
             } else if matches!(rename.target, ClientRenameTarget::OpenHint)
-                && rename.input.as_str().chars().count()
-                    >= super::open_anything::hint_label_len()
+                && rename.input.as_str().chars().count() >= super::open_anything::hint_label_len()
             {
                 // andreconde fork (sheprd): hint mode acts once a whole label is typed.
                 self.save_rename_overlay(outcome);

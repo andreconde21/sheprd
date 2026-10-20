@@ -3061,6 +3061,7 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
                 work_ledger: false,
+                work_ledger_answers: false,
             }),
         };
         let missing_baseline = crate::api::RuntimeStatus {
@@ -3137,6 +3138,7 @@ mod tests {
                     health_check: true,
                     ssh_agent_registration: false,
                     work_ledger: false,
+                    work_ledger_answers: false,
                 }),
             },
         };
@@ -3397,6 +3399,7 @@ mod tests {
                     health_check: true,
                     ssh_agent_registration: false,
                     work_ledger: false,
+                    work_ledger_answers: false,
                 }),
             },
         };

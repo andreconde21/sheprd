@@ -18,6 +18,9 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "integration.install",
     "integration.list",
     "layout.set_split_ratio",
+    "ledger.dismiss",
+    "ledger.send",
+    "ledger.stage",
     "pane.clear",
     "pane.close",
     "pane.copy_motion",
@@ -296,6 +299,19 @@ mod tests {
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        // andreconde fork (sheprd): answering card questions (SHE-100009).
+        assert_eq!(
+            actual.remove("ledger.dismiss").as_deref(),
+            Some("cbff823ac6f6a8ed5cdf994e942ac44a2472fcf4fd0cdd3fd39e6017987c015a")
+        );
+        assert_eq!(
+            actual.remove("ledger.send").as_deref(),
+            Some("d1bd22431ce56734a210b55d8e86855f69292f9d4f73aae3999d2b8fd47ff6cf")
+        );
+        assert_eq!(
+            actual.remove("ledger.stage").as_deref(),
+            Some("ee0fb70668ff03e225af4512a1cf912e17ba6582e06724abf8997bee435d7ff1")
         );
 
         assert_eq!(

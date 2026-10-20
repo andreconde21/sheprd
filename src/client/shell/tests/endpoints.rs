@@ -2896,3 +2896,630 @@ fn card_ledger_is_dropped_on_disconnect_and_on_a_new_connection() {
     state.set_endpoint_snapshot_for_generation(&endpoint_id, 4, Box::new(remote));
     assert!(!has_ledger(&state), "a server restart drops them");
 }
+
+/// andreconde fork (sheprd): two machines with cards for the Cards view (SHE-100009). Local's
+/// orchestrator has a done card; Build's reviewer has a question with a staged answer.
+fn state_with_cards() -> (ClientShellState, ClientEndpointId) {
+    let (mut state, remote) = state_with_remote();
+    let answers = ["ledger.dismiss", "ledger.send", "ledger.stage"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut local = snapshot();
+    local.agents = vec![agent("orchestrator", AgentStatus::Idle, 1)];
+    state.set_snapshot(Box::new(local));
+    let mut build = snapshot();
+    build.boot_id = "remote-boot".into();
+    build.agents = vec![agent("reviewer", AgentStatus::Working, 1)];
+    state.set_endpoint_snapshot(&remote, Box::new(build));
+    for endpoint_id in [ClientEndpointId::Local, remote.clone()] {
+        state.set_endpoint_methods_for(&endpoint_id, Some(answers.clone()));
+    }
+    let mut done = crate::work_ledger::WorkLedger::default();
+    done.complete("SHE-7", Some("merged".into()), None, 1)
+        .unwrap();
+    let mut asked = crate::work_ledger::WorkLedger::default();
+    asked
+        .ask(
+            "CAL-40",
+            crate::work_ledger::LedgerQuestionInput {
+                text: "Ship now?".into(),
+                options: vec!["now".into(), "defer".into()],
+                recommended: Some(1),
+            },
+            None,
+            2,
+        )
+        .unwrap();
+    asked
+        .stage(
+            "CAL-40",
+            1,
+            Some(crate::work_ledger::LedgerAnswer {
+                option: Some(1),
+                text: None,
+            }),
+        )
+        .unwrap();
+    let wire = |boot_id: &str, ledger: &crate::work_ledger::WorkLedger| {
+        crate::protocol::endpoint::EndpointWorkLedger {
+            boot_id: boot_id.into(),
+            revision: 1,
+            panes: [(
+                "pane_1".to_owned(),
+                ledger.sorted_items().into_iter().cloned().collect(),
+            )]
+            .into_iter()
+            .collect(),
+        }
+    };
+    state.set_endpoint_work_ledger(&ClientEndpointId::Local, 0, wire("boot-1", &done));
+    state.set_endpoint_work_ledger(&remote, 0, wire("remote-boot", &asked));
+    (state, remote)
+}
+
+fn key(code: KeyCode) -> crate::input::TerminalKey {
+    crate::input::TerminalKey::new(code, KeyModifiers::empty())
+}
+
+fn cards_text(state: &mut ClientShellState) -> String {
+    let frame = state.compose(140, 40).expect("frame");
+    frame_rows(&frame.frame).join("\n")
+}
+
+fn ledger_requests(
+    actions: &[ClientShellAction],
+) -> Vec<(ClientEndpointId, crate::api::schema::Method)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint {
+                endpoint_id,
+                request,
+                ..
+            } => Some((endpoint_id.clone(), request.method.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn cards_view_lists_every_machine_and_filters() {
+    use super::super::cards_view::{CardsFilter, CardsHit};
+    let (mut state, _) = state_with_cards();
+    state.open_cards_view();
+    let Some(ClientShellOverlay::Cards(cards)) = &state.overlay else {
+        panic!("cards view");
+    };
+    assert_eq!(
+        cards.filter,
+        CardsFilter::Waiting,
+        "a question waits somewhere"
+    );
+    let text = cards_text(&mut state);
+    assert!(
+        text.contains("Build") && text.contains("reviewer · pane_1  ?1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[Send 1]") && text.contains("[Send all 1]"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("SHE-7"),
+        "done cards are filtered out:\n{text}"
+    );
+
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::Filter(CardsFilter::All), &mut outcome);
+    let text = cards_text(&mut state);
+    assert!(text.contains("SHE-7") && text.contains("CAL-40"), "{text}");
+    assert!(text.contains("[Dismiss all done]"), "{text}");
+
+    // This agent: the focused agent on the active machine only.
+    state.handle_cards_click(CardsHit::AllAgents(false), &mut outcome);
+    let text = cards_text(&mut state);
+    assert!(text.contains("SHE-7") && !text.contains("CAL-40"), "{text}");
+    assert!(outcome.actions.is_empty(), "filters are this client's only");
+}
+
+#[test]
+fn cards_view_sends_and_dismisses_once_per_machine() {
+    use super::super::cards_view::CardsHit;
+    use crate::api::schema::{LedgerDismissParams, LedgerSendParams, Method};
+    let (mut state, remote) = state_with_cards();
+    state.open_cards_view();
+    cards_text(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::SendAll, &mut outcome);
+    assert_eq!(
+        ledger_requests(&outcome.actions),
+        vec![(
+            remote.clone(),
+            Method::LedgerSend(LedgerSendParams { pane_id: None })
+        )],
+        "only the machine with staged answers"
+    );
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::DismissAllDone, &mut outcome);
+    assert_eq!(
+        ledger_requests(&outcome.actions),
+        vec![(
+            ClientEndpointId::Local,
+            Method::LedgerDismiss(LedgerDismissParams::default())
+        )]
+    );
+    // A click on the per-agent button in the frame sends that pane only.
+    let (rect, _) = state
+        .hits
+        .cards
+        .iter()
+        .find(|(_, hit)| {
+            matches!(
+                hit,
+                CardsHit::Ledger(super::super::ledger_answers::LedgerAction::Send { .. })
+            )
+        })
+        .cloned()
+        .expect("send hit");
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut outcome,
+    );
+    assert_eq!(
+        ledger_requests(&outcome.actions),
+        vec![(
+            remote,
+            Method::LedgerSend(LedgerSendParams {
+                pane_id: Some("pane_1".into())
+            })
+        )]
+    );
+}
+
+#[test]
+fn an_unreachable_machine_only_disables_its_own_cards() {
+    use super::super::cards_view::{CardsFilter, CardsHit};
+    let (mut state, remote) = state_with_cards();
+    state.mark_endpoint_disconnected(&remote);
+    state.open_cards_view();
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::Filter(CardsFilter::All), &mut outcome);
+    let text = cards_text(&mut state);
+    assert!(text.contains("not reachable"), "{text}");
+    assert!(
+        text.contains("SHE-7") && !text.contains("[Send all"),
+        "{text}"
+    );
+    state.handle_cards_click(CardsHit::SendAll, &mut outcome);
+    state.handle_cards_click(CardsHit::DismissAllDone, &mut outcome);
+    assert!(
+        ledger_requests(&outcome.actions)
+            .iter()
+            .all(|(endpoint_id, _)| *endpoint_id == ClientEndpointId::Local),
+        "nothing goes to the machine that is away"
+    );
+}
+
+#[test]
+fn an_older_server_shows_its_cards_without_answer_buttons() {
+    let (mut state, remote) = state_with_cards();
+    state.set_endpoint_methods_for(&remote, Some(vec!["pane.focus".into()]));
+    state.open_cards_view();
+    let text = cards_text(&mut state);
+    assert!(text.contains("read only"), "{text}");
+    assert!(!text.contains("[Send"), "{text}");
+    state.handle_cards_click(
+        super::super::cards_view::CardsHit::Ledger(
+            super::super::ledger_answers::LedgerAction::Toggle {
+                endpoint_id: remote.clone(),
+                pane_id: "pane_1".into(),
+                item_id: "CAL-40".into(),
+            },
+        ),
+        &mut ClientShellInput::default(),
+    );
+    let text = cards_text(&mut state);
+    assert!(
+        text.contains("2) defer ★") && !text.contains("[defer★]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_free_answer_prompt_returns_to_the_cards_view() {
+    use super::super::ledger_answers::LedgerAction;
+    use crate::api::schema::{LedgerStageParams, Method};
+    let (mut state, remote) = state_with_cards();
+    state.open_cards_view();
+    let mut outcome = ClientShellInput::default();
+    let write = LedgerAction::Write {
+        endpoint_id: remote.clone(),
+        pane_id: "pane_1".into(),
+        item_id: "CAL-40".into(),
+        question_id: 1,
+        current: String::new(),
+    };
+    state.run_ledger_action(write.clone(), &mut outcome);
+    assert!(matches!(state.overlay, Some(ClientShellOverlay::Rename(_))));
+    state.route_overlay_key(&key(KeyCode::Esc), &mut outcome);
+    assert!(matches!(state.overlay, Some(ClientShellOverlay::Cards(_))));
+
+    state.run_ledger_action(write, &mut outcome);
+    assert!(state.insert_overlay_text("use the old endpoint"));
+    state.route_overlay_key(&key(KeyCode::Enter), &mut outcome);
+    assert!(matches!(state.overlay, Some(ClientShellOverlay::Cards(_))));
+    assert_eq!(
+        ledger_requests(&outcome.actions),
+        vec![(
+            remote,
+            Method::LedgerStage(LedgerStageParams {
+                pane_id: "pane_1".into(),
+                item_id: "CAL-40".into(),
+                question_id: 1,
+                answer: Some(crate::work_ledger::LedgerAnswer {
+                    option: None,
+                    text: Some("use the old endpoint".into()),
+                }),
+            })
+        )]
+    );
+}
+
+#[test]
+fn cards_view_answers_reach_a_machine_that_is_not_active_and_report_its_refusal() {
+    use super::super::cards_view::CardsHit;
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::protocol::ClientMessage;
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<ClientMessage>>>);
+    impl crate::client::endpoint::EndpointTransport for Capture {
+        fn send(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+    }
+
+    let (mut state, remote) = state_with_cards();
+    let local_sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote_sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut endpoints = EndpointRegistry::empty();
+    endpoints.insert(
+        ClientEndpointId::Local,
+        Capture(local_sent.clone()),
+        1,
+        EndpointNegotiation::default(),
+        true,
+    );
+    endpoints.insert(
+        remote.clone(),
+        Capture(remote_sent.clone()),
+        7,
+        EndpointNegotiation::default(),
+        false,
+    );
+    assert!(endpoints.set_active(&ClientEndpointId::Local));
+
+    state.open_cards_view();
+    cards_text(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::SendAll, &mut outcome);
+    let mut commands = EndpointCommands::default();
+    crate::client::shell_runtime::dispatch_client_shell_actions(
+        outcome.actions,
+        &mut commands,
+        &mut endpoints,
+        Some(&mut state),
+        &mut Vec::new(),
+        &mut None,
+    )
+    .unwrap();
+    assert!(
+        state.visible_endpoint_notice.is_none(),
+        "the request was not cancelled"
+    );
+    assert!(local_sent.lock().unwrap().is_empty());
+    assert!(
+        matches!(endpoints.active_id(), ClientEndpointId::Local),
+        "the active machine stays"
+    );
+    let request = {
+        let sent = remote_sent.lock().unwrap();
+        let [ClientMessage::ClientShellEndpointRequest { boot_id, request }] = sent.as_slice()
+        else {
+            panic!("the send must reach the machine it is for: {sent:?}");
+        };
+        assert_eq!(boot_id, "remote-boot");
+        serde_json::from_str::<crate::api::schema::Request>(request).unwrap()
+    };
+    assert!(matches!(
+        request.method,
+        crate::api::schema::Method::LedgerSend(_)
+    ));
+
+    // That machine refuses for its pane: the agent waits on a dialog.
+    let response = crate::api::schema::SuccessResponse {
+        id: request.id.clone(),
+        result: crate::api::schema::ResponseResult::LedgerSent {
+            sent: Vec::new(),
+            failed: vec![crate::api::schema::LedgerSendFailure {
+                pane_id: "pane_1".into(),
+                code: "agent_blocked".into(),
+                message: "the agent waits on a dialog".into(),
+            }],
+        },
+    };
+    let completed = commands
+        .receive_chunk(
+            &remote,
+            7,
+            "remote-boot",
+            &request.id,
+            true,
+            serde_json::to_vec(&response).unwrap(),
+        )
+        .unwrap()
+        .expect("the lane takes the response");
+    assert!(state.is_ledger_request(&completed.request_id));
+    assert!(state.handle_ledger_result(
+        &completed.endpoint_id,
+        &completed.boot_id,
+        &completed.request_id,
+        completed.result,
+    ));
+    let notice = state.visible_endpoint_notice.as_ref().expect("a notice");
+    assert_eq!(notice.title, "Answers not sent");
+    assert!(
+        notice
+            .body
+            .ends_with("/reviewer is waiting on a dialog: answers kept, send again when it's free"),
+        "{}",
+        notice.body
+    );
+    let text = cards_text(&mut state);
+    assert!(text.contains("! not sent: waiting on a dialog"), "{text}");
+    assert!(!state.is_ledger_request(&completed.request_id));
+}
+
+#[test]
+fn a_refused_send_for_one_pane_marks_it_until_a_send_goes_through() {
+    use super::super::ledger_answers::LedgerAction;
+    let (mut state, remote) = state_with_cards();
+    state.open_cards_view();
+    let mut outcome = ClientShellInput::default();
+    let send = LedgerAction::Send {
+        endpoint_id: remote.clone(),
+        pane_id: Some("pane_1".into()),
+    };
+    state.run_ledger_action(send.clone(), &mut outcome);
+    let request_id = |outcome: &ClientShellInput| match outcome.actions.as_slice() {
+        [ClientShellAction::Endpoint { request, .. }] => request.id.clone(),
+        other => panic!("one request: {other:?}"),
+    };
+    let id = request_id(&outcome);
+    assert!(state.handle_ledger_result(
+        &remote,
+        "remote-boot",
+        &id,
+        Err(ClientShellEndpointError {
+            code: Some("agent_not_ready".into()),
+            message: "no agent runs in this pane right now".into(),
+        }),
+    ));
+    assert!(state
+        .visible_endpoint_notice
+        .as_ref()
+        .is_some_and(|notice| notice.body.contains("/reviewer has no agent running")));
+    assert!(cards_text(&mut state).contains("! not sent: no agent running"));
+
+    let mut outcome = ClientShellInput::default();
+    state.run_ledger_action(send, &mut outcome);
+    let id = request_id(&outcome);
+    assert!(state.handle_ledger_result(
+        &remote,
+        "remote-boot",
+        &id,
+        Ok(crate::api::schema::ResponseResult::LedgerSent {
+            sent: vec![crate::api::schema::LedgerSentPane {
+                pane_id: "pane_1".into(),
+                text: "CAL-40 Q1 (Ship now?) → defer".into(),
+                questions: 1,
+            }],
+            failed: Vec::new(),
+        }),
+    ));
+    assert!(!cards_text(&mut state).contains("not sent"));
+}
+
+#[test]
+fn a_stale_refusal_goes_on_new_answers_and_on_disconnect() {
+    use super::super::ledger_answers::LedgerAction;
+    let (mut state, remote) = state_with_cards();
+    state.open_cards_view();
+    let refuse = |state: &mut ClientShellState, code: &str| {
+        let mut outcome = ClientShellInput::default();
+        state.run_ledger_action(
+            LedgerAction::Send {
+                endpoint_id: remote.clone(),
+                pane_id: Some("pane_1".into()),
+            },
+            &mut outcome,
+        );
+        let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
+            panic!("one request");
+        };
+        let id = request.id.clone();
+        state.handle_ledger_result(
+            &remote,
+            "remote-boot",
+            &id,
+            Err(ClientShellEndpointError {
+                code: Some(code.into()),
+                message: "refused".into(),
+            }),
+        );
+    };
+    let marked = |state: &mut ClientShellState| cards_text(state).contains("! not sent:");
+
+    refuse(&mut state, "agent_blocked");
+    assert!(marked(&mut state));
+    state.run_ledger_action(
+        LedgerAction::Stage {
+            endpoint_id: remote.clone(),
+            pane_id: "pane_1".into(),
+            item_id: "CAL-40".into(),
+            question_id: 1,
+            answer: None,
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(!marked(&mut state), "a new answer clears the old reason");
+
+    refuse(&mut state, "agent_blocked");
+    state.run_ledger_action(
+        LedgerAction::Dismiss {
+            endpoint_id: remote.clone(),
+            pane_id: Some("pane_1".into()),
+            item_id: Some("CAL-40".into()),
+            question_id: Some(1),
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(!marked(&mut state), "a dismiss clears it");
+
+    // An interrupted send may have gone out: it does not claim the answers were kept.
+    refuse(&mut state, "endpoint_cancelled");
+    let notice = state.visible_endpoint_notice.as_ref().expect("notice");
+    assert!(
+        notice.body.contains("may have been sent") && !notice.body.contains("answers kept"),
+        "{}",
+        notice.body
+    );
+    assert!(cards_text(&mut state).contains("! may have been sent: check the card"));
+    state.mark_endpoint_disconnected(&remote);
+    assert!(state.ledger_refusals.is_empty(), "the machine went away");
+}
+
+#[test]
+fn a_second_answer_queued_on_another_machine_goes_after_the_first_reply() {
+    use super::super::ledger_answers::LedgerAction;
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::protocol::ClientMessage;
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<ClientMessage>>>);
+    impl crate::client::endpoint::EndpointTransport for Capture {
+        fn send(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+    }
+
+    let (mut state, remote) = state_with_cards();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut endpoints = EndpointRegistry::empty();
+    endpoints.insert(
+        ClientEndpointId::Local,
+        Capture(std::sync::Arc::default()),
+        1,
+        EndpointNegotiation::default(),
+        true,
+    );
+    endpoints.insert(
+        remote.clone(),
+        Capture(sent.clone()),
+        7,
+        EndpointNegotiation::default(),
+        false,
+    );
+    assert!(endpoints.set_active(&ClientEndpointId::Local));
+    let mut outcome = ClientShellInput::default();
+    state.run_ledger_action(
+        LedgerAction::Stage {
+            endpoint_id: remote.clone(),
+            pane_id: "pane_1".into(),
+            item_id: "CAL-40".into(),
+            question_id: 1,
+            answer: None,
+        },
+        &mut outcome,
+    );
+    state.run_ledger_action(
+        LedgerAction::Send {
+            endpoint_id: remote.clone(),
+            pane_id: Some("pane_1".into()),
+        },
+        &mut outcome,
+    );
+    let mut commands = EndpointCommands::default();
+    crate::client::shell_runtime::dispatch_client_shell_actions(
+        outcome.actions,
+        &mut commands,
+        &mut endpoints,
+        Some(&mut state),
+        &mut Vec::new(),
+        &mut None,
+    )
+    .unwrap();
+    let request_ids = |sent: &[ClientMessage]| {
+        sent.iter()
+            .map(|message| match message {
+                ClientMessage::ClientShellEndpointRequest { request, .. } => {
+                    serde_json::from_str::<crate::api::schema::Request>(request)
+                        .unwrap()
+                        .id
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = request_ids(&sent.lock().unwrap());
+    assert_eq!(first.len(), 1, "one command at a time per machine");
+    assert!(
+        !crate::client::shell_runtime::drain_ledger_lane(
+            &remote,
+            &mut commands,
+            &mut endpoints,
+            Some(&mut state),
+        ) && sent.lock().unwrap().len() == 1,
+        "nothing goes while the first is in flight"
+    );
+
+    let reply = crate::api::schema::SuccessResponse {
+        id: first[0].clone(),
+        result: crate::api::schema::ResponseResult::Ok {},
+    };
+    let completed = commands
+        .receive_chunk(
+            &remote,
+            7,
+            "remote-boot",
+            &first[0],
+            true,
+            serde_json::to_vec(&reply).unwrap(),
+        )
+        .unwrap()
+        .expect("reply");
+    state.handle_ledger_result(
+        &completed.endpoint_id,
+        &completed.boot_id,
+        &completed.request_id,
+        completed.result,
+    );
+    crate::client::shell_runtime::drain_ledger_lane(
+        &remote,
+        &mut commands,
+        &mut endpoints,
+        Some(&mut state),
+    );
+    let ids = request_ids(&sent.lock().unwrap());
+    assert_eq!(ids.len(), 2, "the queued send went after the reply");
+    assert!(state.is_ledger_request(&ids[1]));
+}

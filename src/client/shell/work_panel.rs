@@ -4,7 +4,9 @@
 //! card (the `[[refs]]` command), a stage for its report, ↗ for the pages a browser stage opened.
 //! Full, mini (one mark per task) or hidden: prefix+shift+b cycles.
 //! Above the tasks, the card ledger (SHE-100008): one row per card the agent reported, waiting
-//! on you first; click a row for its summary, decisions and questions.
+//! on you first; click a row for its summary, decisions and questions. SHE-100009: answer them
+//! with buttons, send the staged answers as one message, or open every machine's cards in the
+//! full-screen Cards view (click CARDS).
 
 use super::projects;
 use super::render::{display_width, put_text};
@@ -47,11 +49,6 @@ pub(super) enum WorkHit {
         stage: String,
     },
     Expand,
-    /// Expand or collapse a card ledger row (client presentation state only).
-    ToggleLedgerItem {
-        pane_id: String,
-        item_id: String,
-    },
     /// A link the tool that started the workspace reported (`card_link`), opened in its app.
     Link(String),
     /// Answer the focused agent's question (opens the reply prompt).
@@ -63,6 +60,10 @@ pub(super) enum WorkHit {
         title: String,
         details: String,
     },
+    /// Answer, dismiss, send or expand a card (SHE-100009).
+    Ledger(super::ledger_answers::LedgerAction),
+    /// The CARDS heading: the full-screen Cards view.
+    OpenCards,
 }
 
 /// Tasks from one agent's `sheprd_w_1..` tokens ("id|label|stage:s,stage:s"), newest first.
@@ -213,6 +214,7 @@ pub(super) fn render(
     endpoints: &[ClientShellEndpoint],
     active: &ClientEndpointId,
     expanded: &HashSet<(ClientEndpointId, String, String)>,
+    refusals: &super::ledger_answers::LedgerRefusals,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
@@ -429,25 +431,75 @@ pub(super) fn render(
         }
     }
     // The card ledger: one row per card, waiting on you first. With it, questions live on their
-    // card and the token-based section below stays out.
+    // card and the token-based section below stays out. On a server that takes answers
+    // (SHE-100009) each question has its answer buttons, and the heading a "send N" button.
     if let Some(ledger) = ledger {
+        let endpoint = endpoints.iter().find(|e| e.endpoint_id == *active);
+        let answerable = endpoint.is_some_and(super::ledger_answers::answers_supported);
+        let right = x + width;
         if y + 1 < area.bottom() {
             y += 1;
             let label = if ledger.open_questions > 0 {
-                format!(" CARDS · ?{}", ledger.open_questions)
+                format!(" CARDS · ?{} ⤢", ledger.open_questions)
             } else {
-                " CARDS".to_owned()
+                " CARDS ⤢".to_owned()
             };
             let style = if ledger.open_questions > 0 {
                 heading.fg(palette.yellow)
             } else {
                 heading
             };
-            put_text(buffer, x, y, width, &label, style);
+            let w = display_width(&label).min(width);
+            put_text(buffer, x, y, w, &label, style);
+            hits.work_panel
+                .push((Rect::new(x, y, w, 1), WorkHit::OpenCards));
+            if answerable && ledger.staged > 0 {
+                let send = format!("[send {}]", ledger.staged);
+                let sw = display_width(&send);
+                if x + w + 1 + sw <= right {
+                    let sx = right - sw;
+                    put_text(
+                        buffer,
+                        sx,
+                        y,
+                        sw,
+                        &send,
+                        base.fg(super::panel_contrast_fg(palette))
+                            .bg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                    hits.work_panel.push((
+                        Rect::new(sx, y, sw, 1),
+                        WorkHit::Ledger(super::ledger_answers::LedgerAction::Send {
+                            endpoint_id: active.clone(),
+                            pane_id: Some(agent.pane_id.clone()),
+                        }),
+                    ));
+                }
+            }
             y += 1;
+            // The last send was refused: say why until one goes through.
+            if let Some(reason) = refusals
+                .get(&(active.clone(), agent.pane_id.clone()))
+                .filter(|_| answerable && ledger.staged > 0 && y < area.bottom())
+            {
+                put_text(
+                    buffer,
+                    x + 1,
+                    y,
+                    width - 1,
+                    &format!("! {reason}"),
+                    base.fg(palette.red),
+                );
+                y += 1;
+            }
         }
-        let right = x + width;
-        let inner = width.saturating_sub(4);
+        let target = super::ledger_answers::QuestionTarget {
+            endpoint_id: active,
+            pane_id: &agent.pane_id,
+            item_id: "",
+            answerable,
+        };
         for row in &ledger.rows {
             if y >= area.bottom() {
                 return;
@@ -455,124 +507,45 @@ pub(super) fn render(
             let item = &row.item;
             let key = (active.clone(), agent.pane_id.clone(), item.id.clone());
             let open = expanded.contains(&key);
-            // Inferred rows (the hook's guess) are dimmed and marked "~".
-            let text_style = if item.inferred {
-                base.fg(palette.overlay1)
-            } else {
-                base
+            let target = super::ledger_answers::QuestionTarget {
+                item_id: &item.id,
+                ..target
             };
-            put_text(
-                buffer,
-                x + 1,
-                y,
-                1,
-                if open { "▾" } else { "▸" },
-                base.fg(palette.overlay1),
-            );
-            let mut cx = x + 3;
-            let id = if item.inferred {
-                format!("~{}", item.id)
-            } else {
-                item.id.clone()
-            };
-            let id_width = display_width(&id).min(right.saturating_sub(cx));
-            put_text(
-                buffer,
-                cx,
-                y,
-                id_width,
-                &id,
-                text_style
-                    .fg(if item.inferred {
-                        palette.overlay1
-                    } else {
-                        palette.accent
-                    })
-                    .add_modifier(Modifier::BOLD),
-            );
-            hits.work_panel.push((
-                Rect::new(cx, y, id_width, 1),
-                WorkHit::Card(item.id.clone()),
-            ));
-            cx += id_width + 1;
-            let (glyph, color) = match row.state {
-                super::work_ledger_view::LedgerRowState::Done => ("✓", palette.green),
-                _ if item.inferred => ("●", palette.overlay1),
-                _ => ("●", palette.accent),
-            };
-            let questions = if item.questions.is_empty() {
-                String::new()
-            } else {
-                format!(" ?{}", item.questions.len())
-            };
-            let marks_width = 1 + display_width(&questions);
-            let label_width = right.saturating_sub(cx).saturating_sub(marks_width + 1);
-            put_text(buffer, cx, y, label_width, &item.title, text_style);
-            let mx = right.saturating_sub(marks_width);
-            if mx > cx {
-                put_text(buffer, mx, y, 1, glyph, base.fg(color));
-                put_text(
-                    buffer,
-                    mx + 1,
+            let mut card_hits = Vec::new();
+            y = {
+                let mut canvas = super::ledger_answers::Canvas {
+                    buffer: &mut *buffer,
+                    top: 0,
+                    first: 0,
+                    bottom: area.bottom(),
+                };
+                super::ledger_answers::render_card(
+                    &mut canvas,
+                    x + 1,
+                    right,
                     y,
-                    marks_width - 1,
-                    &questions,
-                    base.fg(palette.yellow),
-                );
-            }
-            // Pushed after the id's hit: a click on the id opens the card, anywhere else toggles.
-            hits.work_panel.push((
-                Rect::new(x, y, width, 1),
-                WorkHit::ToggleLedgerItem {
-                    pane_id: agent.pane_id.clone(),
-                    item_id: item.id.clone(),
-                },
-            ));
-            y += 1;
+                    row,
+                    open,
+                    &target,
+                    palette,
+                    base,
+                    &mut card_hits,
+                )
+            };
+            hits.work_panel
+                .extend(card_hits.into_iter().map(|(rect, hit)| {
+                    (
+                        rect,
+                        match hit {
+                            super::ledger_answers::CardHit::Open(id) => WorkHit::Card(id),
+                            super::ledger_answers::CardHit::Action(action) => {
+                                WorkHit::Ledger(action)
+                            }
+                        },
+                    )
+                }));
             if !open {
                 continue;
-            }
-            let mut detail = Vec::new();
-            if let Some(status) = &item.status {
-                detail.push((format!("· {status}"), base.fg(palette.overlay1)));
-            }
-            for line in wrap(&item.summary, usize::from(inner)).into_iter().take(3) {
-                detail.push((line, text_style));
-            }
-            for decision in &item.decisions {
-                for (n, line) in wrap(&decision.text, usize::from(inner.saturating_sub(2)))
-                    .into_iter()
-                    .take(2)
-                    .enumerate()
-                {
-                    let bullet = if n == 0 { "✓ " } else { "  " };
-                    detail.push((format!("{bullet}{line}"), base.fg(palette.green)));
-                }
-            }
-            for question in &item.questions {
-                for (n, line) in wrap(&question.text, usize::from(inner.saturating_sub(2)))
-                    .into_iter()
-                    .take(2)
-                    .enumerate()
-                {
-                    let bullet = if n == 0 { "? " } else { "  " };
-                    detail.push((format!("{bullet}{line}"), base.fg(palette.yellow)));
-                }
-                for (index, option) in question.options.iter().enumerate() {
-                    let star = if question.recommended == Some(index) {
-                        " ★"
-                    } else {
-                        ""
-                    };
-                    detail.push((format!("  {}) {option}{star}", index + 1), base));
-                }
-            }
-            for (line, style) in detail {
-                if y >= area.bottom() {
-                    return;
-                }
-                put_text(buffer, x + 3, y, inner + 1, &line, style);
-                y += 1;
             }
             // The subagent task for this card: its stage line, with the same report links.
             if let Some(task) = tasks.iter().find(|task| task.key == item.id) {
@@ -598,12 +571,14 @@ pub(super) fn render(
                     .iter()
                     .any(|scheme| link.starts_with(scheme))
             });
-            if !item.questions.is_empty() || link.is_some() {
+            // Without answer buttons (an older server), the reply prompt answers instead.
+            let reply = !answerable && row.open_questions > 0;
+            if reply || link.is_some() {
                 if y >= area.bottom() {
                     return;
                 }
                 let mut lx = x + 3;
-                if !item.questions.is_empty() {
+                if reply {
                     put_text(buffer, lx, y, 7, "↩ reply", base.fg(palette.accent));
                     hits.work_panel.push((
                         Rect::new(lx, y, 7, 1),
@@ -931,7 +906,7 @@ pub(super) fn request_summary(endpoints: &[ClientShellEndpoint], active: &Client
 }
 
 /// Word-wraps `text` to `width` columns.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -1261,6 +1236,7 @@ mod tests {
             std::slice::from_ref(endpoint),
             &ClientEndpointId::Local,
             expanded,
+            &HashMap::new(),
             &config,
             &mut hits,
         );
@@ -1304,10 +1280,11 @@ mod tests {
             .work_panel
             .iter()
             .position(|(_, hit)| {
-                *hit == WorkHit::ToggleLedgerItem {
+                *hit == WorkHit::Ledger(super::super::ledger_answers::LedgerAction::Toggle {
+                    endpoint_id: ClientEndpointId::Local,
                     pane_id: "pane_1".into(),
                     item_id: "SHE-12".into(),
-                }
+                })
             })
             .unwrap();
         assert!(id_hit < toggle_hit, "the id click wins over the row toggle");
@@ -1335,6 +1312,113 @@ mod tests {
             == WorkHit::Reply {
                 pane_id: "pane_1".into()
             }));
+    }
+
+    fn answering(mut endpoint: ClientShellEndpoint) -> ClientShellEndpoint {
+        endpoint.methods = Some(
+            ["ledger.stage", "ledger.dismiss", "ledger.send"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        endpoint
+    }
+
+    #[test]
+    fn a_server_that_takes_answers_gets_buttons_send_and_dismiss() {
+        use super::super::ledger_answers::LedgerAction;
+        let mut ledger = sample_ledger();
+        ledger
+            .stage(
+                "SHE-12",
+                1,
+                Some(crate::work_ledger::LedgerAnswer {
+                    option: Some(0),
+                    text: None,
+                }),
+            )
+            .unwrap();
+        ledger.complete("SHE-1", None, None, 9).unwrap();
+        let endpoint = answering(panel_endpoint(Some(ledger), Vec::new()));
+        let expanded = HashSet::from([(
+            ClientEndpointId::Local,
+            "pane_1".to_owned(),
+            "SHE-12".to_owned(),
+        )]);
+        let (lines, hits) = render_panel(&endpoint, &expanded, FULL_WIDTH);
+        let text = lines.join("\n");
+        assert!(text.contains("[monthly] [yearly★] [✎] [✕]"), "{text}");
+        assert!(
+            !text.contains("1) monthly") && !text.contains("↩ reply"),
+            "{text}"
+        );
+        let heading = lines.iter().position(|l| l.contains("CARDS")).unwrap();
+        assert!(lines[heading].ends_with("[send 1]"), "{text}");
+        let find = |wanted: &WorkHit| {
+            hits.work_panel
+                .iter()
+                .find(|(_, hit)| hit == wanted)
+                .map(|(rect, _)| *rect)
+        };
+        let send = find(&WorkHit::Ledger(LedgerAction::Send {
+            endpoint_id: ClientEndpointId::Local,
+            pane_id: Some("pane_1".into()),
+        }))
+        .expect("send hit");
+        assert_eq!(send.y, heading as u16);
+        assert!(find(&WorkHit::OpenCards).is_some_and(|rect| rect.y == heading as u16));
+        // The staged option unstages on click; the other one stages.
+        let unstage = hits.work_panel.iter().find(|(_, hit)| {
+            matches!(
+                hit,
+                WorkHit::Ledger(LedgerAction::Stage { answer: None, .. })
+            )
+        });
+        let (rect, _) = unstage.expect("unstage hit");
+        let row = &lines[rect.y as usize];
+        let col = row.chars().take(rect.x as usize).collect::<String>();
+        assert!(row[col.len()..].starts_with("[monthly]"), "{row}");
+        // A done card can be dismissed from its row.
+        let done = lines.iter().position(|l| l.contains("SHE-1 ")).unwrap();
+        assert!(lines[done].ends_with("✓ ✕"), "{text}");
+        assert!(find(&WorkHit::Ledger(LedgerAction::Dismiss {
+            endpoint_id: ClientEndpointId::Local,
+            pane_id: Some("pane_1".into()),
+            item_id: Some("SHE-1".into()),
+            question_id: None,
+        }))
+        .is_some_and(|rect| rect.y == done as u16));
+    }
+
+    #[test]
+    fn sent_answers_show_until_the_agent_reads_them() {
+        let mut ledger = sample_ledger();
+        ledger
+            .stage(
+                "SHE-12",
+                1,
+                Some(crate::work_ledger::LedgerAnswer {
+                    option: Some(1),
+                    text: None,
+                }),
+            )
+            .unwrap();
+        let send = ledger.compose_send().unwrap();
+        ledger.mark_sent(&send.questions, 5);
+        let endpoint = answering(panel_endpoint(Some(ledger), Vec::new()));
+        let expanded = HashSet::from([(
+            ClientEndpointId::Local,
+            "pane_1".to_owned(),
+            "SHE-12".to_owned(),
+        )]);
+        let (lines, _) = render_panel(&endpoint, &expanded, FULL_WIDTH);
+        let text = lines.join("\n");
+        assert!(text.contains("sent → yearly"), "{text}");
+        assert!(!text.contains("[send"), "{text}");
+        assert!(
+            !text.contains("CARDS · ?"),
+            "a sent question no longer waits:\n{text}"
+        );
     }
 
     #[test]

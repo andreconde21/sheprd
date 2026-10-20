@@ -264,6 +264,15 @@ pub enum Method {
     LedgerRemove(LedgerItemTarget),
     #[serde(rename = "ledger.list")]
     LedgerList(LedgerListParams),
+    // andreconde fork (sheprd): answering card questions (SHE-100009).
+    #[serde(rename = "ledger.stage")]
+    LedgerStage(LedgerStageParams),
+    #[serde(rename = "ledger.dismiss")]
+    LedgerDismiss(LedgerDismissParams),
+    #[serde(rename = "ledger.send")]
+    LedgerSend(LedgerSendParams),
+    #[serde(rename = "ledger.answers")]
+    LedgerAnswers(LedgerAnswersParams),
 }
 
 #[cfg(test)]

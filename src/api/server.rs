@@ -76,6 +76,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         health_check: true,
         ssh_agent_registration: false,
         work_ledger: true,
+        work_ledger_answers: true,
     })
 }
 
@@ -712,6 +713,10 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::LedgerComplete(_) => "ledger.complete",
         Method::LedgerRemove(_) => "ledger.remove",
         Method::LedgerList(_) => "ledger.list",
+        Method::LedgerStage(_) => "ledger.stage",
+        Method::LedgerDismiss(_) => "ledger.dismiss",
+        Method::LedgerSend(_) => "ledger.send",
+        Method::LedgerAnswers(_) => "ledger.answers",
     }
 }
 
@@ -1174,6 +1179,7 @@ mod tests {
     #[test]
     fn ping_capabilities_advertise_the_work_ledger() {
         assert!(default_capabilities().is_some_and(|capabilities| capabilities.work_ledger));
+        assert!(default_capabilities().is_some_and(|capabilities| capabilities.work_ledger_answers));
     }
 
     fn unique_test_path(name: &str) -> PathBuf {
@@ -1513,6 +1519,7 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
                 work_ledger: false,
+                work_ledger_answers: false,
             }),
             None,
             None,
