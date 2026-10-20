@@ -2184,12 +2184,22 @@ async fn run_client_loop(
                                 continue;
                             }
                             Ok(endpoint::EndpointControlMessage::WorkLedger(ledger)) => {
-                                if let Some(shell) = state.shell.as_mut() {
-                                    shell.set_endpoint_work_ledger(
-                                        &endpoint_id,
-                                        generation,
-                                        ledger,
-                                    );
+                                // andreconde fork (sheprd): a ledger change (an answer staged
+                                // from the panel, a card the agent wrote) comes without a
+                                // snapshot, so repaint the chrome that shows it, SHE-100009.
+                                let frame = state.shell.as_mut().and_then(|shell| {
+                                    shell
+                                        .set_endpoint_work_ledger(&endpoint_id, generation, ledger)
+                                        .then(|| {
+                                            shell.compose(
+                                                state.reported_size.0,
+                                                state.reported_size.1,
+                                            )
+                                        })
+                                        .flatten()
+                                });
+                                if let Some(frame) = frame {
+                                    state.present_frozen_chrome(frame);
                                 }
                                 continue;
                             }

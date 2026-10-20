@@ -311,8 +311,15 @@ fn format_list(result: &serde_json::Value) -> String {
             if item["done"].as_bool() == Some(true) {
                 line.push_str("  done");
             }
-            if !questions.is_empty() {
-                line.push_str(&format!("  ?{}", questions.len()));
+            let open = questions
+                .iter()
+                .filter(|question| {
+                    question["dismissed"].as_bool() != Some(true)
+                        && question["sent_at_ms"].is_null()
+                })
+                .count();
+            if open > 0 {
+                line.push_str(&format!("  ?{open}"));
             }
             if item["inferred"].as_bool() == Some(true) {
                 line.push_str("  (inferred)");
@@ -529,6 +536,22 @@ mod tests {
             format_answers(&serde_json::json!({"answers": []})),
             "no answers\n"
         );
+    }
+
+    #[test]
+    fn list_counts_only_open_questions() {
+        let result = serde_json::json!({"panes": [{"pane_id": "w1:p1", "items": [
+            {"id": "CAL-40", "questions": [
+                {"id": 1, "text": "Ship?", "sent_at_ms": 5},
+                {"id": 2, "text": "Zone?", "dismissed": true},
+                {"id": 3, "text": "Owner?"},
+            ]},
+            {"id": "SHE-12", "questions": [{"id": 1, "text": "Path?", "dismissed": true}]},
+        ]}]});
+        let out = format_list(&result);
+        assert!(out.contains("  CAL-40  ?1\n"), "{out}");
+        assert!(out.contains("  SHE-12\n"), "{out}");
+        assert!(!out.contains("Zone?"), "{out}");
     }
 
     #[test]
