@@ -5,6 +5,19 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-4 (2026-10-20)
+
+### Added
+- Card ledger: agents keep a short record per card (SHE-12, CAL-40, CB-12, #123…) with its
+  status, a summary, open questions with suggested answers, and decisions, through
+  `sheprd card update | ask | decide | done | list | remove`. The right work panel
+  (prefix+shift+b) shows them as CARDS rows, cards waiting on you first (`● ?2`); click a row to
+  expand its summary, decisions and questions (★ marks the agent's recommendation). Ledgers are
+  saved with the session and survive restarts and handoffs, and reach remote machines' panels too.
+- The Claude hook fills in guessed cards from the subagent tasks and questions it already sees,
+  in the background; a card an agent writes itself always wins over a guess. Run `sheprd setup`
+  again on each machine to pick up the new hook.
+
 ## sheprd-v0.9.5-3 (2026-10-18)
 
 ### Fixed
