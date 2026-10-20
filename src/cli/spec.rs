@@ -382,6 +382,21 @@ fn card_command() -> Command {
                 .arg(pane())
                 .arg(flag("json")),
         )
+        .subcommand(
+            Command::new("answers")
+                .about("Read the answers the user sent (they count as read)")
+                .arg(flag("peek").help("Read without marking them read"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
+        .subcommand(
+            Command::new("dismiss")
+                .about("Dismiss a card, or one of its questions")
+                .arg(required("id", "ID"))
+                .arg(option("question", "N").help("The question id to dismiss"))
+                .arg(pane())
+                .arg(flag("json")),
+        )
 }
 
 fn agent_command() -> Command {

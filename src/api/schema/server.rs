@@ -39,4 +39,8 @@ pub struct ServerCapabilities {
     /// andreconde fork (sheprd): supports the `ledger.*` card ledger methods (SHE-100008).
     #[serde(default)]
     pub work_ledger: bool,
+    /// andreconde fork (sheprd): supports answering card questions: `ledger.stage`,
+    /// `ledger.dismiss`, `ledger.send` and `ledger.answers` (SHE-100009).
+    #[serde(default)]
+    pub work_ledger_answers: bool,
 }

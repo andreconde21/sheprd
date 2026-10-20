@@ -1204,6 +1204,14 @@ impl App {
             }
             Method::LedgerRemove(params) => return self.handle_ledger_remove(request.id, params),
             Method::LedgerList(params) => return self.handle_ledger_list(request.id, params),
+            Method::LedgerStage(params) => return self.handle_ledger_stage(request.id, params),
+            Method::LedgerDismiss(params) => {
+                return self.handle_ledger_dismiss(request.id, params);
+            }
+            Method::LedgerSend(params) => return self.handle_ledger_send(request.id, params),
+            Method::LedgerAnswers(params) => {
+                return self.handle_ledger_answers(request.id, params);
+            }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
             }

@@ -1,10 +1,15 @@
 //! andreconde fork (sheprd): `ledger.*` handlers, the card ledger of a pane's terminal
 //! (SHE-100008). Writes bump `work_ledger_revision` (client fanout resends on it), mark the
 //! session dirty (the ledger is persisted) and emit `ledger.updated`.
+//! SHE-100009: the user's answers. `ledger.stage` keeps a choice on the server so every client
+//! shows it, `ledger.send` types a pane's staged answers into it as one line, and the agent's
+//! next explicit write, `ledger.answers` or `ledger.list` with `ack` clears what it was sent.
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, LedgerAskParams, LedgerCompleteParams, LedgerDecideParams,
-    LedgerItemTarget, LedgerListParams, LedgerPaneInfo, LedgerUpdateParams, ResponseResult,
+    EventData, EventEnvelope, EventKind, LedgerAnswersParams, LedgerAskParams,
+    LedgerCompleteParams, LedgerDecideParams, LedgerDismissParams, LedgerItemTarget,
+    LedgerListParams, LedgerPaneInfo, LedgerSendFailure, LedgerSendParams, LedgerSentPane,
+    LedgerStageParams, LedgerUpdateParams, ResponseResult,
 };
 use crate::app::App;
 use crate::layout::PaneId;
@@ -12,9 +17,13 @@ use crate::work_ledger::{LedgerError, LedgerQuestionInput, LedgerUpdate, LedgerW
 
 use super::responses::{encode_error, encode_success};
 
+/// Text then Enter, like `agent.prompt`: the Enter comes late enough to submit, not paste.
+const LEDGER_SEND_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// The pane a ledger request names, resolved to what a write needs.
 struct LedgerTarget {
     ws_idx: usize,
+    pane: PaneId,
     public_pane_id: String,
     terminal_id: crate::terminal::TerminalId,
 }
@@ -45,6 +54,7 @@ impl App {
         }
         Some(LedgerTarget {
             ws_idx,
+            pane,
             public_pane_id: self.public_pane_id(ws_idx, pane)?,
             terminal_id,
         })
@@ -239,16 +249,27 @@ impl App {
     }
 
     pub(super) fn handle_ledger_list(&mut self, id: String, params: LedgerListParams) -> String {
+        if params.ack && params.pane_id.is_none() {
+            return ledger_error(
+                id,
+                LedgerError::Invalid("ack needs the agent's own pane_id".into()),
+            );
+        }
         let panes = match params.pane_id.as_deref() {
             Some(pane_id) => {
                 let Some(target) = self.ledger_target(pane_id) else {
                     return pane_not_found(id, pane_id);
                 };
-                vec![self.ledger_pane_info(
+                let panes = vec![self.ledger_pane_info(
                     target.ws_idx,
                     &target.public_pane_id,
                     &target.terminal_id,
-                )]
+                )];
+                // Listed first, so the agent sees what it acknowledges.
+                if params.ack {
+                    self.ledger_acknowledge(&target);
+                }
+                panes
             }
             None => self
                 .ledger_owners()
@@ -259,6 +280,225 @@ impl App {
                 .collect(),
         };
         encode_success(id, ResponseResult::LedgerList { panes })
+    }
+
+    /// The agent read its answers: what was sent to it, and what the user dismissed, goes.
+    fn ledger_acknowledge(&mut self, target: &LedgerTarget) {
+        let changed = self
+            .ledger_write(target, |ledger, _, _| Ok(ledger.acknowledge()))
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        for item_id in changed {
+            self.ledger_changed(target, &item_id);
+        }
+    }
+
+    /// The panes a pane-or-all request covers: the named one, or every pane with a ledger.
+    fn ledger_targets(&self, pane_id: Option<&str>) -> Result<Vec<LedgerTarget>, String> {
+        match pane_id {
+            Some(pane_id) => self
+                .ledger_target(pane_id)
+                .map(|target| vec![target])
+                .ok_or_else(|| pane_id.to_owned()),
+            None => Ok(self
+                .ledger_owners()
+                .into_iter()
+                .filter_map(|(_, pane_id, _)| self.ledger_target(&pane_id))
+                .collect()),
+        }
+    }
+
+    pub(super) fn handle_ledger_stage(&mut self, id: String, params: LedgerStageParams) -> String {
+        let Some(target) = self.ledger_target(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let (item_id, question_id, answer) = (params.item_id, params.question_id, params.answer);
+        let result = self
+            .ledger_write(&target, |ledger, _, _| {
+                ledger.stage(&item_id, question_id, answer)
+            })
+            .map(|result| {
+                result.map(|value| LedgerWrite {
+                    value,
+                    dropped: Vec::new(),
+                })
+            });
+        self.ledger_item_response(id, &target, &item_id, result)
+    }
+
+    pub(super) fn handle_ledger_dismiss(
+        &mut self,
+        id: String,
+        params: LedgerDismissParams,
+    ) -> String {
+        if params.question_id.is_some() && params.item_id.is_none() {
+            return ledger_error(id, LedgerError::Invalid("question_id needs item_id".into()));
+        }
+        if let Some(item_id) = params.item_id {
+            let Some(pane_id) = params.pane_id else {
+                return ledger_error(id, LedgerError::Invalid("item_id needs pane_id".into()));
+            };
+            let Some(target) = self.ledger_target(&pane_id) else {
+                return pane_not_found(id, &pane_id);
+            };
+            let question_id = params.question_id;
+            return match self.ledger_write(&target, |ledger, _, _| {
+                ledger.dismiss(&item_id, question_id)
+            }) {
+                Some(Ok(changed)) => {
+                    if changed {
+                        self.ledger_changed(&target, &item_id);
+                    }
+                    encode_success(
+                        id,
+                        ResponseResult::LedgerDismissed {
+                            dismissed: usize::from(changed),
+                        },
+                    )
+                }
+                Some(Err(error)) => ledger_error(id, error),
+                None => pane_not_found(id, &pane_id),
+            };
+        }
+        // Every done card of the pane, or of every pane.
+        let targets = match self.ledger_targets(params.pane_id.as_deref()) {
+            Ok(targets) => targets,
+            Err(pane_id) => return pane_not_found(id, &pane_id),
+        };
+        let mut dismissed = 0;
+        for target in targets {
+            let removed = self
+                .ledger_write(&target, |ledger, _, _| Ok(ledger.dismiss_done()))
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            dismissed += removed.len();
+            for item_id in removed {
+                self.ledger_changed(&target, &item_id);
+            }
+        }
+        encode_success(id, ResponseResult::LedgerDismissed { dismissed })
+    }
+
+    pub(super) fn handle_ledger_send(&mut self, id: String, params: LedgerSendParams) -> String {
+        let targets = match self.ledger_targets(params.pane_id.as_deref()) {
+            Ok(targets) => targets,
+            Err(pane_id) => return pane_not_found(id, &pane_id),
+        };
+        let mut sent = Vec::new();
+        let mut failed = Vec::new();
+        for target in targets {
+            match self.ledger_send_to(&target) {
+                Ok(Some(pane)) => sent.push(pane),
+                Ok(None) => {}
+                Err((code, message)) => failed.push(LedgerSendFailure {
+                    pane_id: target.public_pane_id,
+                    code: code.into(),
+                    message,
+                }),
+            }
+        }
+        if params.pane_id.is_some() {
+            if let Some(failure) = failed.pop() {
+                return encode_error(id, &failure.code, failure.message);
+            }
+            if sent.is_empty() {
+                return encode_error(
+                    id,
+                    "no_staged_answers",
+                    "no answers are staged on this pane",
+                );
+            }
+        }
+        encode_success(id, ResponseResult::LedgerSent { sent, failed })
+    }
+
+    /// Types one pane's staged answers into it, then Enter: an agent that is working gets it as
+    /// queued input. Refused when the pane does not run its agent in front (a shell would run
+    /// the line) or the agent waits on a dialog (the line would answer that instead).
+    fn ledger_send_to(
+        &mut self,
+        target: &LedgerTarget,
+    ) -> Result<Option<LedgerSentPane>, (&'static str, String)> {
+        let Some(terminal) = self.state.terminals.get(&target.terminal_id) else {
+            return Ok(None);
+        };
+        let Some(send) = terminal.work_ledger.compose_send() else {
+            return Ok(None);
+        };
+        if terminal.state == crate::detect::AgentState::Blocked {
+            return Err((
+                "agent_blocked",
+                "the agent waits on a dialog; answer it first, then send".into(),
+            ));
+        }
+        let agent_running = terminal.effective_known_agent().is_some_and(|agent| {
+            self.lookup_runtime_sender(target.ws_idx, target.pane)
+                .is_some_and(|runtime| super::super::agents::runtime_hosts_agent(runtime, agent))
+        });
+        if !agent_running {
+            return Err((
+                "agent_not_ready",
+                "no agent runs in this pane right now".into(),
+            ));
+        }
+        let Some(runtime) = self.lookup_runtime_sender(target.ws_idx, target.pane) else {
+            return Err(("pane_not_found", "the pane has no terminal".into()));
+        };
+        let (text, enter) =
+            crate::app::api_helpers::encode_api_submission_parts(runtime, &send.text);
+        // Nothing waits for the Enter: the answers are in the pane's input queue already.
+        if let Err(err) = runtime.queue_user_input_submission(
+            bytes::Bytes::from(text),
+            bytes::Bytes::from(enter),
+            LEDGER_SEND_SUBMIT_DELAY,
+            None,
+        ) {
+            return Err(("ledger_send_failed", err.to_string()));
+        }
+        let now = now_ms();
+        if let Some(terminal) = self.state.terminals.get_mut(&target.terminal_id) {
+            terminal.work_ledger.mark_sent(&send.questions, now);
+        }
+        let mut items = send
+            .questions
+            .iter()
+            .map(|(item_id, _)| item_id.clone())
+            .collect::<Vec<_>>();
+        items.dedup();
+        for item_id in items {
+            self.ledger_changed(target, &item_id);
+        }
+        Ok(Some(LedgerSentPane {
+            pane_id: target.public_pane_id.clone(),
+            text: send.text,
+            questions: send.questions.len(),
+        }))
+    }
+
+    pub(super) fn handle_ledger_answers(
+        &mut self,
+        id: String,
+        params: LedgerAnswersParams,
+    ) -> String {
+        let Some(target) = self.ledger_target(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let answers = self
+            .state
+            .terminals
+            .get(&target.terminal_id)
+            .map(|terminal| terminal.work_ledger.answers())
+            .unwrap_or_default();
+        if !params.peek {
+            self.ledger_acknowledge(&target);
+        }
+        encode_success(
+            id,
+            ResponseResult::LedgerAnswers {
+                pane_id: target.public_pane_id,
+                answers,
+            },
+        )
     }
 
     fn ledger_pane_info(
@@ -327,8 +567,10 @@ fn pane_not_found(id: String, pane_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::api::schema::{
-        EventData, LedgerAskParams, LedgerCompleteParams, LedgerDecideParams, LedgerItemTarget,
-        LedgerListParams, LedgerUpdateParams, Method, Request, ResponseResult, SuccessResponse,
+        EventData, LedgerAnswer, LedgerAnswersParams, LedgerAskParams, LedgerCompleteParams,
+        LedgerDecideParams, LedgerDismissParams, LedgerItemTarget, LedgerListParams,
+        LedgerSendParams, LedgerStageParams, LedgerUpdateParams, Method, Request, ResponseResult,
+        SuccessResponse,
     };
     use crate::app::App;
     use crate::config::Config;
@@ -476,6 +718,7 @@ mod tests {
             &mut app,
             Method::LedgerList(LedgerListParams {
                 pane_id: Some("w9:p9".into()),
+                ack: false,
             }),
         );
         assert_eq!(response["error"]["code"], "pane_not_found");
@@ -522,5 +765,244 @@ mod tests {
         let older: crate::api::schema::ServerCapabilities =
             serde_json::from_value(serde_json::json!({"live_handoff": true})).unwrap();
         assert!(!older.work_ledger);
+        assert!(!older.work_ledger_answers);
+    }
+
+    fn ask_two(app: &mut App, pane_id: &str) {
+        for (text, options) in [
+            (
+                "Provider?",
+                vec!["Stripe".to_owned(), "Multibanco".to_owned()],
+            ),
+            ("Webhook path?", Vec::new()),
+        ] {
+            request(
+                app,
+                Method::LedgerAsk(LedgerAskParams {
+                    pane_id: pane_id.into(),
+                    item_id: "SHE-12".into(),
+                    text: text.into(),
+                    options,
+                    recommended: None,
+                }),
+            );
+        }
+    }
+
+    fn stage(pane_id: &str, question_id: u32, answer: Option<LedgerAnswer>) -> Method {
+        Method::LedgerStage(LedgerStageParams {
+            pane_id: pane_id.into(),
+            item_id: "SHE-12".into(),
+            question_id,
+            answer,
+        })
+    }
+
+    fn option(index: usize) -> Option<LedgerAnswer> {
+        Some(LedgerAnswer {
+            option: Some(index),
+            text: None,
+        })
+    }
+
+    #[test]
+    fn stage_dismiss_and_answers_round_trip() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        ask_two(&mut app, &pane_id);
+        let revision = app.state.work_ledger_revision;
+        let response = request(&mut app, stage(&pane_id, 1, option(0)));
+        assert_eq!(response["result"]["changed"], true);
+        assert_eq!(
+            response["result"]["item"]["questions"][0]["answer"]["option"],
+            0
+        );
+        assert_eq!(app.state.work_ledger_revision, revision + 1);
+        let response = request(&mut app, stage(&pane_id, 1, option(0)));
+        assert_eq!(response["result"]["changed"], false);
+        assert_eq!(app.state.work_ledger_revision, revision + 1);
+        let response = request(&mut app, stage(&pane_id, 1, option(5)));
+        assert_eq!(response["error"]["code"], "invalid_ledger_request");
+        let response = request(&mut app, stage(&pane_id, 7, option(0)));
+        assert_eq!(response["error"]["code"], "ledger_item_not_found");
+        let response = request(&mut app, stage("w9:p9", 1, option(0)));
+        assert_eq!(response["error"]["code"], "pane_not_found");
+
+        let response = request(
+            &mut app,
+            Method::LedgerDismiss(LedgerDismissParams {
+                pane_id: Some(pane_id.clone()),
+                item_id: Some("SHE-12".into()),
+                question_id: Some(2),
+            }),
+        );
+        assert_eq!(response["result"]["dismissed"], 1);
+        let response = request(
+            &mut app,
+            Method::LedgerAnswers(LedgerAnswersParams {
+                pane_id: pane_id.clone(),
+                peek: true,
+            }),
+        );
+        assert_eq!(response["result"]["answers"][0]["dismissed"], true);
+        let response = request(
+            &mut app,
+            Method::LedgerAnswers(LedgerAnswersParams {
+                pane_id: pane_id.clone(),
+                peek: false,
+            }),
+        );
+        assert_eq!(response["result"]["answers"].as_array().unwrap().len(), 1);
+        let response = request(
+            &mut app,
+            Method::LedgerAnswers(LedgerAnswersParams {
+                pane_id: pane_id.clone(),
+                peek: false,
+            }),
+        );
+        assert!(response["result"]["answers"].as_array().unwrap().is_empty());
+
+        // Bad shapes are refused.
+        for params in [
+            LedgerDismissParams {
+                pane_id: Some(pane_id.clone()),
+                item_id: None,
+                question_id: Some(1),
+            },
+            LedgerDismissParams {
+                pane_id: None,
+                item_id: Some("SHE-12".into()),
+                question_id: None,
+            },
+        ] {
+            let response = request(&mut app, Method::LedgerDismiss(params));
+            assert_eq!(response["error"]["code"], "invalid_ledger_request");
+        }
+        let response = request(
+            &mut app,
+            Method::LedgerList(LedgerListParams {
+                pane_id: None,
+                ack: true,
+            }),
+        );
+        assert_eq!(response["error"]["code"], "invalid_ledger_request");
+    }
+
+    #[test]
+    fn dismiss_all_done_covers_every_pane() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        for item_id in ["SHE-1", "SHE-2"] {
+            request(
+                &mut app,
+                Method::LedgerComplete(LedgerCompleteParams {
+                    pane_id: pane_id.clone(),
+                    item_id: item_id.into(),
+                    summary: None,
+                }),
+            );
+        }
+        request(&mut app, Method::LedgerUpdate(update(&pane_id, "SHE-3")));
+        let start = app.event_hub.current_sequence();
+        let response = request(
+            &mut app,
+            Method::LedgerDismiss(LedgerDismissParams::default()),
+        );
+        assert_eq!(response["result"]["dismissed"], 2);
+        assert_eq!(app.event_hub.events_after(start).len(), 2);
+        let response = request(&mut app, Method::LedgerList(LedgerListParams::default()));
+        assert_eq!(response["result"]["panes"][0]["items"][0]["id"], "SHE-3");
+    }
+
+    #[test]
+    fn send_refuses_a_pane_without_its_agent_and_keeps_answers_staged() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        ask_two(&mut app, &pane_id);
+        let response = request(
+            &mut app,
+            Method::LedgerSend(LedgerSendParams {
+                pane_id: Some(pane_id.clone()),
+            }),
+        );
+        assert_eq!(response["error"]["code"], "no_staged_answers");
+        request(&mut app, stage(&pane_id, 1, option(1)));
+        // No agent runs in the test pane: typing would reach a shell.
+        let response = request(
+            &mut app,
+            Method::LedgerSend(LedgerSendParams {
+                pane_id: Some(pane_id.clone()),
+            }),
+        );
+        assert_eq!(response["error"]["code"], "agent_not_ready");
+        let response = request(&mut app, Method::LedgerSend(LedgerSendParams::default()));
+        assert_eq!(response["result"]["failed"][0]["code"], "agent_not_ready");
+        assert!(response["result"]["sent"].as_array().unwrap().is_empty());
+        let response = request(&mut app, Method::LedgerList(LedgerListParams::default()));
+        let question = &response["result"]["panes"][0]["items"][0]["questions"][0];
+        assert_eq!(question["answer"]["option"], 1);
+        assert!(question["sent_at_ms"].is_null());
+    }
+
+    #[tokio::test]
+    async fn send_types_one_line_into_a_working_agent_and_list_acknowledges() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, pane) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::OpenCode),
+                crate::detect::AgentState::Working,
+            );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane, runtime);
+        ask_two(&mut app, &pane_id);
+        request(&mut app, stage(&pane_id, 1, option(0)));
+        request(
+            &mut app,
+            stage(
+                &pane_id,
+                2,
+                Some(LedgerAnswer {
+                    option: None,
+                    text: Some("/hooks/stripe".into()),
+                }),
+            ),
+        );
+        let response = request(&mut app, Method::LedgerSend(LedgerSendParams::default()));
+        let line = "SHE-12 Q1 → Stripe · Q2 → \"/hooks/stripe\"";
+        assert_eq!(response["result"]["sent"][0]["text"], line);
+        assert_eq!(response["result"]["sent"][0]["questions"], 2);
+        let typed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("typed line")
+            .expect("pane input channel");
+        assert_eq!(typed, bytes::Bytes::from(line.as_bytes().to_vec()));
+        let enter = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("enter")
+            .expect("pane input channel");
+        assert_eq!(enter, bytes::Bytes::from_static(b"\r"));
+        // Sent answers are not sent twice.
+        let response = request(&mut app, Method::LedgerSend(LedgerSendParams::default()));
+        assert!(response["result"]["sent"].as_array().unwrap().is_empty());
+
+        // The agent lists its own cards: it sees the answers, then they are gone.
+        let response = request(
+            &mut app,
+            Method::LedgerList(LedgerListParams {
+                pane_id: Some(pane_id.clone()),
+                ack: true,
+            }),
+        );
+        let questions = &response["result"]["panes"][0]["items"][0]["questions"];
+        assert_eq!(questions.as_array().unwrap().len(), 2);
+        assert!(!questions[0]["sent_at_ms"].is_null());
+        let response = request(&mut app, Method::LedgerList(LedgerListParams::default()));
+        assert!(response["result"]["panes"][0]["items"][0]["questions"].is_null());
     }
 }

@@ -302,6 +302,19 @@ pub enum ResponseResult {
     LedgerList {
         panes: Vec<super::ledger::LedgerPaneInfo>,
     },
+    /// andreconde fork (sheprd): answering the cards' questions (SHE-100009).
+    LedgerDismissed {
+        dismissed: usize,
+    },
+    LedgerSent {
+        sent: Vec<super::ledger::LedgerSentPane>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<super::ledger::LedgerSendFailure>,
+    },
+    LedgerAnswers {
+        pane_id: String,
+        answers: Vec<super::ledger::LedgerAnswerInfo>,
+    },
     Ok {},
 }
 

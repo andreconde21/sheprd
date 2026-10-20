@@ -82,6 +82,11 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::LedgerDecide(_)
             | Method::LedgerComplete(_)
             | Method::LedgerRemove(_)
+            | Method::LedgerList(_)
+            | Method::LedgerStage(_)
+            | Method::LedgerDismiss(_)
+            | Method::LedgerSend(_)
+            | Method::LedgerAnswers(_)
     )
 }
 

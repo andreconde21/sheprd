@@ -65,7 +65,16 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
-        if !surface_active {
+        // andreconde fork (sheprd): answering card questions changes no surface, focus or
+        // geometry, so a client may do it on any machine it is connected to, not only the one
+        // it shows (the Cards view lists every machine's cards), SHE-100009.
+        let ledger_answer = matches!(
+            &request.method,
+            api::schema::Method::LedgerStage(_)
+                | api::schema::Method::LedgerDismiss(_)
+                | api::schema::Method::LedgerSend(_)
+        );
+        if !surface_active && !ledger_answer {
             let message = crate::server::client_commands::error_message(
                 boot_id,
                 request_id,
@@ -97,6 +106,24 @@ impl HeadlessServer {
             );
             self.send_to_client(client_id, message);
             return false;
+        }
+        if ledger_answer {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.shell_endpoint_command_in_flight = true;
+                client.shell_endpoint_command_surface_revision =
+                    Some(client.shell_projection_revision);
+                client.shell_deferred_navigation_request_id = None;
+                client.shell_deferred_navigation_response = None;
+            }
+            return self.handle_api_request_with_shutdown_check_inner(
+                api::ApiRequestMessage {
+                    request: *request,
+                    respond_to,
+                    response_write_complete: None,
+                },
+                false,
+                true,
+            );
         }
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.shell_endpoint_command_in_flight = true;

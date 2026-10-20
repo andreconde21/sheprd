@@ -866,3 +866,79 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     shutdown_test_runtimes(&mut source_server);
     shutdown_test_runtimes(&mut target_server);
 }
+
+/// andreconde fork (sheprd): a client may answer cards on a machine it is connected to without
+/// showing it (the Cards view lists every machine), SHE-100009. Other mutations stay refused.
+#[tokio::test]
+async fn ledger_answers_work_without_an_active_surface() {
+    let mut server = test_headless_server();
+    let _input_rx = install_focused_test_runtime(&mut server, b"");
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.session_snapshot().focused_pane_id.unwrap();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 53;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 9,
+            cell_height_px: 18,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: false,
+            writer,
+        })
+    );
+    let _ = client_shell_snapshot(&control_rx);
+    let asked = server.app.handle_api_request(api::schema::Request {
+        id: "ask".into(),
+        method: api::schema::Method::LedgerAsk(api::schema::LedgerAskParams {
+            pane_id: pane_id.clone(),
+            item_id: "SHE-12".into(),
+            text: "Provider?".into(),
+            options: vec!["Stripe".into(), "Multibanco".into()],
+            recommended: None,
+        }),
+    });
+    assert!(asked.contains("ledger_question_asked"), "{asked}");
+
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id,
+            request: Box::new(api::schema::Request {
+                id: "stage".into(),
+                method: api::schema::Method::LedgerStage(api::schema::LedgerStageParams {
+                    pane_id: pane_id.clone(),
+                    item_id: "SHE-12".into(),
+                    question_id: 1,
+                    answer: Some(api::schema::LedgerAnswer {
+                        option: Some(0),
+                        text: None,
+                    }),
+                }),
+            }),
+        })
+    );
+    assert_eq!(
+        server.foreground_client_id, None,
+        "answering does not take the surface"
+    );
+    assert!(server.clients[&client_id].shell_endpoint_command_in_flight);
+    let listed = server.app.handle_api_request(api::schema::Request {
+        id: "list".into(),
+        method: api::schema::Method::LedgerList(api::schema::LedgerListParams::default()),
+    });
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(
+        listed["result"]["panes"][0]["items"][0]["questions"][0]["answer"]["option"],
+        0
+    );
+}

@@ -83,6 +83,48 @@ pub struct LedgerQuestion {
     pub inferred: bool,
     #[serde(default)]
     pub asked_at_ms: u64,
+    /// The user's answer (SHE-100009): staged until `sent_at_ms` is set, then waiting for the
+    /// agent to acknowledge it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<LedgerAnswer>,
+    /// When the answer was typed into the agent's pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at_ms: Option<u64>,
+    /// The user chose not to answer. Hidden; kept so the hook does not ask it again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dismissed: bool,
+}
+
+/// An answer to a question: one of its options (0-based) or free text. A struct rather than an
+/// enum so later kinds stay optional fields that older readers skip.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LedgerAnswer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// A sent or dismissed answer as the agent reads it (`sheprd card answers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LedgerAnswerInfo {
+    pub item_id: String,
+    pub question_id: u32,
+    pub question: String,
+    /// The chosen option or the free text; absent for a dismissed question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dismissed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at_ms: Option<u64>,
+}
+
+/// One pane's staged answers, composed into the line typed into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LedgerSend {
+    pub(crate) text: String,
+    pub(crate) questions: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -126,6 +168,7 @@ pub(crate) enum LedgerError {
     InvalidId(String),
     Invalid(String),
     Limit(String),
+    NotFound(String),
 }
 
 impl LedgerError {
@@ -134,6 +177,7 @@ impl LedgerError {
             LedgerError::InvalidId(_) => "invalid_ledger_item_id",
             LedgerError::Invalid(_) => "invalid_ledger_request",
             LedgerError::Limit(_) => "ledger_limit",
+            LedgerError::NotFound(_) => "ledger_item_not_found",
         }
     }
 
@@ -141,14 +185,42 @@ impl LedgerError {
         match self {
             LedgerError::InvalidId(message)
             | LedgerError::Invalid(message)
-            | LedgerError::Limit(message) => message,
+            | LedgerError::Limit(message)
+            | LedgerError::NotFound(message) => message,
+        }
+    }
+}
+
+impl LedgerQuestion {
+    /// Still asks the user something: not answered and sent, not dismissed.
+    pub(crate) fn is_open(&self) -> bool {
+        !self.dismissed && self.sent_at_ms.is_none()
+    }
+
+    /// Answered but not sent yet.
+    pub(crate) fn is_staged(&self) -> bool {
+        self.is_open() && self.answer.is_some()
+    }
+
+    /// The answer as the agent reads it: the option's text, or the free text.
+    pub(crate) fn answer_text(&self) -> Option<String> {
+        let answer = self.answer.as_ref()?;
+        match (answer.option, answer.text.as_ref()) {
+            (Some(index), _) => self.options.get(index).cloned(),
+            (None, Some(text)) => Some(text.clone()),
+            (None, None) => None,
         }
     }
 }
 
 /// Whether the panel should put this item first: it has questions for the user.
 pub(crate) fn waiting_on_user(item: &LedgerItem) -> bool {
-    !item.questions.is_empty()
+    item.questions.iter().any(LedgerQuestion::is_open)
+}
+
+/// The questions the panel shows: dismissed ones are gone for the user.
+pub(crate) fn visible_questions(item: &LedgerItem) -> impl Iterator<Item = &LedgerQuestion> {
+    item.questions.iter().filter(|question| !question.dismissed)
 }
 
 pub(crate) fn validate_item_id(id: &str) -> Result<(), LedgerError> {
@@ -243,6 +315,16 @@ impl LedgerItem {
         self.inferred = false;
         self.questions.retain(|question| !question.inferred);
         true
+    }
+
+    /// The agent has seen its answers: sent questions go, and so do the explicit ones the user
+    /// dismissed. Dismissed inferred questions stay hidden until the hook stops asking them.
+    fn acknowledge(&mut self) -> bool {
+        let before = self.questions.len();
+        self.questions.retain(|question| {
+            question.sent_at_ms.is_none() && (question.inferred || !question.dismissed)
+        });
+        self.questions.len() != before
     }
 
     fn next_question_id(&mut self) -> u32 {
@@ -465,6 +547,7 @@ impl WorkLedger {
         let mut changed = created;
         if !update.inferred {
             changed |= item.make_explicit();
+            changed |= item.acknowledge();
         }
         if let Some(title) = title {
             changed |= item.title != title;
@@ -497,11 +580,21 @@ impl WorkLedger {
             let mut next = Vec::with_capacity(questions.len());
             for input in questions {
                 match previous.iter().find(|question| question.text == input.text) {
-                    Some(question) => next.push(LedgerQuestion {
-                        options: input.options,
-                        recommended: input.recommended,
-                        ..question.clone()
-                    }),
+                    Some(question) => {
+                        // A staged option means nothing against other options.
+                        let answer =
+                            if question.options == input.options || question.sent_at_ms.is_some() {
+                                question.answer.clone()
+                            } else {
+                                None
+                            };
+                        next.push(LedgerQuestion {
+                            options: input.options,
+                            recommended: input.recommended,
+                            answer,
+                            ..question.clone()
+                        })
+                    }
                     None => next.push(LedgerQuestion {
                         id: item.next_question_id(),
                         text: input.text,
@@ -509,6 +602,9 @@ impl WorkLedger {
                         recommended: input.recommended,
                         inferred: true,
                         asked_at_ms: now_ms,
+                        answer: None,
+                        sent_at_ms: None,
+                        dismissed: false,
                     }),
                 }
             }
@@ -571,6 +667,7 @@ impl WorkLedger {
         }
         let (item, _) = explicit(self.entry(id, false)?)?;
         item.make_explicit();
+        item.acknowledge();
         item.questions
             .retain(|question| question.text != input.text);
         let question_id = item.next_question_id();
@@ -581,6 +678,9 @@ impl WorkLedger {
             recommended: input.recommended,
             inferred: false,
             asked_at_ms: now_ms,
+            answer: None,
+            sent_at_ms: None,
+            dismissed: false,
         });
         item.touch(session, now_ms);
         Ok((question_id, true))
@@ -611,7 +711,7 @@ impl WorkLedger {
             return Err(LedgerError::Invalid("decision must not be empty".into()));
         }
         let (item, created) = explicit(self.entry(id, false)?)?;
-        let mut changed = created | item.make_explicit();
+        let mut changed = created | item.make_explicit() | item.acknowledge();
         if !item.decisions.iter().any(|decision| decision.text == text) {
             item.decisions.push(LedgerDecision {
                 text,
@@ -671,6 +771,183 @@ impl WorkLedger {
     pub(crate) fn remove(&mut self, id: &str) -> Result<bool, LedgerError> {
         validate_item_id(id)?;
         Ok(self.items.remove(id).is_some())
+    }
+
+    fn question_mut(
+        &mut self,
+        id: &str,
+        question_id: u32,
+    ) -> Result<&mut LedgerQuestion, LedgerError> {
+        validate_item_id(id)?;
+        self.items
+            .get_mut(id)
+            .ok_or_else(|| LedgerError::NotFound("card is not in the ledger".into()))?
+            .questions
+            .iter_mut()
+            .find(|question| question.id == question_id && !question.dismissed)
+            .ok_or_else(|| LedgerError::NotFound("question is not open on this card".into()))
+    }
+
+    /// Stages the user's answer to an open question (`None` unstages it). A sent answer is
+    /// final; the agent has it already.
+    pub(crate) fn stage(
+        &mut self,
+        id: &str,
+        question_id: u32,
+        answer: Option<LedgerAnswer>,
+    ) -> Result<bool, LedgerError> {
+        let before = self.clone();
+        let question = self.question_mut(id, question_id)?;
+        if question.sent_at_ms.is_some() {
+            return Err(LedgerError::Invalid("this answer was already sent".into()));
+        }
+        let answer = answer
+            .map(|answer| match (answer.option, answer.text) {
+                (Some(index), None) if index < question.options.len() => Ok(LedgerAnswer {
+                    option: Some(index),
+                    text: None,
+                }),
+                (Some(_), None) => Err(LedgerError::Invalid(
+                    "the answer must be one of the question's options".into(),
+                )),
+                (None, Some(text)) => {
+                    let text = bounded("answer", text, MAX_TEXT_CHARS)?;
+                    if text.is_empty() {
+                        return Err(LedgerError::Invalid("answer must not be empty".into()));
+                    }
+                    Ok(LedgerAnswer {
+                        option: None,
+                        text: Some(text),
+                    })
+                }
+                _ => Err(LedgerError::Invalid(
+                    "an answer is either an option or text".into(),
+                )),
+            })
+            .transpose()?;
+        if question.answer == answer {
+            return Ok(false);
+        }
+        question.answer = answer;
+        if self.serialized_len() > MAX_PANE_BYTES {
+            *self = before;
+            return Err(LedgerError::Limit(format!(
+                "a pane's cards may take at most {} KiB; shorten the answer",
+                MAX_PANE_BYTES / 1024
+            )));
+        }
+        Ok(true)
+    }
+
+    /// Dismisses one question, or the whole card when `question_id` is `None`.
+    pub(crate) fn dismiss(
+        &mut self,
+        id: &str,
+        question_id: Option<u32>,
+    ) -> Result<bool, LedgerError> {
+        let Some(question_id) = question_id else {
+            return self.remove(id);
+        };
+        let question = self.question_mut(id, question_id)?;
+        question.dismissed = true;
+        if question.sent_at_ms.is_none() {
+            question.answer = None;
+        }
+        Ok(true)
+    }
+
+    /// Dismisses every done card; returns their ids.
+    pub(crate) fn dismiss_done(&mut self) -> Vec<String> {
+        let done = self
+            .items
+            .values()
+            .filter(|item| item.done)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        for id in &done {
+            self.items.remove(id);
+        }
+        done
+    }
+
+    /// The one line that answers every staged question, card by card:
+    /// `SHE-12 Q1 → Stripe · Q2 → "free text" · CAL-40 Q1 → defer`.
+    pub(crate) fn compose_send(&self) -> Option<LedgerSend> {
+        let mut parts = Vec::new();
+        let mut questions = Vec::new();
+        for item in self.items.values() {
+            let mut first = true;
+            for question in item
+                .questions
+                .iter()
+                .filter(|question| question.is_staged())
+            {
+                let Some(answer) = question.answer.as_ref() else {
+                    continue;
+                };
+                let text = match (answer.option, answer.text.as_ref()) {
+                    (Some(index), _) => match question.options.get(index) {
+                        Some(option) => option.clone(),
+                        None => continue,
+                    },
+                    (None, Some(text)) => format!("\"{text}\""),
+                    (None, None) => continue,
+                };
+                let label = if first {
+                    format!("{} Q{}", item.id, question.id)
+                } else {
+                    format!("Q{}", question.id)
+                };
+                first = false;
+                parts.push(format!("{label} → {text}"));
+                questions.push((item.id.clone(), question.id));
+            }
+        }
+        (!parts.is_empty()).then(|| LedgerSend {
+            text: parts.join(" · "),
+            questions,
+        })
+    }
+
+    /// Marks composed answers as typed into the pane.
+    pub(crate) fn mark_sent(&mut self, questions: &[(String, u32)], now_ms: u64) {
+        for (id, question_id) in questions {
+            if let Some(question) = self
+                .items
+                .get_mut(id)
+                .and_then(|item| item.questions.iter_mut().find(|q| q.id == *question_id))
+            {
+                question.sent_at_ms = Some(now_ms);
+            }
+        }
+    }
+
+    /// Answers the agent has to read: sent and dismissed ones, card by card.
+    pub(crate) fn answers(&self) -> Vec<LedgerAnswerInfo> {
+        self.items
+            .values()
+            .flat_map(|item| {
+                item.questions
+                    .iter()
+                    .filter(|question| question.sent_at_ms.is_some() || question.dismissed)
+                    .map(|question| LedgerAnswerInfo {
+                        item_id: item.id.clone(),
+                        question_id: question.id,
+                        question: question.text.clone(),
+                        answer: question.sent_at_ms.and_then(|_| question.answer_text()),
+                        dismissed: question.dismissed,
+                        sent_at_ms: question.sent_at_ms,
+                    })
+            })
+            .collect()
+    }
+
+    /// The agent read its answers: see `LedgerItem::acknowledge`. Returns the cards that changed.
+    pub(crate) fn acknowledge(&mut self) -> Vec<String> {
+        self.items
+            .values_mut()
+            .filter_map(|item| item.acknowledge().then(|| item.id.clone()))
+            .collect()
     }
 }
 
@@ -1100,7 +1377,7 @@ mod tests {
     fn serde_tolerates_missing_and_future_fields() {
         let ledger: WorkLedger = serde_json::from_value(serde_json::json!({
             "items": {"SHE-1": {"id": "SHE-1", "questions": [{"id": 4, "text": "x?",
-                "answer": "future field"}], "future": true}}
+                "reaction": "future field"}], "future": true}}
         }))
         .unwrap();
         let item = ledger.get("SHE-1").unwrap();
@@ -1325,5 +1602,232 @@ mod tests {
         assert!(serde_json::to_vec(&panes).unwrap().len() <= MAX_MESSAGE_BYTES);
         assert!(panes.len() < 20, "some panes had to go");
         assert!(panes.contains_key("w1:p9") && panes.contains_key("w1:p10"));
+    }
+
+    fn option(index: usize) -> Option<LedgerAnswer> {
+        Some(LedgerAnswer {
+            option: Some(index),
+            text: None,
+        })
+    }
+
+    fn free(text: &str) -> Option<LedgerAnswer> {
+        Some(LedgerAnswer {
+            option: None,
+            text: Some(text.into()),
+        })
+    }
+
+    /// SHE-12 asks Q1 (Stripe or Multibanco) and Q2 (free); CAL-40 asks Q1.
+    fn asked() -> WorkLedger {
+        let mut ledger = WorkLedger::default();
+        ledger
+            .ask(
+                "SHE-12",
+                ask("Provider?", &["Stripe", "Multibanco"], Some(0)),
+                None,
+                1,
+            )
+            .unwrap();
+        ledger
+            .ask("SHE-12", ask("Webhook path?", &[], None), None, 2)
+            .unwrap();
+        ledger
+            .ask("CAL-40", ask("Ship now?", &["now", "defer"], None), None, 3)
+            .unwrap();
+        ledger
+    }
+
+    #[test]
+    fn staging_validates_and_unstages() {
+        let mut ledger = asked();
+        assert_eq!(ledger.stage("SHE-12", 1, option(1)), Ok(true));
+        assert_eq!(
+            ledger.stage("SHE-12", 1, option(1)),
+            Ok(false),
+            "same answer"
+        );
+        assert!(ledger.get("SHE-12").unwrap().questions[0].is_staged());
+        assert!(
+            waiting_on_user(ledger.get("SHE-12").unwrap()),
+            "staged is still open"
+        );
+        for bad in [
+            option(2),
+            free(""),
+            free("two\nlines"),
+            Some(LedgerAnswer::default()),
+        ] {
+            assert!(
+                matches!(
+                    ledger.stage("SHE-12", 1, bad.clone()),
+                    Err(LedgerError::Invalid(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        let both = Some(LedgerAnswer {
+            option: Some(0),
+            text: Some("x".into()),
+        });
+        assert!(ledger.stage("SHE-12", 1, both).is_err());
+        assert!(matches!(
+            ledger.stage("SHE-12", 9, option(0)),
+            Err(LedgerError::NotFound(_))
+        ));
+        assert!(matches!(
+            ledger.stage("NOPE-1", 1, option(0)),
+            Err(LedgerError::NotFound(_))
+        ));
+        assert_eq!(
+            ledger.get("SHE-12").unwrap().questions[0].answer,
+            option(1),
+            "a refused stage leaves the earlier one"
+        );
+        assert_eq!(ledger.stage("SHE-12", 1, None), Ok(true));
+        assert!(!ledger.get("SHE-12").unwrap().questions[0].is_staged());
+    }
+
+    #[test]
+    fn send_composes_one_line_marks_sent_and_ack_clears() {
+        let mut ledger = asked();
+        assert_eq!(ledger.compose_send(), None, "nothing staged");
+        ledger.stage("SHE-12", 1, option(0)).unwrap();
+        ledger
+            .stage("SHE-12", 2, free("use /hooks/stripe"))
+            .unwrap();
+        ledger.stage("CAL-40", 1, option(1)).unwrap();
+        let send = ledger.compose_send().unwrap();
+        assert_eq!(
+            send.text,
+            "CAL-40 Q1 → defer · SHE-12 Q1 → Stripe · Q2 → \"use /hooks/stripe\""
+        );
+        assert_eq!(send.questions.len(), 3);
+        ledger.mark_sent(&send.questions, 50);
+        assert_eq!(
+            ledger.compose_send(),
+            None,
+            "sent answers are not sent again"
+        );
+        assert!(!waiting_on_user(ledger.get("SHE-12").unwrap()));
+        assert!(matches!(
+            ledger.stage("SHE-12", 1, option(1)),
+            Err(LedgerError::Invalid(_))
+        ));
+        let answers = ledger.answers();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[1].answer.as_deref(), Some("Stripe"));
+        assert_eq!(answers[2].answer.as_deref(), Some("use /hooks/stripe"));
+        assert_eq!(answers[2].sent_at_ms, Some(50));
+
+        // The agent's next explicit write on a card acknowledges that card only.
+        ledger
+            .decide("SHE-12", "Stripe with a webhook".into(), None, 60)
+            .unwrap();
+        assert!(ledger.get("SHE-12").unwrap().questions.is_empty());
+        assert_eq!(ledger.get("CAL-40").unwrap().questions.len(), 1);
+        assert_eq!(ledger.acknowledge(), vec!["CAL-40".to_owned()]);
+        assert!(ledger.answers().is_empty());
+        assert!(ledger.acknowledge().is_empty());
+    }
+
+    #[test]
+    fn inferred_writes_do_not_acknowledge_and_keep_dismissals() {
+        let mut ledger = WorkLedger::default();
+        ledger
+            .update("SHE-1", inferred("running", Some(&["Deploy?"])), None, 1)
+            .unwrap();
+        ledger.stage("SHE-1", 1, free("yes")).unwrap();
+        let send = ledger.compose_send().unwrap();
+        ledger.mark_sent(&send.questions, 2);
+        ledger
+            .update(
+                "SHE-1",
+                inferred("running", Some(&["Deploy?", "Tag?"])),
+                None,
+                3,
+            )
+            .unwrap();
+        let questions = &ledger.get("SHE-1").unwrap().questions;
+        assert_eq!(
+            questions[0].sent_at_ms,
+            Some(2),
+            "the hook does not acknowledge"
+        );
+        assert_eq!(ledger.dismiss("SHE-1", Some(2)), Ok(true));
+        assert_eq!(ledger.acknowledge(), vec!["SHE-1".to_owned()]);
+        // The hook asks the same again: the dismissed question stays dismissed.
+        ledger
+            .update("SHE-1", inferred("running", Some(&["Tag?"])), None, 4)
+            .unwrap();
+        let item = ledger.get("SHE-1").unwrap();
+        assert_eq!(item.questions.len(), 1);
+        assert!(item.questions[0].dismissed);
+        assert!(!waiting_on_user(item));
+        assert_eq!(visible_questions(item).count(), 0);
+    }
+
+    #[test]
+    fn a_staged_option_is_dropped_when_the_hook_changes_the_options() {
+        let mut ledger = WorkLedger::default();
+        let with = |options: &[&str]| LedgerUpdate {
+            inferred: true,
+            inferred_questions: Some(vec![ask("Which?", options, None)]),
+            ..LedgerUpdate::default()
+        };
+        ledger.update("SHE-1", with(&["a", "b"]), None, 1).unwrap();
+        ledger.stage("SHE-1", 1, option(1)).unwrap();
+        ledger.update("SHE-1", with(&["a", "b"]), None, 2).unwrap();
+        assert_eq!(ledger.get("SHE-1").unwrap().questions[0].answer, option(1));
+        ledger.update("SHE-1", with(&["c", "d"]), None, 3).unwrap();
+        assert_eq!(ledger.get("SHE-1").unwrap().questions[0].answer, None);
+    }
+
+    #[test]
+    fn dismissing_questions_cards_and_done_cards() {
+        let mut ledger = asked();
+        ledger.stage("SHE-12", 1, option(0)).unwrap();
+        assert_eq!(ledger.dismiss("SHE-12", Some(1)), Ok(true));
+        assert!(matches!(
+            ledger.dismiss("SHE-12", Some(1)),
+            Err(LedgerError::NotFound(_))
+        ));
+        let item = ledger.get("SHE-12").unwrap();
+        assert_eq!(
+            item.questions[0].answer, None,
+            "a dismissed answer is not sent"
+        );
+        assert_eq!(visible_questions(item).count(), 1);
+        assert_eq!(ledger.compose_send(), None);
+        let answers = ledger.answers();
+        assert_eq!((answers.len(), answers[0].dismissed), (1, true));
+        // An explicit dismissed question goes once the agent has read it.
+        ledger.acknowledge();
+        assert_eq!(ledger.get("SHE-12").unwrap().questions.len(), 1);
+
+        ledger.complete("SHE-7", None, None, 5).unwrap();
+        ledger.complete("SHE-8", None, None, 6).unwrap();
+        let mut done = ledger.dismiss_done();
+        done.sort();
+        assert_eq!(done, vec!["SHE-7".to_owned(), "SHE-8".to_owned()]);
+        assert_eq!(ledger.dismiss("CAL-40", None), Ok(true));
+        assert_eq!(ledger.len(), 1);
+    }
+
+    #[test]
+    fn old_snapshots_without_answers_still_load() {
+        let json = r#"{"items":{"SHE-1":{"id":"SHE-1","questions":[{"id":1,"text":"q?"}]}}}"#;
+        let ledger: WorkLedger = serde_json::from_str(json).unwrap();
+        let question = &ledger.get("SHE-1").unwrap().questions[0];
+        assert_eq!(
+            (
+                question.answer.as_ref(),
+                question.sent_at_ms,
+                question.dismissed
+            ),
+            (None, None, false)
+        );
+        // And an unanswered question serializes as before.
+        assert!(!serde_json::to_string(&ledger).unwrap().contains("answer"));
     }
 }
