@@ -10,6 +10,8 @@ pub(super) fn dispatch_client_shell_actions(
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
+    // andreconde fork (sheprd): machines other than the active one with card answers queued.
+    let mut ledger_lanes: Vec<endpoint::ClientEndpointId> = Vec::new();
     for action in actions {
         match action {
             shell::ClientShellAction::Endpoint {
@@ -29,6 +31,22 @@ pub(super) fn dispatch_client_shell_actions(
                                 )))
                 }) {
                     endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                } else if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
+                    // Card answers change no surface there, so the Cards view sends them on that
+                    // machine's own lane without making it active (SHE-100009).
+                    endpoints.active_id() != &endpoint_id
+                        && matches!(
+                            request.method,
+                            crate::api::schema::Method::LedgerStage(_)
+                                | crate::api::schema::Method::LedgerDismiss(_)
+                                | crate::api::schema::Method::LedgerSend(_)
+                        )
+                }) {
+                    let generation = connection.generation;
+                    if !ledger_lanes.contains(&endpoint_id) {
+                        ledger_lanes.push(endpoint_id.clone());
+                    }
+                    endpoint_commands.enqueue(endpoint_id, generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
@@ -61,6 +79,14 @@ pub(super) fn dispatch_client_shell_actions(
                     ?action,
                     "client shell action awaits its presentation family"
                 );
+            }
+        }
+    }
+    for endpoint_id in ledger_lanes {
+        let cancelled = endpoint_commands.send_next(&endpoint_id, endpoints);
+        if let Some(shell) = shell.as_deref_mut() {
+            for request_id in cancelled {
+                repaint |= shell.cancel_endpoint_request(&request_id);
             }
         }
     }

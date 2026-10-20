@@ -424,10 +424,68 @@ pub(super) fn render_card(
     vy
 }
 
+/// A ledger request in flight on one machine's lane, so its outcome comes back to the panel and
+/// the Cards view whichever machine is active.
+#[derive(Clone, Debug)]
+pub(super) struct PendingLedgerRequest {
+    endpoint_id: ClientEndpointId,
+    boot_id: String,
+    /// A send, and the pane it was for (`None`: every pane of that machine).
+    send: Option<Option<String>>,
+}
+
+/// Why a pane's staged answers were not sent the last time, by machine and pane: the panel and
+/// the Cards view show it under the send button until a send goes through.
+pub(super) type LedgerRefusals = HashMap<(ClientEndpointId, String), String>;
+
+const LEDGER_REQUEST_PREFIX: &str = "sheprd-ledger:";
+
+impl PendingLedgerRequest {
+    pub(super) fn lane(&self) -> (ClientEndpointId, String) {
+        (self.endpoint_id.clone(), self.boot_id.clone())
+    }
+}
+
+/// A refusal as the panel marks it, in a few words.
+fn refusal_reason(code: &str, message: &str) -> String {
+    match code {
+        "agent_blocked" => "waiting on a dialog".into(),
+        "agent_not_ready" => "no agent running".into(),
+        "endpoint_busy" => "machine busy".into(),
+        "endpoint_timeout" | "endpoint_cancelled" | "server_unavailable" => {
+            "no reply from the machine".into()
+        }
+        _ => message.to_owned(),
+    }
+}
+
+/// A refusal as a notice: who refused (`machine/agent`), why, and what happens to the answers.
+fn refusal_notice(who: &str, code: &str, message: &str, send: bool) -> String {
+    let next = if send {
+        "answers kept, send again"
+    } else {
+        "try again"
+    };
+    match code {
+        "agent_blocked" => {
+            format!("{who} is waiting on a dialog: answers kept, send again when it's free")
+        }
+        "agent_not_ready" => {
+            format!("{who} has no agent running: answers kept, send again once it runs")
+        }
+        "endpoint_busy" => format!("{who} is busy with another action: {next}"),
+        "endpoint_timeout" | "endpoint_cancelled" | "server_unavailable" => {
+            format!("{who} did not answer: {next}")
+        }
+        _ if send => format!("{who}: {message}; answers kept"),
+        _ => format!("{who}: {message}"),
+    }
+}
+
 impl ClientShellState {
-    /// A ledger request to one machine: through the tracked lane on the active one, so a refusal
-    /// (a busy dialog, an older server) shows a notice; fire-and-forget on the others, whose
-    /// next push shows the outcome either way.
+    /// A ledger request to one machine, on that machine's own lane: the Cards view answers on
+    /// machines other than the active one without switching to them. The outcome comes back
+    /// through [`Self::handle_ledger_result`].
     fn ledger_request(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -439,11 +497,132 @@ impl ClientShellState {
             outcome.repaint |= self.receive_endpoint_unavailable(format!("{label} is not ready"));
             return;
         }
-        if *endpoint_id == self.active_endpoint_id {
-            self.push_endpoint_method(method, outcome);
-        } else if let Some(action) = self.endpoint_request(endpoint_id, method) {
-            outcome.actions.push(action);
+        let Some(endpoint) = self.endpoint_by_id(endpoint_id) else {
+            return;
+        };
+        if !answers_supported(endpoint) {
+            let label = endpoint.label.clone();
+            outcome.repaint |= self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Unsupported,
+                "ledger_answers",
+                "Action unavailable",
+                format!("{label} does not take answers yet. Update and restart sheprd there."),
+            );
+            return;
         }
+        let Some(boot_id) = endpoint
+            .snapshot
+            .as_deref()
+            .map(|snapshot| snapshot.boot_id.clone())
+        else {
+            return;
+        };
+        let send = match &method {
+            crate::api::schema::Method::LedgerSend(params) => Some(params.pane_id.clone()),
+            _ => None,
+        };
+        let id = format!("{LEDGER_REQUEST_PREFIX}{}", self.next_request_id);
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending_ledger_requests.insert(
+            id.clone(),
+            PendingLedgerRequest {
+                endpoint_id: endpoint_id.clone(),
+                boot_id: boot_id.clone(),
+                send,
+            },
+        );
+        outcome.actions.push(ClientShellAction::Endpoint {
+            endpoint_id: endpoint_id.clone(),
+            boot_id,
+            request: Box::new(crate::api::schema::Request { id, method }),
+        });
+    }
+
+    pub(crate) fn is_ledger_request(&self, request_id: &str) -> bool {
+        self.pending_ledger_requests.contains_key(request_id)
+    }
+
+    /// A ledger request finished on `endpoint_id`: refusals become a notice naming the machine
+    /// and agent, and a refused send marks that pane's staged answers. True when it repaints.
+    pub(crate) fn handle_ledger_result(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        boot_id: &str,
+        request_id: &str,
+        result: Result<crate::api::schema::ResponseResult, ClientShellEndpointError>,
+    ) -> bool {
+        let Some(pending) = self.pending_ledger_requests.remove(request_id) else {
+            return false;
+        };
+        if pending.endpoint_id != *endpoint_id || pending.boot_id != boot_id {
+            return false;
+        }
+        match (pending.send, result) {
+            (Some(_), Ok(crate::api::schema::ResponseResult::LedgerSent { sent, failed })) => {
+                for pane in sent {
+                    self.ledger_refusals
+                        .remove(&(endpoint_id.clone(), pane.pane_id));
+                }
+                for failure in failed {
+                    self.refuse_ledger(
+                        endpoint_id,
+                        Some(&failure.pane_id),
+                        &failure.code,
+                        &failure.message,
+                        true,
+                    );
+                }
+            }
+            (Some(pane_id), Err(error)) => {
+                let code = error.code.as_deref().unwrap_or("invalid_response");
+                self.refuse_ledger(endpoint_id, pane_id.as_deref(), code, &error.message, true);
+            }
+            (None, Err(error)) => {
+                let code = error.code.as_deref().unwrap_or("invalid_response");
+                self.refuse_ledger(endpoint_id, None, code, &error.message, false);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn refuse_ledger(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        pane_id: Option<&str>,
+        code: &str,
+        message: &str,
+        send: bool,
+    ) {
+        let endpoint = self.endpoint_by_id(endpoint_id);
+        let machine = endpoint.map_or("machine", |endpoint| endpoint.label.as_str());
+        let who = match (endpoint, pane_id) {
+            (Some(endpoint), Some(pane_id)) => format!(
+                "{machine}/{}",
+                super::cards_view::agent_label(endpoint, pane_id)
+            ),
+            _ => machine.to_owned(),
+        };
+        let body = refusal_notice(&who, code, message, send);
+        if send {
+            if let Some(pane_id) = pane_id {
+                self.ledger_refusals.insert(
+                    (endpoint_id.clone(), pane_id.to_owned()),
+                    refusal_reason(code, message),
+                );
+            }
+        }
+        let title = if send {
+            "Answers not sent"
+        } else {
+            "Card action refused"
+        };
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Rejected,
+            format!("ledger:{}:{code}", endpoint_id.storage_key()),
+            title,
+            body,
+        );
     }
 
     pub(super) fn run_ledger_action(

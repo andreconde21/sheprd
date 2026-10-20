@@ -1039,6 +1039,11 @@ pub(crate) struct ClientShellState {
     /// andreconde fork (sheprd): expanded card rows in the work panel, by machine, pane and
     /// card id (SHE-100008). Presentation only: never sent to the server or saved.
     pub(super) expanded_ledger_items: HashSet<(ClientEndpointId, String, String)>,
+    /// andreconde fork (sheprd): card answer requests in flight, on any machine (SHE-100009).
+    pub(super) pending_ledger_requests:
+        HashMap<String, super::ledger_answers::PendingLedgerRequest>,
+    /// andreconde fork (sheprd): why a pane's answers were not sent the last time.
+    pub(super) ledger_refusals: super::ledger_answers::LedgerRefusals,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
@@ -1217,6 +1222,8 @@ impl ClientShellState {
             sidebar_hidden: preferences.sidebar_hidden,
             work_panel: preferences.work_panel,
             expanded_ledger_items: HashSet::new(),
+            pending_ledger_requests: HashMap::new(),
+            ledger_refusals: HashMap::new(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,

@@ -214,6 +214,7 @@ pub(super) fn render(
     endpoints: &[ClientShellEndpoint],
     active: &ClientEndpointId,
     expanded: &HashSet<(ClientEndpointId, String, String)>,
+    refusals: &super::ledger_answers::LedgerRefusals,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
@@ -477,6 +478,21 @@ pub(super) fn render(
                 }
             }
             y += 1;
+            // The last send was refused: say why until one goes through.
+            if let Some(reason) = refusals
+                .get(&(active.clone(), agent.pane_id.clone()))
+                .filter(|_| answerable && ledger.staged > 0 && y < area.bottom())
+            {
+                put_text(
+                    buffer,
+                    x + 1,
+                    y,
+                    width - 1,
+                    &format!("! not sent: {reason}"),
+                    base.fg(palette.red),
+                );
+                y += 1;
+            }
         }
         let target = super::ledger_answers::QuestionTarget {
             endpoint_id: active,
@@ -1220,6 +1236,7 @@ mod tests {
             std::slice::from_ref(endpoint),
             &ClientEndpointId::Local,
             expanded,
+            &HashMap::new(),
             &config,
             &mut hits,
         );

@@ -154,7 +154,7 @@ pub(super) fn panes_in_view<'a>(
     groups
 }
 
-fn agent_label(endpoint: &ClientShellEndpoint, pane_id: &str) -> String {
+pub(super) fn agent_label(endpoint: &ClientShellEndpoint, pane_id: &str) -> String {
     endpoint
         .snapshot
         .as_deref()
@@ -181,6 +181,7 @@ pub(super) fn render(
     endpoints: &[ClientShellEndpoint],
     active: &ClientEndpointId,
     expanded: &HashSet<(ClientEndpointId, String, String)>,
+    refusals: &super::ledger_answers::LedgerRefusals,
     palette: &Palette,
 ) -> Option<CardsRender> {
     let screen = buffer.area;
@@ -451,6 +452,19 @@ pub(super) fn render(
                     }
                 }
                 vy = vy.saturating_add(1);
+                if let Some(reason) = refusals
+                    .get(&(endpoint_id.clone(), pane.pane_id.to_owned()))
+                    .filter(|_| pane.answerable && pane.ledger.staged > 0)
+                {
+                    canvas.put(
+                        body.x + 3,
+                        vy,
+                        body.width.saturating_sub(3),
+                        &format!("! not sent: {reason}"),
+                        base.fg(palette.red),
+                    );
+                    vy = vy.saturating_add(1);
+                }
                 let target = QuestionTarget {
                     endpoint_id,
                     pane_id: pane.pane_id,

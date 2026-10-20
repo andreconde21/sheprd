@@ -152,5 +152,50 @@ class CardLedgerTests(unittest.TestCase):
         self.assertEqual(hook.load_ledger_state("s1")["sent"], tasks)
 
 
+
+class SummaryQuestionTests(unittest.TestCase):
+    """Questions from the summarizer and the pane-text fallback (SHE-100009 review): no
+    placeholders, no shell prompts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = mock.patch.object(hook, "CACHE_DIR", self.tmp.name)
+        self.cache.start()
+        self.report = mock.patch.object(hook, "report")
+        self.report.start()
+        self.ledger = mock.patch.object(hook, "send_ledger")
+        self.sent = self.ledger.start()
+
+    def tearDown(self):
+        self.ledger.stop()
+        self.report.stop()
+        self.cache.stop()
+        self.tmp.cleanup()
+
+    def asked(self, command, text):
+        with mock.patch.object(hook, "summary_command", return_value=command):
+            hook.summarize("s1", text, "w1:p1", len(text), from_pane=True)
+        return self.sent.call_args.args[3] if self.sent.called else []
+
+    def test_the_prompt_has_no_example_values_to_echo(self):
+        self.assertNotIn('"..."', hook.SUMMARY_PROMPT)
+        self.assertNotIn("{", hook.SUMMARY_PROMPT)
+
+    def test_placeholder_questions_from_the_summarizer_are_dropped(self):
+        reply = json.dumps({"title": "t", "questions": ["...", "?", "…?", "Deploy now?"]})
+        script = Path(self.tmp.name) / "reply.json"
+        script.write_text(reply)
+        self.assertEqual(self.asked(f"cat {script}", "some pane text"), ["Deploy now?"])
+
+    def test_the_pane_fallback_keeps_only_prose_questions(self):
+        for line in ("$ ls foo?", "> really?", "# why?", "% which?", "ok?", "a b ?"):
+            self.assertFalse(hook.prose_question(line), line)
+        self.assertTrue(hook.prose_question("Should I deploy it now?"))
+        text = "building\nShould I deploy it now?\n$ git status?\n"
+        self.assertEqual(self.asked(None, text), ["Should I deploy it now?"])
+        self.sent.reset_mock()
+        self.assertEqual(self.asked(None, "build\nrun\n$ git status?\n"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

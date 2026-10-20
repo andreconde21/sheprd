@@ -213,6 +213,50 @@ impl LedgerQuestion {
     }
 }
 
+/// A sent line's question hints: at most this many characters, `…` included.
+pub(crate) const SEND_HINT_CHARS: usize = 40;
+const SEND_SHORT_HINT_CHARS: usize = 16;
+/// Past this many characters a sent line shortens its question hints.
+pub(crate) const SEND_LINE_CHARS: usize = 400;
+
+/// A free-text answer in a sent line: quoted, with `"` and `\` escaped, so a ` · ` or ` → `
+/// inside it cannot be read as the next answer.
+fn quote_answer(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for ch in text.chars() {
+        if matches!(ch, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// A question as a sent line's hint: one line, without the separators the line itself uses.
+fn send_hint(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('→', "->")
+        .replace('·', "-")
+        .replace(['(', ')'], "")
+}
+
+fn shorten(text: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(limit - 1).collect();
+    short.truncate(short.trim_end().len());
+    short.push('…');
+    short
+}
+
 /// Whether the panel should put this item first: it has questions for the user.
 pub(crate) fn waiting_on_user(item: &LedgerItem) -> bool {
     item.questions.iter().any(LedgerQuestion::is_open)
@@ -871,8 +915,18 @@ impl WorkLedger {
     }
 
     /// The one line that answers every staged question, card by card:
-    /// `SHE-12 Q1 → Stripe · Q2 → "free text" · CAL-40 Q1 → defer`.
+    /// `SHE-12 Q1 (Which provider?) → Stripe · Q2 (Webhook path?) → "free \"text\""`.
+    /// Each answer carries a short form of its question, so the agent can tell what it answers
+    /// (it may never have asked an inferred one). Free text is quoted with `"` and `\` escaped.
+    /// Past [`SEND_LINE_CHARS`] the explicit questions' hints shrink and then go, then the
+    /// inferred ones shrink; the answers themselves are never cut.
     pub(crate) fn compose_send(&self) -> Option<LedgerSend> {
+        struct Part {
+            label: String,
+            hint: String,
+            inferred: bool,
+            answer: String,
+        }
         let mut parts = Vec::new();
         let mut questions = Vec::new();
         for item in self.items.values() {
@@ -885,12 +939,12 @@ impl WorkLedger {
                 let Some(answer) = question.answer.as_ref() else {
                     continue;
                 };
-                let text = match (answer.option, answer.text.as_ref()) {
+                let answer = match (answer.option, answer.text.as_ref()) {
                     (Some(index), _) => match question.options.get(index) {
                         Some(option) => option.clone(),
                         None => continue,
                     },
-                    (None, Some(text)) => format!("\"{text}\""),
+                    (None, Some(text)) => quote_answer(text),
                     (None, None) => continue,
                 };
                 let label = if first {
@@ -899,14 +953,47 @@ impl WorkLedger {
                     format!("Q{}", question.id)
                 };
                 first = false;
-                parts.push(format!("{label} → {text}"));
+                parts.push(Part {
+                    label,
+                    hint: send_hint(&question.text),
+                    inferred: question.inferred || item.inferred,
+                    answer,
+                });
                 questions.push((item.id.clone(), question.id));
             }
         }
-        (!parts.is_empty()).then(|| LedgerSend {
-            text: parts.join(" · "),
-            questions,
-        })
+        if parts.is_empty() {
+            return None;
+        }
+        let line = |explicit: usize, inferred: usize| {
+            parts
+                .iter()
+                .map(|part| {
+                    let limit = if part.inferred { inferred } else { explicit };
+                    let hint = shorten(&part.hint, limit);
+                    if hint.is_empty() {
+                        format!("{} → {}", part.label, part.answer)
+                    } else {
+                        format!("{} ({hint}) → {}", part.label, part.answer)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let steps = [
+            (SEND_HINT_CHARS, SEND_HINT_CHARS),
+            (SEND_SHORT_HINT_CHARS, SEND_HINT_CHARS),
+            (0, SEND_HINT_CHARS),
+            (0, SEND_SHORT_HINT_CHARS),
+        ];
+        let mut text = String::new();
+        for (explicit, inferred) in steps {
+            text = line(explicit, inferred);
+            if text.chars().count() <= SEND_LINE_CHARS {
+                break;
+            }
+        }
+        Some(LedgerSend { text, questions })
     }
 
     /// Marks composed answers as typed into the pane.
@@ -1700,7 +1787,8 @@ mod tests {
         let send = ledger.compose_send().unwrap();
         assert_eq!(
             send.text,
-            "CAL-40 Q1 → defer · SHE-12 Q1 → Stripe · Q2 → \"use /hooks/stripe\""
+            "CAL-40 Q1 (Ship now?) → defer · SHE-12 Q1 (Provider?) → Stripe \
+             · Q2 (Webhook path?) → \"use /hooks/stripe\""
         );
         assert_eq!(send.questions.len(), 3);
         ledger.mark_sent(&send.questions, 50);
@@ -1729,6 +1817,48 @@ mod tests {
         assert_eq!(ledger.acknowledge(), vec!["CAL-40".to_owned()]);
         assert!(ledger.answers().is_empty());
         assert!(ledger.acknowledge().is_empty());
+    }
+
+    #[test]
+    fn sent_lines_escape_free_text_and_shorten_hints_when_long() {
+        let mut ledger = asked();
+        ledger
+            .stage("SHE-12", 2, free(r#"say "hi" · C:\tmp → x"#))
+            .unwrap();
+        assert_eq!(
+            ledger.compose_send().unwrap().text,
+            r#"SHE-12 Q2 (Webhook path?) → "say \"hi\" · C:\\tmp → x""#
+        );
+
+        let mut ledger = WorkLedger::default();
+        let long = "Should the nightly export also include the archived (old) projects?";
+        ledger.ask("SHE-1", ask(long, &[], None), None, 1).unwrap();
+        ledger
+            .update("SHE-2", inferred("running", Some(&[long])), None, 2)
+            .unwrap();
+        ledger.stage("SHE-1", 1, free("yes")).unwrap();
+        ledger.stage("SHE-2", 1, free("no")).unwrap();
+        let hint = "Should the nightly export also include…";
+        assert!(hint.chars().count() <= SEND_HINT_CHARS);
+        assert_eq!(
+            ledger.compose_send().unwrap().text,
+            format!("SHE-1 Q1 ({hint}) → \"yes\" · SHE-2 Q1 ({hint}) → \"no\"")
+        );
+
+        // A long line drops the explicit question's hint before the inferred one shrinks.
+        let answer = "x".repeat(SEND_LINE_CHARS - 80);
+        ledger.stage("SHE-1", 1, free(&answer)).unwrap();
+        let text = ledger.compose_send().unwrap().text;
+        assert!(text.starts_with("SHE-1 Q1 → \""), "{text}");
+        assert!(text.contains(&format!("SHE-2 Q1 ({hint})")), "{text}");
+        let answer = "x".repeat(MAX_TEXT_CHARS);
+        ledger.stage("SHE-1", 1, free(&answer)).unwrap();
+        let text = ledger.compose_send().unwrap().text;
+        assert!(
+            text.contains("SHE-2 Q1 (Should the nigh…) → \"no\""),
+            "{text}"
+        );
+        assert!(text.contains(&answer), "answers are never cut");
     }
 
     #[test]

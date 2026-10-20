@@ -250,6 +250,8 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) workspace_drop_indicator_row: Option<u16>,
     /// andreconde fork (sheprd): expanded card rows in the work panel (SHE-100008).
     pub(super) expanded_ledger_items: &'a HashSet<(ClientEndpointId, String, String)>,
+    /// andreconde fork (sheprd): why a pane's answers were not sent (SHE-100009).
+    pub(super) ledger_refusals: &'a super::ledger_answers::LedgerRefusals,
 }
 
 pub(super) fn render_shell(
@@ -341,6 +343,7 @@ pub(super) fn render_shell(
             state.endpoints,
             state.active_endpoint_id,
             state.expanded_ledger_items,
+            state.ledger_refusals,
             config,
             &mut hits,
         );

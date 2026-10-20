@@ -941,6 +941,93 @@ mod tests {
         assert!(question["sent_at_ms"].is_null());
     }
 
+    #[test]
+    fn only_acknowledging_reads_count_as_ui_changes() {
+        let changes = |method| {
+            crate::api::request_changes_ui(&crate::api::schema::Request {
+                id: "t".into(),
+                method,
+            })
+        };
+        assert!(!changes(Method::LedgerList(LedgerListParams::default())));
+        assert!(changes(Method::LedgerList(LedgerListParams {
+            pane_id: None,
+            ack: true,
+        })));
+        let answers = |peek| {
+            Method::LedgerAnswers(LedgerAnswersParams {
+                pane_id: "w1:p1".into(),
+                peek,
+            })
+        };
+        assert!(!changes(answers(true)));
+        assert!(changes(answers(false)));
+        assert!(changes(Method::LedgerSend(LedgerSendParams::default())));
+    }
+
+    /// A test pane with a runtime whose input the test reads, and the agent state it detects.
+    fn app_with_pane_input(
+        detected: Option<(crate::detect::Agent, crate::detect::AgentState)>,
+    ) -> (App, String, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, pane) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        if let Some((agent, state)) = detected {
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(agent), state);
+        }
+        let (runtime, rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane, runtime);
+        (app, pane_id, rx)
+    }
+
+    fn assert_send_refused(
+        app: &mut App,
+        pane_id: &str,
+        rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>,
+        code: &str,
+    ) {
+        ask_two(app, pane_id);
+        request(app, stage(pane_id, 1, option(0)));
+        let response = request(
+            app,
+            Method::LedgerSend(LedgerSendParams {
+                pane_id: Some(pane_id.to_owned()),
+            }),
+        );
+        assert_eq!(response["error"]["code"], code, "{response}");
+        let response = request(app, Method::LedgerSend(LedgerSendParams::default()));
+        assert_eq!(response["result"]["failed"][0]["code"], code, "{response}");
+        assert!(rx.try_recv().is_err(), "nothing was typed into the pane");
+        let response = request(app, Method::LedgerList(LedgerListParams::default()));
+        let question = &response["result"]["panes"][0]["items"][0]["questions"][0];
+        assert_eq!(question["answer"]["option"], 0, "the answer stays staged");
+        assert!(question["sent_at_ms"].is_null());
+    }
+
+    #[tokio::test]
+    async fn send_refuses_an_agent_waiting_on_a_dialog() {
+        let (mut app, pane_id, mut rx) = app_with_pane_input(Some((
+            crate::detect::Agent::OpenCode,
+            crate::detect::AgentState::Blocked,
+        )));
+        assert_send_refused(&mut app, &pane_id, &mut rx, "agent_blocked");
+    }
+
+    #[tokio::test]
+    async fn send_refuses_a_live_pane_that_runs_no_agent() {
+        // The pane has a terminal that would take the line: only the agent gate stops it.
+        let (mut app, pane_id, mut rx) = app_with_pane_input(None);
+        assert_send_refused(&mut app, &pane_id, &mut rx, "agent_not_ready");
+    }
+
     #[tokio::test]
     async fn send_types_one_line_into_a_working_agent_and_list_acknowledges() {
         let (mut app, pane_id) = app_with_test_workspace();
@@ -974,7 +1061,7 @@ mod tests {
             ),
         );
         let response = request(&mut app, Method::LedgerSend(LedgerSendParams::default()));
-        let line = "SHE-12 Q1 → Stripe · Q2 → \"/hooks/stripe\"";
+        let line = "SHE-12 Q1 (Provider?) → Stripe · Q2 (Webhook path?) → \"/hooks/stripe\"";
         assert_eq!(response["result"]["sent"][0]["text"], line);
         assert_eq!(response["result"]["sent"][0]["questions"], 2);
         let typed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())

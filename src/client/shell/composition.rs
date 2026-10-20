@@ -94,6 +94,7 @@ impl ClientShellState {
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
             expanded_ledger_items: &self.expanded_ledger_items,
+            ledger_refusals: &self.ledger_refusals,
         };
         // andreconde fork (sheprd): the sheprd sidebar while connecting too, so startup never
         // flashes herdr's sidebar; unit tests keep the stock renderers they were written for.
@@ -287,6 +288,7 @@ impl ClientShellState {
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
                 expanded_ledger_items: &self.expanded_ledger_items,
+                ledger_refusals: &self.ledger_refusals,
             },
         );
         self.hits.panes = surface
@@ -753,6 +755,7 @@ impl ClientShellState {
                     &self.endpoints,
                     &self.active_endpoint_id,
                     &self.expanded_ledger_items,
+                    &self.ledger_refusals,
                     &self.config.palette,
                 );
                 match rendered {

@@ -3171,3 +3171,169 @@ fn a_free_answer_prompt_returns_to_the_cards_view() {
         )]
     );
 }
+
+#[test]
+fn cards_view_answers_reach_a_machine_that_is_not_active_and_report_its_refusal() {
+    use super::super::cards_view::CardsHit;
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::protocol::ClientMessage;
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<ClientMessage>>>);
+    impl crate::client::endpoint::EndpointTransport for Capture {
+        fn send(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+    }
+
+    let (mut state, remote) = state_with_cards();
+    let local_sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote_sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut endpoints = EndpointRegistry::empty();
+    endpoints.insert(
+        ClientEndpointId::Local,
+        Capture(local_sent.clone()),
+        1,
+        EndpointNegotiation::default(),
+        true,
+    );
+    endpoints.insert(
+        remote.clone(),
+        Capture(remote_sent.clone()),
+        7,
+        EndpointNegotiation::default(),
+        false,
+    );
+    assert!(endpoints.set_active(&ClientEndpointId::Local));
+
+    state.open_cards_view();
+    cards_text(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.handle_cards_click(CardsHit::SendAll, &mut outcome);
+    let mut commands = EndpointCommands::default();
+    crate::client::shell_runtime::dispatch_client_shell_actions(
+        outcome.actions,
+        &mut commands,
+        &mut endpoints,
+        Some(&mut state),
+        &mut Vec::new(),
+        &mut None,
+    )
+    .unwrap();
+    assert!(
+        state.visible_endpoint_notice.is_none(),
+        "the request was not cancelled"
+    );
+    assert!(local_sent.lock().unwrap().is_empty());
+    assert!(
+        matches!(endpoints.active_id(), ClientEndpointId::Local),
+        "the active machine stays"
+    );
+    let request = {
+        let sent = remote_sent.lock().unwrap();
+        let [ClientMessage::ClientShellEndpointRequest { boot_id, request }] = sent.as_slice()
+        else {
+            panic!("the send must reach the machine it is for: {sent:?}");
+        };
+        assert_eq!(boot_id, "remote-boot");
+        serde_json::from_str::<crate::api::schema::Request>(request).unwrap()
+    };
+    assert!(matches!(
+        request.method,
+        crate::api::schema::Method::LedgerSend(_)
+    ));
+
+    // That machine refuses for its pane: the agent waits on a dialog.
+    let response = crate::api::schema::SuccessResponse {
+        id: request.id.clone(),
+        result: crate::api::schema::ResponseResult::LedgerSent {
+            sent: Vec::new(),
+            failed: vec![crate::api::schema::LedgerSendFailure {
+                pane_id: "pane_1".into(),
+                code: "agent_blocked".into(),
+                message: "the agent waits on a dialog".into(),
+            }],
+        },
+    };
+    let completed = commands
+        .receive_chunk(
+            &remote,
+            7,
+            "remote-boot",
+            &request.id,
+            true,
+            serde_json::to_vec(&response).unwrap(),
+        )
+        .unwrap()
+        .expect("the lane takes the response");
+    assert!(state.is_ledger_request(&completed.request_id));
+    assert!(state.handle_ledger_result(
+        &completed.endpoint_id,
+        &completed.boot_id,
+        &completed.request_id,
+        completed.result,
+    ));
+    let notice = state.visible_endpoint_notice.as_ref().expect("a notice");
+    assert_eq!(notice.title, "Answers not sent");
+    assert!(
+        notice
+            .body
+            .ends_with("/reviewer is waiting on a dialog: answers kept, send again when it's free"),
+        "{}",
+        notice.body
+    );
+    let text = cards_text(&mut state);
+    assert!(text.contains("! not sent: waiting on a dialog"), "{text}");
+    assert!(!state.is_ledger_request(&completed.request_id));
+}
+
+#[test]
+fn a_refused_send_for_one_pane_marks_it_until_a_send_goes_through() {
+    use super::super::ledger_answers::LedgerAction;
+    let (mut state, remote) = state_with_cards();
+    state.open_cards_view();
+    let mut outcome = ClientShellInput::default();
+    let send = LedgerAction::Send {
+        endpoint_id: remote.clone(),
+        pane_id: Some("pane_1".into()),
+    };
+    state.run_ledger_action(send.clone(), &mut outcome);
+    let request_id = |outcome: &ClientShellInput| match outcome.actions.as_slice() {
+        [ClientShellAction::Endpoint { request, .. }] => request.id.clone(),
+        other => panic!("one request: {other:?}"),
+    };
+    let id = request_id(&outcome);
+    assert!(state.handle_ledger_result(
+        &remote,
+        "remote-boot",
+        &id,
+        Err(ClientShellEndpointError {
+            code: Some("agent_not_ready".into()),
+            message: "no agent runs in this pane right now".into(),
+        }),
+    ));
+    assert!(state
+        .visible_endpoint_notice
+        .as_ref()
+        .is_some_and(|notice| notice.body.contains("/reviewer has no agent running")));
+    assert!(cards_text(&mut state).contains("! not sent: no agent running"));
+
+    let mut outcome = ClientShellInput::default();
+    state.run_ledger_action(send, &mut outcome);
+    let id = request_id(&outcome);
+    assert!(state.handle_ledger_result(
+        &remote,
+        "remote-boot",
+        &id,
+        Ok(crate::api::schema::ResponseResult::LedgerSent {
+            sent: vec![crate::api::schema::LedgerSentPane {
+                pane_id: "pane_1".into(),
+                text: "CAL-40 Q1 (Ship now?) → defer".into(),
+                questions: 1,
+            }],
+            failed: Vec::new(),
+        }),
+    ));
+    assert!(!cards_text(&mut state).contains("not sent"));
+}

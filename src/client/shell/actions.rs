@@ -558,6 +558,18 @@ impl ClientShellState {
     }
 
     pub(crate) fn cancel_endpoint_request(&mut self, request_id: &str) -> bool {
+        if let Some(pending) = self.pending_ledger_requests.get(request_id) {
+            let (endpoint_id, boot_id) = pending.lane();
+            return self.handle_ledger_result(
+                &endpoint_id,
+                &boot_id,
+                request_id,
+                Err(ClientShellEndpointError {
+                    code: Some("endpoint_cancelled".into()),
+                    message: "This server action was interrupted.".into(),
+                }),
+            );
+        }
         let Some(pending) = self.pending_requests.get(request_id) else {
             return false;
         };
