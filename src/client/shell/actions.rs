@@ -68,6 +68,10 @@ impl ClientShellState {
                         self.open_board();
                         outcome.repaint = true;
                     }
+                    crate::input::KeybindAction::OpenCardsView => {
+                        self.open_cards_view();
+                        outcome.repaint = true;
+                    }
                     crate::input::KeybindAction::ToggleWorkPanel => {
                         // hidden -> full -> mini -> hidden
                         self.work_panel = match self.work_panel {

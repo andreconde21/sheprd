@@ -11,6 +11,7 @@ impl ClientShellState {
                     | ClientShellOverlay::WorktreeRemove(_)
                     | ClientShellOverlay::ContextMenu(_)
                     | ClientShellOverlay::GlobalMenu(_)
+                    | ClientShellOverlay::Cards(_)
             );
         }
         matches!(

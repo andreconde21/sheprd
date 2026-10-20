@@ -745,6 +745,30 @@ impl ClientShellState {
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
                 None
+            } else if let ClientShellOverlay::Cards(cards) = overlay {
+                // andreconde fork (sheprd): the Cards view (SHE-100009).
+                let rendered = super::cards_view::render(
+                    &mut composed,
+                    cards,
+                    &self.endpoints,
+                    &self.active_endpoint_id,
+                    &self.expanded_ledger_items,
+                    &self.config.palette,
+                );
+                match rendered {
+                    Some(rendered) => {
+                        occlusion.cover(rendered.area);
+                        self.hits.cards_popup = rendered.area;
+                        self.hits.cards = rendered.hits;
+                        self.hits.cards_max_scroll = rendered.max_scroll;
+                    }
+                    None => {
+                        self.hits.cards_popup = Rect::default();
+                        self.hits.cards.clear();
+                        self.hits.cards_max_scroll = 0;
+                    }
+                }
+                None
             } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
                 let rendered = render::render_global_menu(
                     &mut composed,
@@ -798,6 +822,9 @@ impl ClientShellState {
         }
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
             help.scroll = help.scroll.min(self.hits.help_max_scroll);
+        }
+        if let Some(ClientShellOverlay::Cards(cards)) = self.overlay.as_mut() {
+            cards.scroll = cards.scroll.min(self.hits.cards_max_scroll);
         }
         if let Some(ClientShellOverlay::ProductAnnouncement(announcement)) = self.overlay.as_mut() {
             announcement.scroll = announcement

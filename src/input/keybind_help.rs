@@ -136,6 +136,10 @@ pub(crate) fn keybind_help_groups(
                 ),
                 entry(binding_label(&keybinds.open_board), "status board"),
                 entry(
+                    binding_label(&keybinds.open_cards_view),
+                    "cards: every agent's questions, answer and send",
+                ),
+                entry(
                     binding_label(&keybinds.new_workspace_on),
                     "new workspace on a machine",
                 ),
