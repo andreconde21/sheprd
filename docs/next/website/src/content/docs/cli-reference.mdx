@@ -381,9 +381,9 @@ An agent keeps a ledger per card it works on: its status, a short summary, open 
 
 Commands write to the calling pane (`HERDR_PANE_ID`) unless `--pane` names another; with `--machine`, `--pane` is required. `card list` lists the calling pane, or every pane with a ledger when run outside one. `update` sets only the fields it is given; an empty `--status` or `--link` clears it, and a new status reopens a done card. `ask` prints the question ID; `--recommend` takes an option number starting at 1. Asking the same open question again returns the existing ID. `done` creates the card if needed.
 
-Limits per pane: 48 cards (a full ledger drops its oldest done card, then its oldest inferred one), 8 open questions per card with up to 6 options of 80 characters, 32 decisions (oldest dropped), summaries of 800 characters. The ledger is saved with the session, so it survives server restarts and live handoff, and closes with its pane.
+Text fields are one line without control characters. Limits per pane: 48 cards (a full ledger drops its oldest done card, then its oldest inferred one), 8 open questions per card with up to 6 options of 80 characters, 16 decisions of 200 characters (oldest dropped), summaries of 600 characters, and 128 KiB in all (the oldest decisions go first). `done` closes the card's open questions. The ledger is saved with the session, so it survives server restarts and live handoff, and closes with its pane.
 
-Hooks can seed entries for agents that never call these commands with `update --inferred`, plus `--inferred-question TEXT` (repeatable) or `--clear-questions` to replace the inferred questions. Inferred entries are shown dimmed and never change an entry an agent wrote: an explicit write to an inferred card takes it over and drops the inferred questions. Servers without the ledger reject these commands with a message to update.
+Hooks can seed entries for agents that never call these commands with `update --inferred`, plus `--inferred-question TEXT` (repeatable) or `--clear-questions` to replace the inferred questions. Inferred entries are shown dimmed, never change an entry an agent wrote, and never push one out of a full ledger: an explicit write to an inferred card takes it over and drops the inferred questions. Servers without the ledger reject these commands with a message to update.
 
 ## Direct terminal attach
 

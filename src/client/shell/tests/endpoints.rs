@@ -2839,3 +2839,60 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
         }] if activated == &endpoint_id && workspace_id == "ws_1"
     ));
 }
+
+#[test]
+fn card_ledger_is_dropped_on_disconnect_and_on_a_new_connection() {
+    let (mut state, endpoint_id) = state_with_remote();
+    let mut cards = crate::work_ledger::WorkLedger::default();
+    cards
+        .decide("SHE-1", "Use Checkout".into(), None, 1)
+        .unwrap();
+    let ledger = |boot_id: &str, revision| crate::protocol::endpoint::EndpointWorkLedger {
+        boot_id: boot_id.into(),
+        revision,
+        panes: [(
+            "w1:p1".to_owned(),
+            cards.sorted_items().into_iter().cloned().collect(),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let has_ledger = |state: &ClientShellState| {
+        state
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+            .unwrap()
+            .work_ledger
+            .is_some()
+    };
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+
+    state.set_endpoint_work_ledger(&endpoint_id, 3, ledger("remote-boot", 1));
+    assert!(has_ledger(&state));
+    state.mark_endpoint_disconnected(&endpoint_id);
+    assert!(
+        !has_ledger(&state),
+        "a dropped connection forgets its cards"
+    );
+
+    state.set_endpoint_work_ledger(&endpoint_id, 3, ledger("remote-boot", 1));
+    remote.revision += 1;
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 3, Box::new(remote.clone()));
+    assert!(
+        has_ledger(&state),
+        "a snapshot on the same connection keeps them"
+    );
+    remote.revision += 1;
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 4, Box::new(remote.clone()));
+    assert!(
+        !has_ledger(&state),
+        "a new connection's snapshot drops them"
+    );
+
+    state.set_endpoint_work_ledger(&endpoint_id, 4, ledger("remote-boot", 1));
+    remote.boot_id = "restarted-remote".into();
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 4, Box::new(remote));
+    assert!(!has_ledger(&state), "a server restart drops them");
+}

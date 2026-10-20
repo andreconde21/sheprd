@@ -3,8 +3,8 @@ use super::*;
 /// andreconde fork (sheprd): pushes the card ledger to a client shell when it changed
 /// (SHE-100008). Steady state is one integer compare per frame; the pane owners are re-checked
 /// only when a snapshot went out, since that is when pane ids can have moved. Nothing is sent
-/// while no pane has a ledger, so clients of a server without one see no extra traffic. Err: the
-/// client is gone.
+/// while no pane has a ledger, so clients of a server without one see no extra traffic; a client
+/// drops its ledger itself when the connection goes or a new one starts. Err: the client is gone.
 pub(super) fn push_work_ledger_if_due(
     app: &app::App,
     boot_id: &str,
@@ -31,14 +31,9 @@ pub(super) fn push_work_ledger_if_due(
         client.shell_work_ledger = Some((revision, owners));
         return Ok(());
     }
-    client.shell_work_ledger_pushes = client.shell_work_ledger_pushes.saturating_add(1);
-    let projection = crate::server::client_shell::work_ledger_projection(
-        app,
-        boot_id,
-        client.shell_work_ledger_pushes,
-        &owners,
-    );
-    client.shell_work_ledger = Some((revision, owners));
+    let push = client.shell_work_ledger_pushes.saturating_add(1);
+    let projection =
+        crate::server::client_shell::work_ledger_projection(app, boot_id, push, &owners);
     let framed = match crate::protocol::endpoint::work_ledger_message(&projection)
         .map_err(|err| err.to_string())
         .and_then(|message| {
@@ -46,11 +41,14 @@ pub(super) fn push_work_ledger_if_due(
         }) {
         Ok(framed) => framed,
         Err(err) => {
-            // An oversized ledger is skipped, not fatal: the shell keeps working without it.
+            // The projection keeps itself under the frame limit, so this is not expected. The
+            // push state stays as it was, so the next change tries again.
             warn!(err = %err, "failed to frame the card ledger");
             return Ok(());
         }
     };
+    client.shell_work_ledger_pushes = push;
+    client.shell_work_ledger = Some((revision, owners));
     match client.writer.as_ref() {
         Some(writer) if writer.control.send(framed).is_ok() => Ok(()),
         _ => Err(()),

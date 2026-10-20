@@ -89,6 +89,11 @@ impl WorkLedgerView {
         self.generation != generation || self.boot_id != boot_id || revision > self.revision
     }
 
+    /// Whether this view belongs to another connection or server boot than a snapshot does.
+    pub(crate) fn is_from_other_connection(&self, generation: Option<u64>, boot_id: &str) -> bool {
+        self.generation != generation || self.boot_id != boot_id
+    }
+
     pub(super) fn pane(&self, pane_id: &str) -> Option<&PaneLedger> {
         self.panes.get(pane_id).filter(|pane| !pane.rows.is_empty())
     }

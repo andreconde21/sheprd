@@ -232,11 +232,22 @@ fn parse_card_args(subcommand: &str, args: &[String]) -> Result<CardCommand, Str
     Ok(CardCommand { method, json })
 }
 
+/// A field as printed: control characters become spaces, so whatever a server sends cannot move
+/// the cursor or recolour the terminal.
+fn text(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(|value| {
+        value
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    })
+}
+
 /// `card list` as text: per pane, one line per card, then its summary, questions and decisions.
 fn format_list(result: &serde_json::Value) -> String {
     let mut out = String::new();
     for pane in result["panes"].as_array().into_iter().flatten() {
-        out.push_str(pane["pane_id"].as_str().unwrap_or("?"));
+        out.push_str(&text(&pane["pane_id"]).unwrap_or_else(|| "?".into()));
         out.push('\n');
         let items = pane["items"].as_array().cloned().unwrap_or_default();
         if items.is_empty() {
@@ -244,11 +255,11 @@ fn format_list(result: &serde_json::Value) -> String {
         }
         for item in &items {
             let questions = item["questions"].as_array().cloned().unwrap_or_default();
-            let mut line = format!("  {}", item["id"].as_str().unwrap_or("?"));
-            if let Some(title) = item["title"].as_str() {
+            let mut line = format!("  {}", text(&item["id"]).unwrap_or_else(|| "?".into()));
+            if let Some(title) = text(&item["title"]) {
                 line.push_str(&format!("  {title}"));
             }
-            if let Some(status) = item["status"].as_str() {
+            if let Some(status) = text(&item["status"]) {
                 line.push_str(&format!("  [{status}]"));
             }
             if item["done"].as_bool() == Some(true) {
@@ -262,14 +273,14 @@ fn format_list(result: &serde_json::Value) -> String {
             }
             out.push_str(&line);
             out.push('\n');
-            if let Some(summary) = item["summary"].as_str() {
+            if let Some(summary) = text(&item["summary"]) {
                 out.push_str(&format!("    {summary}\n"));
             }
             for question in &questions {
                 let mut line = format!(
                     "    ? [{}] {}",
                     question["id"],
-                    question["text"].as_str().unwrap_or("")
+                    text(&question["text"]).unwrap_or_default()
                 );
                 let recommended = question["recommended"].as_u64();
                 for (index, option) in question["options"]
@@ -286,7 +297,7 @@ fn format_list(result: &serde_json::Value) -> String {
                     line.push_str(&format!(
                         "  {}) {}{star}",
                         index + 1,
-                        option.as_str().unwrap_or("")
+                        text(option).unwrap_or_default()
                     ));
                 }
                 out.push_str(&line);
@@ -295,7 +306,7 @@ fn format_list(result: &serde_json::Value) -> String {
             for decision in item["decisions"].as_array().into_iter().flatten() {
                 out.push_str(&format!(
                     "    ✓ {}\n",
-                    decision["text"].as_str().unwrap_or("")
+                    text(&decision["text"]).unwrap_or_default()
                 ));
             }
         }
@@ -434,5 +445,15 @@ mod tests {
             text,
             "w1:p1\n  SHE-12  Stripe checkout  [dev]  ?1\n    ? [1] Plan?  1) monthly  2) yearly ★\n    ✓ Use Checkout\n"
         );
+    }
+
+    #[test]
+    fn list_text_never_prints_control_characters() {
+        let text = format_list(
+            &serde_json::json!({"panes": [{"pane_id": "w1:p1", "items": [
+                {"id": "SHE-1", "title": "red \u{1b}]52;c;Zm9v\u{7}", "summary": "a\nb\u{9b}2J"}
+            ]}]}),
+        );
+        assert_eq!(text, "w1:p1\n  SHE-1  red  ]52;c;Zm9v \n    a b 2J\n");
     }
 }

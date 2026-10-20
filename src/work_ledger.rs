@@ -17,12 +17,18 @@ pub(crate) const MAX_ITEMS: usize = 48;
 pub(crate) const MAX_OPEN_QUESTIONS: usize = 8;
 pub(crate) const MAX_OPTIONS: usize = 6;
 pub(crate) const MAX_OPTION_CHARS: usize = 80;
-pub(crate) const MAX_DECISIONS: usize = 32;
-pub(crate) const MAX_SUMMARY_CHARS: usize = 800;
+pub(crate) const MAX_DECISIONS: usize = 16;
+pub(crate) const MAX_DECISION_CHARS: usize = 200;
+pub(crate) const MAX_SUMMARY_CHARS: usize = 600;
 pub(crate) const MAX_TITLE_CHARS: usize = 120;
 pub(crate) const MAX_STATUS_CHARS: usize = 40;
 pub(crate) const MAX_TEXT_CHARS: usize = 400;
 pub(crate) const MAX_LINK_CHARS: usize = 512;
+/// Serialized size one pane's ledger may take. A write that would pass it first drops the oldest
+/// decisions, then old done and inferred cards, and is refused when that is not enough.
+pub(crate) const MAX_PANE_BYTES: usize = 128 * 1024;
+/// Serialized size of all panes' ledgers in one client push, well under the 2 MiB frame limit.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -160,9 +166,10 @@ fn bounded(field: &str, value: String, max: usize) -> Result<String, LedgerError
             "{field} may be at most {max} characters"
         )));
     }
-    if value.contains('\0') {
+    // Control characters (newlines and escape sequences included) would reach terminals raw.
+    if value.chars().any(char::is_control) {
         return Err(LedgerError::Invalid(format!(
-            "{field} must not contain NUL"
+            "{field} must be one line without control characters"
         )));
     }
     Ok(value)
@@ -270,25 +277,21 @@ impl WorkLedger {
     }
 
     /// The item to write, created when missing. A full ledger drops its oldest done item, then
-    /// its oldest inferred one; with neither the write is refused.
-    fn entry(&mut self, id: &str, inferred: bool) -> Result<(&mut LedgerItem, bool), LedgerError> {
+    /// its oldest inferred one; with neither the write is refused. An inferred write only ever
+    /// makes room by dropping another inferred item, and is dropped itself (`None`) otherwise.
+    fn entry(
+        &mut self,
+        id: &str,
+        inferred: bool,
+    ) -> Result<Option<(&mut LedgerItem, bool)>, LedgerError> {
         validate_item_id(id)?;
         let mut created = false;
         if !self.items.contains_key(id) {
             if self.items.len() >= MAX_ITEMS {
-                let evict = self
-                    .items
-                    .values()
-                    .filter(|item| item.done)
-                    .min_by_key(|item| item.updated_at_ms)
-                    .or_else(|| {
-                        self.items
-                            .values()
-                            .filter(|item| item.inferred)
-                            .min_by_key(|item| item.updated_at_ms)
-                    })
-                    .map(|item| item.id.clone());
-                let Some(evict) = evict else {
+                let Some(evict) = self.eviction_candidate(id, inferred) else {
+                    if inferred {
+                        return Ok(None);
+                    }
                     return Err(LedgerError::Limit(format!(
                         "a pane may track at most {MAX_ITEMS} open cards; mark some done or remove them"
                     )));
@@ -303,10 +306,92 @@ impl WorkLedger {
             .items
             .get_mut(id)
             .ok_or_else(|| LedgerError::Invalid("ledger item vanished".into()))?;
-        Ok((item, created))
+        Ok(Some((item, created)))
+    }
+
+    /// The item to drop to make room for `keep`: the oldest done one, then the oldest inferred
+    /// one. For an inferred writer only inferred items count.
+    fn eviction_candidate(&self, keep: &str, inferred_writer: bool) -> Option<String> {
+        let oldest = |filter: &dyn Fn(&LedgerItem) -> bool| {
+            self.items
+                .values()
+                .filter(|item| item.id != keep && filter(item))
+                .min_by_key(|item| item.updated_at_ms)
+                .map(|item| item.id.clone())
+        };
+        if inferred_writer {
+            return oldest(&|item| item.inferred);
+        }
+        oldest(&|item| item.done).or_else(|| oldest(&|item| item.inferred))
+    }
+
+    fn serialized_len(&self) -> usize {
+        serde_json::to_vec(&self.items).map_or(usize::MAX, |bytes| bytes.len())
+    }
+
+    /// Runs one write and keeps the ledger within `MAX_PANE_BYTES`: the oldest decisions go
+    /// first, then old cards as `entry` would drop them. A write that still does not fit is
+    /// undone; an inferred one is dropped quietly (`Ok(None)`), an explicit one is refused.
+    fn within_budget<T>(
+        &mut self,
+        keep: &str,
+        inferred: bool,
+        write: impl FnOnce(&mut Self) -> Result<T, LedgerError>,
+    ) -> Result<Option<T>, LedgerError> {
+        let before = self.clone();
+        let result = write(self)?;
+        while self.serialized_len() > MAX_PANE_BYTES {
+            if !inferred && self.drop_oldest_decision() {
+                continue;
+            }
+            match self.eviction_candidate(keep, inferred) {
+                Some(evict) => {
+                    self.items.remove(&evict);
+                }
+                None => {
+                    *self = before;
+                    if inferred {
+                        return Ok(None);
+                    }
+                    return Err(LedgerError::Limit(format!(
+                        "a pane's cards may take at most {} KiB; shorten them or remove some",
+                        MAX_PANE_BYTES / 1024
+                    )));
+                }
+            }
+        }
+        Ok(Some(result))
+    }
+
+    fn drop_oldest_decision(&mut self) -> bool {
+        let Some(item) = self
+            .items
+            .values_mut()
+            .filter(|item| !item.decisions.is_empty())
+            .min_by_key(|item| item.decisions[0].decided_at_ms)
+        else {
+            return false;
+        };
+        item.decisions.remove(0);
+        true
     }
 
     pub(crate) fn update(
+        &mut self,
+        id: &str,
+        update: LedgerUpdate,
+        session: Option<&str>,
+        now_ms: u64,
+    ) -> Result<bool, LedgerError> {
+        let inferred = update.inferred;
+        Ok(self
+            .within_budget(id, inferred, |ledger| {
+                ledger.apply_update(id, update, session, now_ms)
+            })?
+            .unwrap_or(false))
+    }
+
+    fn apply_update(
         &mut self,
         id: &str,
         update: LedgerUpdate,
@@ -350,7 +435,10 @@ impl WorkLedger {
             // Explicit wins: the hook's guess never overwrites what the agent said.
             return Ok(false);
         }
-        let (item, created) = self.entry(id, update.inferred)?;
+        let Some((item, created)) = self.entry(id, update.inferred)? else {
+            // A full ledger has no room for another guess.
+            return Ok(false);
+        };
         let mut changed = created;
         if !update.inferred {
             changed |= item.make_explicit();
@@ -422,6 +510,18 @@ impl WorkLedger {
         session: Option<&str>,
         now_ms: u64,
     ) -> Result<(u32, bool), LedgerError> {
+        explicit(self.within_budget(id, false, |ledger| {
+            ledger.apply_ask(id, input, session, now_ms)
+        })?)
+    }
+
+    fn apply_ask(
+        &mut self,
+        id: &str,
+        input: LedgerQuestionInput,
+        session: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(u32, bool), LedgerError> {
         validate_item_id(id)?;
         let input = question(input)?;
         if let Some(existing) = self.items.get(id).and_then(|item| {
@@ -446,7 +546,7 @@ impl WorkLedger {
                 "a card may have at most {MAX_OPEN_QUESTIONS} open questions"
             )));
         }
-        let (item, _) = self.entry(id, false)?;
+        let (item, _) = explicit(self.entry(id, false)?)?;
         item.make_explicit();
         item.questions
             .retain(|question| question.text != input.text);
@@ -470,12 +570,24 @@ impl WorkLedger {
         session: Option<&str>,
         now_ms: u64,
     ) -> Result<bool, LedgerError> {
+        explicit(self.within_budget(id, false, |ledger| {
+            ledger.apply_decide(id, text, session, now_ms)
+        })?)
+    }
+
+    fn apply_decide(
+        &mut self,
+        id: &str,
+        text: String,
+        session: Option<&str>,
+        now_ms: u64,
+    ) -> Result<bool, LedgerError> {
         validate_item_id(id)?;
-        let text = bounded("decision", text, MAX_TEXT_CHARS)?;
+        let text = bounded("decision", text, MAX_DECISION_CHARS)?;
         if text.is_empty() {
             return Err(LedgerError::Invalid("decision must not be empty".into()));
         }
-        let (item, created) = self.entry(id, false)?;
+        let (item, created) = explicit(self.entry(id, false)?)?;
         let mut changed = created | item.make_explicit();
         if !item.decisions.iter().any(|decision| decision.text == text) {
             item.decisions.push(LedgerDecision {
@@ -501,13 +613,28 @@ impl WorkLedger {
         session: Option<&str>,
         now_ms: u64,
     ) -> Result<bool, LedgerError> {
+        explicit(self.within_budget(id, false, |ledger| {
+            ledger.apply_complete(id, summary, session, now_ms)
+        })?)
+    }
+
+    fn apply_complete(
+        &mut self,
+        id: &str,
+        summary: Option<String>,
+        session: Option<&str>,
+        now_ms: u64,
+    ) -> Result<bool, LedgerError> {
         validate_item_id(id)?;
         let summary = summary
             .map(|summary| bounded("summary", summary, MAX_SUMMARY_CHARS))
             .transpose()?;
-        let (item, created) = self.entry(id, false)?;
+        let (item, created) = explicit(self.entry(id, false)?)?;
         let mut changed = created | item.make_explicit() | !item.done;
         item.done = true;
+        // A done card asks nothing any more, so it no longer sorts as waiting on the user.
+        changed |= !item.questions.is_empty();
+        item.questions.clear();
         if let Some(summary) = summary {
             changed |= item.summary != summary;
             item.summary = summary;
@@ -522,6 +649,46 @@ impl WorkLedger {
         validate_item_id(id)?;
         Ok(self.items.remove(id).is_some())
     }
+}
+
+/// Explicit writes always get their item (`entry` returns `None` only to inferred ones).
+fn explicit<T>(value: Option<T>) -> Result<T, LedgerError> {
+    value.ok_or_else(|| LedgerError::Invalid("ledger write was dropped".into()))
+}
+
+/// Keeps one client push within `MAX_MESSAGE_BYTES`: done cards lose their details first, then
+/// go; then every card loses its summary and decisions; then whole panes go, the last first.
+pub(crate) fn fit_message(panes: &mut BTreeMap<String, Vec<LedgerItem>>) {
+    let size = |panes: &BTreeMap<String, Vec<LedgerItem>>| {
+        serde_json::to_vec(panes).map_or(usize::MAX, |bytes| bytes.len())
+    };
+    if size(panes) <= MAX_MESSAGE_BYTES {
+        return;
+    }
+    let steps: [fn(&mut Vec<LedgerItem>); 3] = [
+        |items| {
+            for item in items.iter_mut().filter(|item| item.done) {
+                item.summary.clear();
+                item.link = None;
+                item.questions.clear();
+                item.decisions.clear();
+            }
+        },
+        |items| items.retain(|item| !item.done),
+        |items| {
+            for item in items.iter_mut() {
+                item.summary.clear();
+                item.decisions.clear();
+            }
+        },
+    ];
+    for step in steps {
+        panes.values_mut().for_each(step);
+        if size(panes) <= MAX_MESSAGE_BYTES {
+            return;
+        }
+    }
+    while size(panes) > MAX_MESSAGE_BYTES && panes.pop_last().is_some() {}
 }
 
 fn sort_group(item: &LedgerItem) -> u8 {
@@ -861,5 +1028,140 @@ mod tests {
         let round_trip: WorkLedger =
             serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
         assert_eq!(round_trip, ledger);
+    }
+
+    #[test]
+    fn text_fields_reject_control_characters() {
+        let mut ledger = WorkLedger::default();
+        for bad in ["red \u{1b}[31m", "two\nlines", "bell\u{7}", "csi \u{9b}2J"] {
+            let update = LedgerUpdate {
+                title: Some(bad.into()),
+                ..LedgerUpdate::default()
+            };
+            assert!(matches!(
+                ledger.update("SHE-1", update, None, 1),
+                Err(LedgerError::Invalid(_))
+            ));
+            assert!(ledger.decide("SHE-1", bad.into(), None, 1).is_err());
+            assert!(ledger.ask("SHE-1", ask(bad, &[], None), None, 1).is_err());
+            assert!(ledger
+                .ask("SHE-1", ask("q?", &[bad], None), None, 1)
+                .is_err());
+        }
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn inferred_writes_never_push_out_explicit_cards() {
+        let mut ledger = WorkLedger::default();
+        for index in 0..MAX_ITEMS {
+            ledger
+                .update(&format!("C-{index}"), explicit("t"), None, index as u64)
+                .unwrap();
+        }
+        ledger.complete("C-0", None, None, 100).unwrap();
+        assert_eq!(
+            ledger.update("GUESS-1", inferred("dev", None), None, 101),
+            Ok(false)
+        );
+        assert!(ledger.get("GUESS-1").is_none() && ledger.get("C-0").is_some());
+
+        ledger.remove("C-1").unwrap();
+        ledger
+            .update("GUESS-1", inferred("dev", None), None, 102)
+            .unwrap();
+        assert_eq!(
+            ledger.update("GUESS-2", inferred("dev", None), None, 103),
+            Ok(true)
+        );
+        assert!(ledger.get("GUESS-1").is_none() && ledger.get("C-0").is_some());
+    }
+
+    #[test]
+    fn done_closes_open_questions() {
+        let mut ledger = WorkLedger::default();
+        ledger
+            .ask("SHE-1", ask("Monthly?", &[], None), None, 1)
+            .unwrap();
+        ledger.update("SHE-2", explicit("t"), None, 2).unwrap();
+        assert_eq!(ledger.complete("SHE-1", None, None, 3), Ok(true));
+        let item = ledger.get("SHE-1").unwrap();
+        assert!(item.done && item.questions.is_empty());
+        assert_eq!(ledger.sorted_items()[1].id, "SHE-1", "done sorts last");
+    }
+
+    /// Fills one card to every per-field limit with 4-byte characters.
+    fn fill_card(ledger: &mut WorkLedger, id: &str, now_ms: u64) -> Result<(), LedgerError> {
+        let wide = |count: usize| "\u{1d11e}".repeat(count);
+        let update = LedgerUpdate {
+            title: Some(wide(MAX_TITLE_CHARS)),
+            status: Some(wide(MAX_STATUS_CHARS)),
+            summary: Some(wide(MAX_SUMMARY_CHARS)),
+            link: Some(wide(MAX_LINK_CHARS)),
+            ..LedgerUpdate::default()
+        };
+        ledger.update(id, update, None, now_ms)?;
+        for index in 0..MAX_OPEN_QUESTIONS {
+            let options = (0..MAX_OPTIONS)
+                .map(|option| format!("{option}{}", wide(MAX_OPTION_CHARS - 1)))
+                .collect::<Vec<_>>();
+            let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+            let text = format!("{index}{}", wide(MAX_TEXT_CHARS - 1));
+            ledger.ask(id, ask(&text, &options, Some(0)), None, now_ms)?;
+        }
+        for index in 0..MAX_DECISIONS {
+            let text = format!("{index:02}{}", wide(MAX_DECISION_CHARS - 2));
+            ledger.decide(id, text, None, now_ms)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_pane_ledger_stays_within_its_byte_budget() {
+        let mut ledger = WorkLedger::default();
+        let mut refused = 0;
+        for index in 0..MAX_ITEMS {
+            if matches!(
+                fill_card(&mut ledger, &format!("C-{index}"), index as u64),
+                Err(LedgerError::Limit(_))
+            ) {
+                refused += 1;
+            }
+            assert!(ledger.serialized_len() <= MAX_PANE_BYTES);
+        }
+        assert!(refused > 0, "full cards cannot all fit");
+        // Decisions went before any card did.
+        assert!(ledger.get("C-0").is_some());
+        assert!(ledger.get("C-0").unwrap().decisions.is_empty());
+    }
+
+    #[test]
+    fn one_push_stays_under_the_frame_limit_however_full_the_panes_are() {
+        let mut ledger = WorkLedger::default();
+        for index in 0..MAX_ITEMS {
+            let _ = fill_card(&mut ledger, &format!("C-{index}"), index as u64);
+        }
+        ledger.complete("C-0", None, None, 1_000).unwrap();
+        let items = ledger
+            .sorted_items()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut panes = (0..24)
+            .map(|pane| (format!("w1:p{pane:02}"), items.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert!(serde_json::to_vec(&panes).unwrap().len() > crate::protocol::MAX_FRAME_SIZE);
+        fit_message(&mut panes);
+        assert!(serde_json::to_vec(&panes).unwrap().len() <= MAX_MESSAGE_BYTES);
+        assert!(panes.contains_key("w1:p00"), "the first panes stay");
+        assert!(
+            panes["w1:p00"].iter().all(|item| !item.done),
+            "done cards went first"
+        );
+
+        let mut small = BTreeMap::from([("w1:p1".to_owned(), items[..2].to_vec())]);
+        let before = small.clone();
+        fit_message(&mut small);
+        assert_eq!(small, before, "a push that fits is left alone");
     }
 }

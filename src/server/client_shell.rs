@@ -30,24 +30,26 @@ pub(super) fn work_ledger_projection(
     revision: u64,
     owners: &WorkLedgerOwners,
 ) -> protocol::endpoint::EndpointWorkLedger {
+    let mut panes = owners
+        .iter()
+        .filter_map(|(pane_id, terminal_id)| {
+            let terminal = app.state.terminals.get(terminal_id)?;
+            Some((
+                pane_id.clone(),
+                terminal
+                    .work_ledger
+                    .sorted_items()
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            ))
+        })
+        .collect();
+    crate::work_ledger::fit_message(&mut panes);
     protocol::endpoint::EndpointWorkLedger {
         boot_id: boot_id.to_owned(),
         revision,
-        panes: owners
-            .iter()
-            .filter_map(|(pane_id, terminal_id)| {
-                let terminal = app.state.terminals.get(terminal_id)?;
-                Some((
-                    pane_id.clone(),
-                    terminal
-                        .work_ledger
-                        .sorted_items()
-                        .into_iter()
-                        .cloned()
-                        .collect(),
-                ))
-            })
-            .collect(),
+        panes,
     }
 }
 
