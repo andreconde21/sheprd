@@ -914,8 +914,10 @@ pub(super) struct RefContext {
 
 /// [`open_task`], with the clicked pane's machine and folder for the placeholders.
 pub(super) fn open_task_in(id: String, context: Option<RefContext>) {
-    let task_command = |id: &str| ref_command_in(id, |source| source.command.as_deref(), context.as_ref());
-    let task_open = |id: &str| ref_command_in(id, |source| source.open.as_deref(), context.as_ref());
+    let task_command =
+        |id: &str| ref_command_in(id, |source| source.command.as_deref(), context.as_ref());
+    let task_open =
+        |id: &str| ref_command_in(id, |source| source.open.as_deref(), context.as_ref());
     match task_command(&id) {
         Some(command) => {
             std::thread::spawn(move || {

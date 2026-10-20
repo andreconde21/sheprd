@@ -75,6 +75,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         surface_interest: true,
         health_check: true,
         ssh_agent_registration: false,
+        work_ledger: true,
     })
 }
 
@@ -705,6 +706,12 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneOpen(_) => "plugin.pane.open",
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
+        Method::LedgerUpdate(_) => "ledger.update",
+        Method::LedgerAsk(_) => "ledger.ask",
+        Method::LedgerDecide(_) => "ledger.decide",
+        Method::LedgerComplete(_) => "ledger.complete",
+        Method::LedgerRemove(_) => "ledger.remove",
+        Method::LedgerList(_) => "ledger.list",
     }
 }
 
@@ -1164,6 +1171,11 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[test]
+    fn ping_capabilities_advertise_the_work_ledger() {
+        assert!(default_capabilities().is_some_and(|capabilities| capabilities.work_ledger));
+    }
+
     fn unique_test_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1500,6 +1512,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                work_ledger: false,
             }),
             None,
             None,

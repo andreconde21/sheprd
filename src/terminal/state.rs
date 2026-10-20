@@ -136,6 +136,8 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
+    /// andreconde fork (sheprd): per-card status, questions and decisions (SHE-100008).
+    pub work_ledger: crate::work_ledger::WorkLedger,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
@@ -176,6 +178,7 @@ impl TerminalState {
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            work_ledger: crate::work_ledger::WorkLedger::default(),
             persisted_agent_session: None,
             reported_resume: None,
             reported_resume_revision: 0,

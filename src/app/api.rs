@@ -5,6 +5,7 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
+mod ledger;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
@@ -1195,6 +1196,14 @@ impl App {
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
             }
+            Method::LedgerUpdate(params) => return self.handle_ledger_update(request.id, params),
+            Method::LedgerAsk(params) => return self.handle_ledger_ask(request.id, params),
+            Method::LedgerDecide(params) => return self.handle_ledger_decide(request.id, params),
+            Method::LedgerComplete(params) => {
+                return self.handle_ledger_complete(request.id, params);
+            }
+            Method::LedgerRemove(params) => return self.handle_ledger_remove(request.id, params),
+            Method::LedgerList(params) => return self.handle_ledger_list(request.id, params),
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
             }

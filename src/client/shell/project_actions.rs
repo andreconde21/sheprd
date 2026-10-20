@@ -260,7 +260,10 @@ pub(super) fn split_project_menu(
 }
 
 impl ClientShellState {
-    pub(super) fn endpoint_by_id(&self, endpoint_id: &ClientEndpointId) -> Option<&ClientShellEndpoint> {
+    pub(super) fn endpoint_by_id(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&ClientShellEndpoint> {
         self.endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)

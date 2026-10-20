@@ -574,6 +574,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            work_ledger_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         };
 

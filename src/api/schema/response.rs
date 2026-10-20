@@ -277,6 +277,26 @@ pub enum ResponseResult {
         active: bool,
         projection_revision: u64,
     },
+    /// andreconde fork (sheprd): a card ledger item after a write (SHE-100008). `changed` is
+    /// false for a write that matched what was there, or an inferred write to an explicit item.
+    LedgerItem {
+        pane_id: String,
+        item: super::ledger::LedgerItem,
+        changed: bool,
+    },
+    LedgerQuestionAsked {
+        pane_id: String,
+        item_id: String,
+        question_id: u32,
+    },
+    LedgerItemRemoved {
+        pane_id: String,
+        item_id: String,
+        removed: bool,
+    },
+    LedgerList {
+        panes: Vec<super::ledger::LedgerPaneInfo>,
+    },
     Ok {},
 }
 
