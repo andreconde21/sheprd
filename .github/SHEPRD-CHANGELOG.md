@@ -5,6 +5,23 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-5 (2026-10-20)
+
+### Added
+- Answer an agent's card questions with clicks. In an expanded card each question shows its
+  options as buttons (★ = the agent's recommendation), plus ✎ for your own text and ✕ to dismiss.
+  Clicking only marks your choice; `send N` sends all of an agent's answers as one line, e.g.
+  `SHE-12 Q1 (Which provider?) → Stripe · Q2 → "EUR only"`. Agents read and acknowledge them with
+  `sheprd card answers`. A send waits while the agent is on a dialog or not running, and says so.
+- Cards view (prefix+shift+c, or click CARDS): every agent's cards on every connected machine,
+  filtered by waiting on you / in progress / done and this agent / all agents, with Send all and
+  Dismiss all done. Click an agent to jump to it.
+- `sheprd card dismiss <ID> [--question N]`.
+
+### Fixed
+- The work panel refreshes as soon as an agent's cards change, not on your next key press.
+- The Claude hook no longer reports placeholder or shell-output lines as questions.
+
 ## sheprd-v0.9.5-4 (2026-10-20)
 
 ### Added
