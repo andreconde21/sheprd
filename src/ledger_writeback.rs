@@ -109,31 +109,83 @@ pub(crate) fn fingerprint(card: &DoneCard) -> String {
         .collect()
 }
 
-/// Runs the configured write-back for one done card. `date` (YYYY-MM-DD) dates its Done line.
+/// Which parts of a write-back to run. A part not run counts as done before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Parts {
+    pub(crate) markdown: bool,
+    pub(crate) hook: bool,
+}
+
+impl Parts {
+    pub(crate) const ALL: Self = Self {
+        markdown: true,
+        hook: true,
+    };
+
+    /// What the next `done` has to run after `last`: everything when the card changed since
+    /// (or never ran), nothing after a full success, else only the parts that did not succeed,
+    /// so a hook that posted once is not run again because the file was missing.
+    pub(crate) fn after(last: Option<&LedgerWriteback>, fingerprint: &str) -> Option<Self> {
+        let Some(last) = last.filter(|last| last.fingerprint == fingerprint) else {
+            return Some(Self::ALL);
+        };
+        if last.ok {
+            return None;
+        }
+        Some(Self {
+            markdown: last.markdown != Some(true),
+            hook: last.hook != Some(true),
+        })
+    }
+}
+
+/// Runs the configured write-back for one done card, or the `parts` of it still to do.
+/// `date` (YYYY-MM-DD) dates its Done line.
 pub(crate) async fn run(
     config: LedgerWritebackConfig,
     card: DoneCard,
     date: String,
     now_ms: u64,
+    parts: Parts,
 ) -> LedgerWriteback {
     let mut written = Vec::new();
     let mut failures = Vec::new();
-    if config.markdown_path.is_some() {
+    let mut markdown = None;
+    let mut hook = None;
+    if config.markdown_path.is_some() && !parts.markdown {
+        written.push("file written before".to_owned());
+        markdown = Some(true);
+    } else if config.markdown_path.is_some() {
         let (config, card) = (config.clone(), card.clone());
-        match tokio::task::spawn_blocking(move || write_markdown(&config, &card, &date)).await {
-            Ok(Ok(message)) => written.push(message),
-            Ok(Err(failure)) => failures.push(failure),
-            Err(err) => failures.push(Failure::new("write_failed", err.to_string())),
+        let result = match tokio::task::spawn_blocking(move || {
+            write_markdown(&config, &card, &date)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => Err(Failure::new("write_failed", err.to_string())),
+        };
+        markdown = Some(result.is_ok());
+        match result {
+            Ok(message) => written.push(message),
+            Err(failure) => failures.push(failure),
         }
     }
     if let Some(command) = config.on_card_done.as_deref() {
-        let timeout = config
-            .timeout_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_TIMEOUT);
-        match run_hook(command, &card, timeout).await {
-            Ok(()) => written.push("hook ran".into()),
-            Err(failure) => failures.push(failure),
+        if parts.hook {
+            let timeout = config
+                .timeout_seconds
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_TIMEOUT);
+            let result = run_hook(command, &card, timeout).await;
+            hook = Some(result.is_ok());
+            match result {
+                Ok(()) => written.push("hook ran".into()),
+                Err(failure) => failures.push(failure),
+            }
+        } else {
+            written.push("hook ran before".to_owned());
+            hook = Some(true);
         }
     }
     let outcome = match failures.first() {
@@ -149,6 +201,8 @@ pub(crate) async fn run(
                 .join("; "),
             at_ms: now_ms,
             fingerprint: fingerprint(&card),
+            markdown,
+            hook,
         },
         None => LedgerWriteback {
             ok: true,
@@ -156,6 +210,8 @@ pub(crate) async fn run(
             message: written.join("; "),
             at_ms: now_ms,
             fingerprint: fingerprint(&card),
+            markdown,
+            hook,
         },
     };
     if !outcome.ok {
@@ -359,6 +415,21 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     Some((level, title))
 }
 
+/// A Decisions heading's title: "Decisions" alone or followed by a space, "(" or ":", in any
+/// case (`## Decisions (orchestrator + André, 07/10)`).
+fn is_decisions_title(title: &str) -> bool {
+    let Some(word) = title
+        .get(..9)
+        .filter(|word| word.eq_ignore_ascii_case("decisions"))
+    else {
+        return false;
+    };
+    title[word.len()..]
+        .chars()
+        .next()
+        .is_none_or(|next| matches!(next, ' ' | '\t' | '(' | ':'))
+}
+
 /// The lines outside fenced code and HTML comments: where a heading can be.
 fn markdown_lines(lines: &[String], from: usize) -> Vec<bool> {
     let mut outside = vec![false; lines.len()];
@@ -385,8 +456,9 @@ fn markdown_lines(lines: &[String], from: usize) -> Vec<bool> {
         if fence.is_some() {
             continue;
         }
-        if let Some(start) = text.find("<!--") {
-            comment = !text[start..].contains("-->");
+        // A comment opens only at the start of a line: `<!--` inside inline code is text.
+        if let Some(rest) = text.strip_prefix("<!--") {
+            comment = !rest.contains("-->");
         }
         outside[index] = true;
     }
@@ -542,26 +614,36 @@ pub(crate) fn update_markdown(
         status_set,
     };
 
-    // The Decisions section: from its heading to the next heading of the same or a higher level.
+    // The Decisions section: the first level-2 `Decisions` heading, else the first at another
+    // level, up to the next heading of its level or above (level 2 at the deepest, so a
+    // `# Decisions` does not swallow the `##` sections after it).
     let outside = markdown_lines(&lines, body_start);
-    let mut section = None;
-    let mut section_end = lines.len();
-    for (index, line) in lines.iter().enumerate().skip(body_start) {
-        if !outside[index] {
-            continue;
-        }
-        let Some((level, title)) = heading(line) else {
-            continue;
-        };
-        match section {
-            None if title.eq_ignore_ascii_case("decisions") => section = Some((index, level)),
-            Some((_, section_level)) if level <= section_level => {
-                section_end = index;
-                break;
-            }
-            _ => {}
-        }
-    }
+    let headings = lines
+        .iter()
+        .enumerate()
+        .skip(body_start)
+        .filter(|(index, _)| outside[*index])
+        .filter_map(|(index, line)| heading(line).map(|(level, title)| (index, level, title)))
+        .collect::<Vec<_>>();
+    let decisions = |&&(_, _, title): &&(usize, usize, &str)| is_decisions_title(title);
+    let section = headings
+        .iter()
+        .filter(decisions)
+        .find(|(_, level, _)| *level == 2)
+        .or_else(|| headings.iter().find(decisions))
+        .map(|&(index, level, _)| (index, level));
+    let following = |from: usize| headings.iter().filter(move |(index, _, _)| *index > from);
+    let section_end = section.map_or(lines.len(), |(heading, level)| {
+        following(heading)
+            .find(|(_, other, _)| *other <= level.max(2))
+            .map_or(lines.len(), |(index, _, _)| *index)
+    });
+    // New entries go after the section's own text, before its first sub-heading.
+    let content_end = section.map_or(lines.len(), |(heading, _)| {
+        following(heading)
+            .next()
+            .map_or(section_end, |(index, _, _)| (*index).min(section_end))
+    });
 
     let existing = section.map_or(&[][..], |(heading, _)| &lines[heading + 1..section_end]);
     let mut new_entries = Vec::new();
@@ -595,7 +677,7 @@ pub(crate) fn update_markdown(
         return finish(lines);
     };
 
-    let last_content = (heading + 1..section_end)
+    let last_content = (heading + 1..content_end)
         .rev()
         .find(|&index| !lines[index].trim().is_empty());
     let mut insert = Vec::new();
@@ -890,7 +972,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
 
-        let outcome = run(config.clone(), card("SHE-1"), "2026-10-21".into(), 7).await;
+        let outcome = run(
+            config.clone(),
+            card("SHE-1"),
+            "2026-10-21".into(),
+            7,
+            Parts::ALL,
+        )
+        .await;
         assert!(outcome.ok, "{outcome:?}");
         assert_eq!(
             (
@@ -914,18 +1003,32 @@ mod tests {
         // No temporary file is left behind.
         assert_eq!(std::fs::read_dir(dir.join("sheprd")).unwrap().count(), 1);
 
-        let again = run(config.clone(), card("SHE-1"), "2026-10-22".into(), 8).await;
+        let again = run(
+            config.clone(),
+            card("SHE-1"),
+            "2026-10-22".into(),
+            8,
+            Parts::ALL,
+        )
+        .await;
         assert!(
             again.ok && again.message == "SHE-1.md already up to date",
             "{again:?}"
         );
 
-        let missing = run(config.clone(), card("SHE-2"), "2026-10-21".into(), 9).await;
+        let missing = run(
+            config.clone(),
+            card("SHE-2"),
+            "2026-10-21".into(),
+            9,
+            Parts::ALL,
+        )
+        .await;
         assert!(!missing.ok);
         assert_eq!(missing.code, "missing_file");
         assert!(!dir.join("sheprd/SHE-2.md").exists());
 
-        let unknown = run(config, card("CAL-2"), "2026-10-21".into(), 9).await;
+        let unknown = run(config, card("CAL-2"), "2026-10-21".into(), 9, Parts::ALL).await;
         assert_eq!(
             (unknown.ok, unknown.code.as_str()),
             (false, "unknown_project")
@@ -949,6 +1052,7 @@ mod tests {
             card("SHE-1"),
             "2026-10-21".into(),
             1,
+            Parts::ALL,
         )
         .await;
         assert!(outcome.ok, "{outcome:?}");
@@ -974,6 +1078,7 @@ mod tests {
             card("SHE-1"),
             String::new(),
             1,
+            Parts::ALL,
         )
         .await;
         assert_eq!(
@@ -990,13 +1095,21 @@ mod tests {
             card("SHE-404"),
             String::new(),
             1,
+            Parts::ALL,
         )
         .await;
         assert_eq!((both.ok, both.code.as_str()), (false, "missing_file"));
         assert!(both.message.ends_with(".md; hook ran"), "{both:?}");
 
         let started = std::time::Instant::now();
-        let slow = run(hook("sleep 30".into()), card("SHE-1"), String::new(), 1).await;
+        let slow = run(
+            hook("sleep 30".into()),
+            card("SHE-1"),
+            String::new(),
+            1,
+            Parts::ALL,
+        )
+        .await;
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(
             (slow.ok, slow.message.as_str()),
@@ -1075,7 +1188,7 @@ mod tests {
         let card = "# Card\n\n```md\n## Decisions\n```\n<!--\n## Decisions\n-->\n### decisions  \n\n- Old\n#### Detail\n\ntext\n### Next\n";
         assert_eq!(
             md(card, None, &entries(&["New"])),
-            "# Card\n\n```md\n## Decisions\n```\n<!--\n## Decisions\n-->\n### decisions  \n\n- Old\n#### Detail\n\ntext\n\n- New\n\n### Next\n"
+            "# Card\n\n```md\n## Decisions\n```\n<!--\n## Decisions\n-->\n### decisions  \n\n- Old\n- New\n\n#### Detail\n\ntext\n### Next\n"
         );
         // Only the first Decisions heading gets the entries; a closing "##" is not the title.
         assert_eq!(
@@ -1136,7 +1249,14 @@ mod tests {
             pid_file.display()
         );
 
-        let outcome = run(hook(background.clone()), card("SHE-1"), String::new(), 1).await;
+        let outcome = run(
+            hook(background.clone()),
+            card("SHE-1"),
+            String::new(),
+            1,
+            Parts::ALL,
+        )
+        .await;
         assert!(outcome.ok, "{outcome:?}");
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         assert!(
@@ -1150,6 +1270,7 @@ mod tests {
             card("SHE-1"),
             String::new(),
             1,
+            Parts::ALL,
         )
         .await;
         assert_eq!(outcome.message, "hook timed out after 1s");
@@ -1176,5 +1297,135 @@ mod tests {
         moved.summary = String::new();
         moved.title = "Stripe checkoutCheckout live on dev".into();
         assert_ne!(fingerprint(&moved), base);
+    }
+
+    #[test]
+    fn a_decisions_heading_with_a_note_at_level_two_wins() {
+        // LF-100454's shape: the real `## Decisions (…)` early, a nested `### Decisions` later.
+        let card = "---\nstatus: todo\n---\n\n## Description\n\nText\n\n## Decisions (orquestrador + André, 07/10)\n\n- Old\n\n## Plan\n\n### Decisions\n\n- Nested\n";
+        assert_eq!(
+            md(card, None, &entries(&["New"])),
+            "---\nstatus: todo\n---\n\n## Description\n\nText\n\n## Decisions (orquestrador + André, 07/10)\n\n- Old\n- New\n\n## Plan\n\n### Decisions\n\n- Nested\n"
+        );
+        assert_eq!(
+            md(
+                "## Validation\n#### Decisions\nx\n## Decisions\n- a\n",
+                None,
+                &entries(&["b"])
+            ),
+            "## Validation\n#### Decisions\nx\n## Decisions\n- a\n- b\n"
+        );
+        // Only another level when there is no level-2 one; "Decisions:" counts, "Decisionsx" not.
+        assert_eq!(
+            md(
+                "### Decisions: agreed\n- a\n## Decisionsx\n",
+                None,
+                &entries(&["b"])
+            ),
+            "### Decisions: agreed\n- a\n- b\n\n## Decisionsx\n"
+        );
+        assert!(is_decisions_title("decisions"));
+        assert!(!is_decisions_title("Decisionsx"));
+        assert!(!is_decisions_title("Décisions"));
+    }
+
+    #[test]
+    fn inline_code_does_not_open_a_comment() {
+        assert_eq!(
+            md(
+                "Use `<!--` here\n\n## Decisions\n- old\n",
+                None,
+                &entries(&["new"])
+            ),
+            "Use `<!--` here\n\n## Decisions\n- old\n- new\n"
+        );
+    }
+
+    #[test]
+    fn a_level_one_section_ends_at_level_two_and_entries_precede_sub_headings() {
+        assert_eq!(
+            md("# Decisions\n- a\n## Other\ntext\n", None, &entries(&["b"])),
+            "# Decisions\n- a\n- b\n\n## Other\ntext\n"
+        );
+        assert_eq!(
+            md(
+                "## Decisions\n\n- a\n\n### Why\n\nreasons\n\n## Next\n",
+                None,
+                &entries(&["b"])
+            ),
+            "## Decisions\n\n- a\n- b\n\n### Why\n\nreasons\n\n## Next\n"
+        );
+        // An entry already under the sub-heading is still not repeated.
+        assert_eq!(
+            md("## Decisions\n\n### Why\n- b\n", None, &entries(&["b"])),
+            "## Decisions\n\n### Why\n- b\n"
+        );
+    }
+
+    #[test]
+    fn only_the_part_that_failed_runs_again() {
+        let fp = "abc";
+        let last = |ok: bool, markdown: Option<bool>, hook: Option<bool>| LedgerWriteback {
+            ok,
+            code: String::new(),
+            message: String::new(),
+            at_ms: 0,
+            fingerprint: fp.into(),
+            markdown,
+            hook,
+        };
+        assert_eq!(Parts::after(None, fp), Some(Parts::ALL));
+        assert_eq!(
+            Parts::after(Some(&last(true, Some(true), Some(true))), fp),
+            None
+        );
+        assert_eq!(
+            Parts::after(Some(&last(false, Some(false), Some(true))), fp),
+            Some(Parts {
+                markdown: true,
+                hook: false
+            })
+        );
+        assert_eq!(
+            Parts::after(Some(&last(false, Some(true), Some(false))), fp),
+            Some(Parts {
+                markdown: false,
+                hook: true
+            })
+        );
+        // The card changed: both again.
+        assert_eq!(
+            Parts::after(Some(&last(false, Some(false), Some(true))), "other"),
+            Some(Parts::ALL)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_retry_after_a_missing_file_does_not_run_the_hook_again() {
+        let dir = temp_dir("retry");
+        let runs = dir.join("runs");
+        let config = LedgerWritebackConfig {
+            markdown_path: Some(format!("{}/{{id}}.md", dir.display())),
+            on_card_done: Some(format!("cat >/dev/null; echo run >> '{}'", runs.display())),
+            ..LedgerWritebackConfig::default()
+        };
+        let first = run(config.clone(), card("SHE-1"), String::new(), 1, Parts::ALL).await;
+        assert_eq!(
+            (first.ok, first.markdown, first.hook),
+            (false, Some(false), Some(true))
+        );
+        std::fs::write(dir.join("SHE-1.md"), "Body\n").unwrap();
+        let parts = Parts::after(Some(&first), &fingerprint(&card("SHE-1"))).unwrap();
+        let second = run(config, card("SHE-1"), String::new(), 2, parts).await;
+        assert!(second.ok, "{second:?}");
+        assert_eq!((second.markdown, second.hook), (Some(true), Some(true)));
+        assert_eq!(second.message, "wrote SHE-1.md; hook ran before");
+        assert_eq!(
+            std::fs::read_to_string(&runs).unwrap(),
+            "run\n",
+            "the hook ran once"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -92,6 +92,12 @@ pub struct LedgerWriteback {
     /// summary or decisions changed since is written again on the next `done`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fingerprint: String,
+    /// Whether the Markdown file and the command hook went through, each when configured: the
+    /// next `done` re-runs only a part that failed (unless the card changed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2049,6 +2055,8 @@ mod tests {
             message: "file missing: /tasks/SHE-1.md".into(),
             at_ms: 5,
             fingerprint: String::new(),
+            markdown: Some(false),
+            hook: None,
         };
         ledger.update("SHE-1", explicit("Stripe"), None, 1).unwrap();
         assert!(

@@ -231,9 +231,9 @@ impl App {
     }
 
     /// Writes a done card back to the tracker, off the server loop. It is written again only
-    /// when its last write-back failed or never ran, or the card changed since (a decision or a
-    /// summary added after `done`), so `done` twice does not run the hook twice; nor does a
-    /// `done` while the card's write-back is still running.
+    /// when the card changed since (a decision or a summary added after `done`), or its last
+    /// write-back failed, and then only the part that failed: `done` twice does not run the hook
+    /// twice; nor does a `done` while the card's write-back is still running.
     fn start_ledger_writeback(&mut self, target: &LedgerTarget, item_id: &str) {
         if !crate::ledger_writeback::enabled(&self.ledger_writeback) {
             return;
@@ -254,11 +254,14 @@ impl App {
             item,
             &target.public_pane_id,
         );
-        let written = item.writeback.as_ref().is_some_and(|last| {
-            last.ok && last.fingerprint == crate::ledger_writeback::fingerprint(&card)
-        });
+        let Some(parts) = crate::ledger_writeback::Parts::after(
+            item.writeback.as_ref(),
+            &crate::ledger_writeback::fingerprint(&card),
+        ) else {
+            return;
+        };
         let key = (target.terminal_id.clone(), item_id.to_owned());
-        if written || self.ledger_writebacks_in_flight.contains(&key) {
+        if self.ledger_writebacks_in_flight.contains(&key) {
             return;
         }
         let config = self.ledger_writeback.clone();
@@ -273,7 +276,7 @@ impl App {
         };
         self.ledger_writebacks_in_flight.insert(key);
         runtime.spawn(async move {
-            let outcome = crate::ledger_writeback::run(config, card, date, now_ms()).await;
+            let outcome = crate::ledger_writeback::run(config, card, date, now_ms(), parts).await;
             let _ = event_tx
                 .send(crate::events::AppEvent::LedgerWritebackFinished {
                     terminal_id,
