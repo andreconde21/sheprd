@@ -314,7 +314,10 @@ pub(super) fn render_card(
         hits.push((rect, CardHit::Open(item.id.clone())));
         cx = rect.right() + 1;
     }
+    // SHE-100010: a done card whose write-back failed is marked "!" until it is looked at.
+    let writeback_failed = item.writeback.as_ref().is_some_and(|outcome| !outcome.ok);
     let (glyph, color) = match row.state {
+        LedgerRowState::Done if writeback_failed => ("!", palette.red),
         LedgerRowState::Done => ("✓", palette.green),
         _ if item.inferred => ("●", palette.overlay1),
         _ => ("●", palette.accent),
@@ -376,6 +379,20 @@ pub(super) fn render_card(
             base.fg(palette.overlay1),
         );
         vy = vy.saturating_add(1);
+    }
+    if let Some(outcome) = item.writeback.as_ref().filter(|_| item.done) {
+        let (line, color) = if outcome.ok {
+            (format!("→ {}", outcome.message), palette.overlay1)
+        } else {
+            (format!("! write-back: {}", outcome.message), palette.red)
+        };
+        for line in super::work_panel::wrap(&line, usize::from(inner))
+            .into_iter()
+            .take(2)
+        {
+            canvas.put(dx, vy, inner, &line, base.fg(color));
+            vy = vy.saturating_add(1);
+        }
     }
     for line in super::work_panel::wrap(&item.summary, usize::from(inner))
         .into_iter()

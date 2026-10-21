@@ -68,6 +68,26 @@ pub struct LedgerItem {
     pub questions: Vec<LedgerQuestion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<LedgerDecision>,
+    /// SHE-100010: what writing the done card back to the tracker did. Cleared when the card
+    /// reopens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback: Option<LedgerWriteback>,
+}
+
+/// The outcome of a done card's write-back (SHE-100010). `code` is open text (`written`,
+/// `missing_file`, `unknown_project`, `write_failed`, `hook_failed`, …) rather than an enum, so
+/// a reader that does not know a new code still shows `message`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LedgerWriteback {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub code: String,
+    /// Short, one line: the file written, or why it failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    #[serde(default)]
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -358,6 +378,7 @@ impl LedgerItem {
             next_question_id: 1,
             questions: Vec::new(),
             decisions: Vec::new(),
+            writeback: None,
         }
     }
 
@@ -614,6 +635,10 @@ impl WorkLedger {
             item.status = status;
             // An explicit status reopens a done card; the hook's "done" closes its own.
             item.done = done;
+            if !done {
+                // A reopened card's last write-back is history (SHE-100010).
+                changed |= item.writeback.take().is_some();
+            }
         }
         if let Some(summary) = summary {
             changed |= item.summary != summary;
@@ -820,6 +845,18 @@ impl WorkLedger {
             item.touch(session, now_ms);
         }
         Ok(changed)
+    }
+
+    /// Records a write-back outcome on a card that is still done (SHE-100010); a card that
+    /// reopened or went meanwhile is left alone.
+    pub(crate) fn set_writeback(&mut self, id: &str, outcome: LedgerWriteback) -> bool {
+        match self.items.get_mut(id) {
+            Some(item) if item.done && item.writeback.as_ref() != Some(&outcome) => {
+                item.writeback = Some(outcome);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn remove(&mut self, id: &str) -> Result<bool, LedgerError> {
@@ -1997,5 +2034,65 @@ mod tests {
         );
         // And an unanswered question serializes as before.
         assert!(!serde_json::to_string(&ledger).unwrap().contains("answer"));
+    }
+
+    #[test]
+    fn writeback_outcomes_stay_on_done_cards_until_they_reopen() {
+        let mut ledger = WorkLedger::default();
+        let outcome = LedgerWriteback {
+            ok: false,
+            code: "missing_file".into(),
+            message: "file missing: /tasks/SHE-1.md".into(),
+            at_ms: 5,
+        };
+        ledger.update("SHE-1", explicit("Stripe"), None, 1).unwrap();
+        assert!(
+            !ledger.set_writeback("SHE-1", outcome.clone()),
+            "only done cards"
+        );
+        assert!(
+            !ledger.set_writeback("SHE-9", outcome.clone()),
+            "only cards that exist"
+        );
+        ledger.complete("SHE-1", None, None, 2).unwrap();
+        assert!(ledger.set_writeback("SHE-1", outcome.clone()));
+        assert!(
+            !ledger.set_writeback("SHE-1", outcome.clone()),
+            "same outcome, no change"
+        );
+        assert_eq!(ledger.get("SHE-1").unwrap().writeback, Some(outcome));
+
+        // A decision on the done card keeps it; a new status reopens it and clears it.
+        ledger.decide("SHE-1", "Later".into(), None, 3).unwrap();
+        assert!(ledger.get("SHE-1").unwrap().writeback.is_some());
+        let reopened = ledger
+            .update(
+                "SHE-1",
+                LedgerUpdate {
+                    status: Some("dev".into()),
+                    ..LedgerUpdate::default()
+                },
+                None,
+                4,
+            )
+            .unwrap();
+        assert!(reopened.value);
+        assert!(ledger.get("SHE-1").unwrap().writeback.is_none());
+    }
+
+    #[test]
+    fn writeback_field_is_optional_on_the_wire() {
+        // Older snapshots and servers have no `writeback`; older readers skip it.
+        let item: LedgerItem =
+            serde_json::from_value(serde_json::json!({"id": "SHE-1", "done": true})).unwrap();
+        assert!(item.writeback.is_none());
+        assert!(!serde_json::to_string(&item).unwrap().contains("writeback"));
+        let item: LedgerItem = serde_json::from_value(serde_json::json!({
+            "id": "SHE-1", "done": true,
+            "writeback": {"ok": true, "code": "future_code", "extra": 1}
+        }))
+        .unwrap();
+        let outcome = item.writeback.unwrap();
+        assert!(outcome.ok && outcome.code == "future_code" && outcome.message.is_empty());
     }
 }

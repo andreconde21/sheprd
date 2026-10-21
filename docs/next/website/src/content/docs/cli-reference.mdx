@@ -391,6 +391,25 @@ Clicking CARDS, or `prefix+shift+c` (`keys.open_cards_view`), opens the Cards vi
 
 Hooks can seed entries for agents that never call these commands with `update --inferred`, plus `--inferred-question TEXT` (repeatable) or `--clear-questions` to replace the inferred questions. Inferred entries are shown dimmed, never change an entry an agent wrote, and never push one out of a full ledger: an explicit write to an inferred card takes it over and drops the inferred questions. Servers without the ledger reject these commands with a message to update.
 
+When a card is done, the server can write it back to your task tracker, so the card file stays the durable record and the ledger a temporary inbox. Configure it in `[ledger.writeback]` (see the [config reference](/docs/config-reference/)); without it nothing is written. With `markdown_path`, the card's Markdown file gets the frontmatter `status:` set to `done_status` (added when missing) and its decisions, plus a dated `Done YYYY-MM-DD: summary` line when the card has a summary, appended as bullets under `## Decisions` (the section is created at the end of the file when missing). Every other byte of the file stays as it was, CRLF files keep CRLF, entries already in the section are not repeated, and the file is replaced atomically with its permissions kept. The file is never created and never committed: committing is yours. With `on_card_done`, a shell command gets the card as JSON on stdin, for GitHub Issues, Linear, Jira or anything else:
+
+```json
+{"id": "SHE-12", "title": "Stripe checkout", "status": "verify", "link": "https://…", "summary": "Checkout live on dev", "decisions": ["Use Checkout, not Elements"], "pane_id": "w1:p2", "agent_session": "…"}
+```
+
+It is killed after `timeout_seconds` (10). The write-back runs on the server in the background and never blocks the agent. Its outcome is kept on the card: an expanded done card shows `→ wrote SHE-12.md`, or `! write-back:` and the reason (file missing, unknown project, the hook's exit code and last stderr line, or its timeout), and a failed card's row is marked `!` instead of `✓`; `card list` prints the same line. The card stays in the ledger either way. `done` on a card that is already done writes it again only when its last write-back failed. A task-files folder such as ProjectsTasks (`<root>/<project>/<ID>.md`, a `status:` field, autosync commits) needs only configuration:
+
+```toml
+[ledger.writeback]
+markdown_path = "{root}/{project}/{id}.md"
+root = "/data/projectstasks"
+projects = { SHE = "sheprd", CAL = "thecalendar" }
+done_status = "verify"
+# on_card_done = "~/bin/card-done-to-github"
+```
+
+`sheprd setup` installs the `sheprd-card` agent skill, which tells agents when to call `card update`, `ask`, `decide` and `done`, how to phrase a question with options and a recommendation, and to read the answers back with `card answers`.
+
 ## Direct terminal attach
 
 ```bash

@@ -217,4 +217,10 @@ pub enum AppEvent {
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
     /// Background worktree discovery completed for an API list/open request.
     WorktreeReadFinished(Box<WorktreeReadResult>),
+    /// andreconde fork (sheprd): a done card's write-back finished (SHE-100010).
+    LedgerWritebackFinished {
+        terminal_id: crate::terminal::TerminalId,
+        item_id: String,
+        outcome: crate::work_ledger::LedgerWriteback,
+    },
 }

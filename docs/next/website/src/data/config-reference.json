@@ -1475,6 +1475,48 @@
       ]
     },
     {
+      "id": "ledger",
+      "title": "Card ledger",
+      "keys": [
+        {
+          "key": "ledger.writeback.done_status",
+          "type": "string",
+          "default": "unset",
+          "description": "Frontmatter `status:` a done card's Markdown file gets, for example \"verify\". Unset leaves the status alone. Also the `status` the `on_card_done` command receives (\"done\" when unset)."
+        },
+        {
+          "key": "ledger.writeback.markdown_path",
+          "type": "string",
+          "default": "unset",
+          "description": "Markdown file a done card is written back to, for example \"{root}/{project}/{id}.md\". {id} is the card ID, {prefix} its part before the first \"-\", {project} the prefix's entry in `ledger.writeback.projects` and {root} `ledger.writeback.root`. The file must exist; it is never created or committed."
+        },
+        {
+          "key": "ledger.writeback.on_card_done",
+          "type": "string",
+          "default": "unset",
+          "description": "Shell command run when a card is done, with the card as JSON on stdin (id, title, status, link, summary, decisions, pane_id, agent_session). A non-zero exit or a timeout is shown on the card."
+        },
+        {
+          "key": "ledger.writeback.projects",
+          "type": "table",
+          "default": "{}",
+          "description": "Project for each card ID prefix, for example { SHE = \"sheprd\", CAL = \"thecalendar\" }. A card whose prefix is missing is reported as an unknown project when `markdown_path` uses {project}."
+        },
+        {
+          "key": "ledger.writeback.root",
+          "type": "path",
+          "default": "unset",
+          "description": "Folder that {root} in `markdown_path` stands for. A leading ~ is the home folder."
+        },
+        {
+          "key": "ledger.writeback.timeout_seconds",
+          "type": "integer",
+          "default": "10",
+          "description": "Seconds `on_card_done` may run before it and its children are killed."
+        }
+      ]
+    },
+    {
       "id": "advanced",
       "title": "Advanced",
       "keys": [

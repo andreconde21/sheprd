@@ -198,6 +198,16 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::LedgerWritebackFinished {
+            terminal_id,
+            item_id,
+            outcome,
+        } = ev
+        {
+            self.handle_ledger_writeback_finished(&terminal_id, &item_id, outcome);
+            return Vec::new();
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_api_worktree_add_finished(*result);
             return Vec::new();
