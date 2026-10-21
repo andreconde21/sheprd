@@ -5,6 +5,19 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-6 (2026-10-21)
+
+### Added
+- Write-back when a card is done. With `[ledger.writeback]` configured, `sheprd card done` sets the
+  task file's frontmatter status and adds the card's decisions and summary under its Decisions
+  section (path template plus ID-prefix → project map; nothing else in the file changes, the owner
+  is kept, nothing is committed). An optional `on_card_done` command gets the card as JSON on stdin,
+  for GitHub Issues, Linear, Jira or anything else. The outcome shows on the card (`✓` or `!` and
+  the reason); a failed part is retried on the next `done`, and a card changed after `done` is
+  written again.
+- `sheprd-card` skill, installed by `sheprd setup`: tells agents when to update cards, record
+  decisions, ask questions with options and a recommendation, read your answers and mark cards done.
+
 ## sheprd-v0.9.5-5 (2026-10-20)
 
 ### Added
