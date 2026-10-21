@@ -115,9 +115,11 @@ pub(crate) async fn run(
         Some(first) => LedgerWriteback {
             ok: false,
             code: first.code.into(),
+            // What failed first, then what still went through.
             message: failures
                 .iter()
                 .map(|failure| failure.message.as_str())
+                .chain(written.iter().map(String::as_str))
                 .collect::<Vec<_>>()
                 .join("; "),
             at_ms: now_ms,
@@ -796,6 +798,20 @@ mod tests {
             (failed.ok, failed.code.as_str(), failed.message.as_str()),
             (false, "hook_failed", "hook failed (exit 3): nope")
         );
+
+        // A missing file does not stop the hook; the outcome names both.
+        let both = run(
+            LedgerWritebackConfig {
+                markdown_path: Some(format!("{}/{{id}}.md", dir.display())),
+                ..hook("cat >/dev/null".into())
+            },
+            card("SHE-404"),
+            String::new(),
+            1,
+        )
+        .await;
+        assert_eq!((both.ok, both.code.as_str()), (false, "missing_file"));
+        assert!(both.message.ends_with(".md; hook ran"), "{both:?}");
 
         let started = std::time::Instant::now();
         let slow = run(hook("sleep 30".into()), card("SHE-1"), String::new(), 1).await;
