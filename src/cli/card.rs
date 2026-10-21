@@ -329,6 +329,15 @@ fn format_list(result: &serde_json::Value) -> String {
             if let Some(summary) = text(&item["summary"]) {
                 out.push_str(&format!("    {summary}\n"));
             }
+            // SHE-100010: what writing the done card back to the tracker did.
+            let writeback = &item["writeback"];
+            if let Some(message) = text(&writeback["message"]) {
+                if writeback["ok"].as_bool() == Some(true) {
+                    out.push_str(&format!("    → {message}\n"));
+                } else {
+                    out.push_str(&format!("    ! write-back: {message}\n"));
+                }
+            }
             for question in questions
                 .iter()
                 .filter(|question| question["dismissed"].as_bool() != Some(true))

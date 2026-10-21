@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+};
 
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -323,6 +326,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub ledger: LedgerConfig,
 }
 
 #[derive(Debug)]
@@ -1137,6 +1141,33 @@ impl Default for RemoteConfig {
             manage_ssh_config: true,
         }
     }
+}
+
+/// andreconde fork (sheprd): the card ledger (SHE-100010).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LedgerConfig {
+    /// What the server does when a card is done (`sheprd card done`).
+    pub writeback: LedgerWritebackConfig,
+}
+
+/// andreconde fork (sheprd): write-back of done cards to a task tracker (SHE-100010). Off
+/// while neither `markdown_path` nor `on_card_done` is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LedgerWritebackConfig {
+    /// Card file to update, e.g. "{root}/{project}/{id}.md". {prefix} is the card ID before its first "-". Default: unset.
+    pub markdown_path: Option<String>,
+    /// Folder that {root} stands for; "~" is the home folder. Default: unset.
+    pub root: Option<String>,
+    /// Project for each card ID prefix, e.g. { SHE = "sheprd" }; {project} stands for it. Default: empty.
+    pub projects: BTreeMap<String, String>,
+    /// Frontmatter status the card file gets. Unset leaves the status alone. Default: unset.
+    pub done_status: Option<String>,
+    /// Shell command run with the done card as JSON on stdin. Default: unset.
+    pub on_card_done: Option<String>,
+    /// Seconds `on_card_done` may run before it is killed. Default: 10.
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

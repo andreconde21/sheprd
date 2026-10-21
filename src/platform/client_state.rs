@@ -30,3 +30,24 @@ pub(crate) fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     // replace_file uses MOVEFILE_WRITE_THROUGH on Windows.
     Ok(())
 }
+
+/// andreconde fork (sheprd): gives `file` the owner of `like` (SHE-100010), so replacing a
+/// user's file from a server running as root does not hand it to root. Fails without the
+/// privilege to change owners; callers treat it as best effort.
+#[cfg(unix)]
+pub(crate) fn copy_file_owner(
+    like: &std::fs::Metadata,
+    file: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::os::unix::fs::fchown(file, Some(like.uid()), Some(like.gid()))
+}
+
+/// Files have no Unix owner to keep here.
+#[cfg(not(unix))]
+pub(crate) fn copy_file_owner(
+    _like: &std::fs::Metadata,
+    _file: &std::fs::File,
+) -> std::io::Result<()> {
+    Ok(())
+}

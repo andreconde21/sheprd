@@ -8,6 +8,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
     "experimental",
     "keys",
+    "ledger",
     "onboarding",
     "remote",
     "server",
@@ -374,6 +375,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.remote = section,
+    );
+    load_live_section(
+        table,
+        "ledger",
+        "ledger config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.ledger = section,
     );
 
     diagnostics.extend(config.theme.diagnostics());
@@ -898,6 +907,43 @@ resume_agents_on_restore = true
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_parses_ledger_writeback() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ledger.writeback]
+markdown_path = "{root}/{project}/{id}.md"
+root = "/data/projectstasks"
+projects = { SHE = "sheprd", CAL = "thecalendar" }
+done_status = "verify"
+on_card_done = "my-hook"
+timeout_seconds = 5
+"#,
+        )
+        .unwrap();
+
+        let writeback = &loaded.config.ledger.writeback;
+        assert_eq!(
+            writeback.markdown_path.as_deref(),
+            Some("{root}/{project}/{id}.md")
+        );
+        assert_eq!(writeback.root.as_deref(), Some("/data/projectstasks"));
+        assert_eq!(
+            writeback.projects.get("CAL").map(String::as_str),
+            Some("thecalendar")
+        );
+        assert_eq!(writeback.done_status.as_deref(), Some("verify"));
+        assert_eq!(writeback.on_card_done.as_deref(), Some("my-hook"));
+        assert_eq!(writeback.timeout_seconds, Some(5));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+
+        let loaded = load_live_config_from_str("[ledger.writeback]\nmarkdown = 1\n").unwrap();
+        assert_eq!(loaded.config.ledger.writeback, Default::default());
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
+        let loaded = load_live_config_from_str("[ledger.writeback]\nprojects = 3\n").unwrap();
+        assert_eq!(loaded.invalid_sections, vec!["ledger"]);
     }
 
     #[test]

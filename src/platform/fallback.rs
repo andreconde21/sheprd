@@ -159,6 +159,8 @@ impl StatusCommandGuard {
     }
 
     pub(crate) fn terminate(&mut self) {}
+
+    pub(crate) fn disarm(&mut self) {}
 }
 
 fn raw_command_argv(command: &str, flag: &str) -> Vec<std::ffi::OsString> {

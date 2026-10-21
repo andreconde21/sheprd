@@ -8426,6 +8426,17 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "writeback": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/LedgerWriteback"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "SHE-100010: what writing the done card back to the tracker did. Cleared when the card\nreopens."
             }
           },
           "required": [
@@ -8560,6 +8571,47 @@
             "text",
             "questions"
           ],
+          "type": "object"
+        },
+        "LedgerWriteback": {
+          "description": "The outcome of a done card's write-back (SHE-100010). `code` is open text (`written`,\n`missing_file`, `unknown_project`, `write_failed`, `hook_failed`, …) rather than an enum, so\na reader that does not know a new code still shows `message`.",
+          "properties": {
+            "at_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "code": {
+              "default": "",
+              "type": "string"
+            },
+            "fingerprint": {
+              "description": "What was written (`ledger_writeback::fingerprint`): a done card whose title, link,\nsummary or decisions changed since is written again on the next `done`.",
+              "type": "string"
+            },
+            "hook": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "markdown": {
+              "description": "Whether the Markdown file and the command hook went through, each when configured: the\nnext `done` re-runs only a part that failed (unless the card changed).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "Short, one line: the file written, or why it failed.",
+              "type": "string"
+            },
+            "ok": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "NotificationShowReason": {

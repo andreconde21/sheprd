@@ -16,6 +16,8 @@ const STATUS_GITHUB: &str = include_str!("../scripts/sheprd-status-github");
 const DOC: &str = include_str!("../scripts/sheprd-doc");
 /// Moves an agent to another machine (the agent menu's "Move to…").
 const MOVE: &str = include_str!("../scripts/sheprd-move");
+/// The agent skill for the card ledger (SHE-100010); `setup` installs it from next to the script.
+const CARD_SKILL: &str = include_str!("../skills/sheprd-card/SKILL.md");
 
 /// Writes the bundled scripts next to the sheprd binary (only when they changed) and returns
 /// the messaging script's path.
@@ -26,6 +28,7 @@ fn script_path() -> std::io::Result<PathBuf> {
         ("sheprd-status-github", STATUS_GITHUB),
         ("sheprd-doc", DOC),
         ("sheprd-move", MOVE),
+        ("sheprd-card-skill.md", CARD_SKILL),
         ("sheprd-msg", SCRIPT),
     ] {
         let path = exe.with_file_name(name);

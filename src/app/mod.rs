@@ -173,6 +173,12 @@ pub struct App {
     // False when startup could not pin every installation; cleanup could
     // otherwise reclaim files a restored consumer still uses.
     pub(crate) plugin_installation_cleanup_allowed: bool,
+    /// andreconde fork (sheprd): `[ledger.writeback]`, what a done card writes back (SHE-100010).
+    pub(crate) ledger_writeback: crate::config::LedgerWritebackConfig,
+    /// Cards whose write-back is running, by terminal and card id: a `done` meanwhile starts
+    /// no second one.
+    pub(crate) ledger_writebacks_in_flight:
+        std::collections::HashSet<(crate::terminal::TerminalId, String)>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -680,6 +686,8 @@ impl App {
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
+            ledger_writeback: config.ledger.writeback.clone(),
+            ledger_writebacks_in_flight: std::collections::HashSet::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
@@ -966,6 +974,10 @@ impl App {
 
         if !invalid_section("advanced") {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("ledger") {
+            self.ledger_writeback = config.ledger.writeback.clone();
         }
 
         if !invalid_section("update") {

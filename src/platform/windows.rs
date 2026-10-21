@@ -1274,6 +1274,34 @@ fn resume_suspended_process(process_id: Option<u32>) -> std::io::Result<()> {
 }
 
 impl StatusCommandGuard {
+    /// Leaves the job's processes running: the kill-on-close limit is lifted before the job
+    /// handle closes, so dropping the guard no longer kills them.
+    pub(crate) fn disarm(&mut self) {
+        if self.job == 0 {
+            return;
+        }
+        let limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let lifted = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).is_ok_and(
+            |limits_size| unsafe {
+                SetInformationJobObject(
+                    self.job as HANDLE,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    limits_size,
+                ) != 0
+            },
+        );
+        if !lifted {
+            // Better to stop the hook's leftovers than to leak the job handle.
+            tracing::debug!("could not lift the job's kill-on-close limit");
+            return;
+        }
+        unsafe {
+            CloseHandle(self.job as HANDLE);
+        }
+        self.job = 0;
+    }
+
     pub(crate) fn terminate(&mut self) {
         if self.job != 0 {
             // KILL_ON_JOB_CLOSE terminates the shell and every descendant still in
