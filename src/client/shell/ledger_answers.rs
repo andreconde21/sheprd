@@ -314,7 +314,8 @@ pub(super) fn render_card(
         hits.push((rect, CardHit::Open(item.id.clone())));
         cx = rect.right() + 1;
     }
-    // SHE-100010: a done card whose write-back failed is marked "!" until it is looked at.
+    // SHE-100010: a done card whose write-back failed is marked "!" until a later write-back
+    // succeeds or the card reopens.
     let writeback_failed = item.writeback.as_ref().is_some_and(|outcome| !outcome.ok);
     let (glyph, color) = match row.state {
         LedgerRowState::Done if writeback_failed => ("!", palette.red),
@@ -950,5 +951,62 @@ mod tests {
             Some(Rect::new(0, 2, 5, 1))
         );
         assert_eq!(canvas.put(0, 7, 5, "below", Style::default()), None);
+    }
+
+    #[test]
+    fn done_cards_show_their_write_back_outcome() {
+        let draw_card = |writeback: serde_json::Value| {
+            let item: crate::work_ledger::LedgerItem = serde_json::from_value(serde_json::json!({
+                "id": "SHE-1", "title": "Stripe", "done": true, "writeback": writeback
+            }))
+            .unwrap();
+            let row = super::super::work_ledger_view::LedgerRow {
+                item,
+                state: super::super::work_ledger_view::LedgerRowState::Done,
+                open_questions: 0,
+            };
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 6));
+            let endpoint_id = ClientEndpointId::Local;
+            let target = QuestionTarget {
+                endpoint_id: &endpoint_id,
+                pane_id: "w1:p1",
+                item_id: "SHE-1",
+                answerable: false,
+            };
+            let mut canvas = Canvas {
+                buffer: &mut buffer,
+                top: 0,
+                first: 0,
+                bottom: 6,
+            };
+            render_card(
+                &mut canvas,
+                0,
+                50,
+                0,
+                &row,
+                true,
+                &target,
+                &Palette::catppuccin(),
+                Style::default(),
+                &mut Vec::new(),
+            );
+            (row_text(&buffer, 0), row_text(&buffer, 1))
+        };
+        // A failed write-back marks the row "!" (until a later one succeeds or the card reopens).
+        let (head, line) = draw_card(serde_json::json!({
+            "ok": false, "code": "missing_file", "message": "file missing: /t/SHE-1.md"
+        }));
+        assert!(head.ends_with('!'), "{head}");
+        assert_eq!(line, "  ! write-back: file missing: /t/SHE-1.md");
+        let (head, line) = draw_card(
+            serde_json::json!({"ok": true, "code": "written", "message": "wrote SHE-1.md"}),
+        );
+        assert!(head.ends_with('✓'), "{head}");
+        assert_eq!(line, "  → wrote SHE-1.md");
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        row(buffer, y)
     }
 }

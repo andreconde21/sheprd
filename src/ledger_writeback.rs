@@ -84,6 +84,31 @@ pub(crate) fn done_card(
     }
 }
 
+/// What a write-back wrote, so a done card is written again only when it changed since: its
+/// title, link, summary and decisions (not who wrote it or where).
+pub(crate) fn fingerprint(card: &DoneCard) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for part in [
+        &card.title,
+        card.link.as_deref().unwrap_or_default(),
+        &card.summary,
+    ]
+    .into_iter()
+    .chain(card.decisions.iter().map(String::as_str))
+    {
+        // Length-prefixed, so moving text between fields changes the result.
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Runs the configured write-back for one done card. `date` (YYYY-MM-DD) dates its Done line.
 pub(crate) async fn run(
     config: LedgerWritebackConfig,
@@ -123,12 +148,14 @@ pub(crate) async fn run(
                 .collect::<Vec<_>>()
                 .join("; "),
             at_ms: now_ms,
+            fingerprint: fingerprint(&card),
         },
         None => LedgerWriteback {
             ok: true,
             code: "written".into(),
             message: written.join("; "),
             at_ms: now_ms,
+            fingerprint: fingerprint(&card),
         },
     };
     if !outcome.ok {
@@ -225,23 +252,31 @@ fn write_markdown(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    if updated == content {
-        return Ok(format!("{name} already up to date"));
+    // Said, so "wrote" never hides that the tracker still shows the old status.
+    let note = if updated.status_set {
+        ""
+    } else {
+        " (no frontmatter: status not set)"
+    };
+    if updated.content == content {
+        return Ok(format!("{name} already up to date{note}"));
     }
-    write_atomically(&path, &updated).map_err(|err| {
+    write_atomically(&path, &updated.content).map_err(|err| {
         Failure::new(
             "write_failed",
             format!("cannot write {}: {err}", path.display()),
         )
     })?;
-    Ok(format!("wrote {name}"))
+    Ok(format!("wrote {name}{note}"))
 }
 
 /// Replaces `path` with `content` through a temporary file in the same folder, keeping the
-/// file's permissions. A symlink is followed: its target is replaced, not the link.
+/// file's permissions and, where the platform has them and the server may, its owner (a
+/// server running as root must not leave the user's card owned by root). A symlink is
+/// followed: its target is replaced, not the link.
 fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
     let path = std::fs::canonicalize(path)?;
-    let permissions = std::fs::metadata(&path)?.permissions();
+    let metadata = std::fs::metadata(&path)?;
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("file has no folder"))?;
@@ -256,10 +291,14 @@ fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
             .create_new(true)
             .open(&temp)?;
         file.write_all(content.as_bytes())?;
-        file.set_permissions(permissions)?;
+        if let Err(err) = crate::platform::copy_file_owner(&metadata, &file) {
+            tracing::debug!(%err, path = %path.display(), "card file keeps the server's owner");
+        }
+        // After the owner: changing it may clear set-id bits.
+        file.set_permissions(metadata.permissions())?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&temp, &path)
+        crate::platform::replace_file(&temp, &path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -294,30 +333,161 @@ fn without_ending(line: &str) -> &str {
     line.trim_end_matches(['\n', '\r'])
 }
 
-/// A YAML scalar for the status: plain when that reads back the same, else double-quoted.
-fn yaml_scalar(value: &str, quoted: bool) -> String {
+/// An ATX heading's level and title (`### Decisions ##` is level 3, "Decisions").
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let text = without_ending(line);
+    let trimmed = text.trim_start_matches(' ');
+    if text.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|&c| c == '#').count();
+    let rest = &trimmed[level..];
+    if !(1..=6).contains(&level) || !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let title = rest.trim();
+    // A closing run of '#' after a space is not part of the title.
+    let title = match title.trim_end_matches('#') {
+        stripped
+            if stripped.len() != title.len()
+                && (stripped.is_empty() || stripped.ends_with([' ', '\t'])) =>
+        {
+            stripped.trim_end()
+        }
+        _ => title,
+    };
+    Some((level, title))
+}
+
+/// The lines outside fenced code and HTML comments: where a heading can be.
+fn markdown_lines(lines: &[String], from: usize) -> Vec<bool> {
+    let mut outside = vec![false; lines.len()];
+    let mut fence: Option<(char, usize)> = None;
+    let mut comment = false;
+    for (index, line) in lines.iter().enumerate().skip(from) {
+        let text = without_ending(line).trim_start();
+        if comment {
+            comment = !text.contains("-->");
+            continue;
+        }
+        let marker = text.chars().next().filter(|&c| c == '`' || c == '~');
+        if let Some(marker) = marker {
+            let run = text.chars().take_while(|&c| c == marker).count();
+            if run >= 3 {
+                fence = match fence {
+                    None => Some((marker, run)),
+                    Some((open, length)) if open == marker && run >= length => None,
+                    open => open,
+                };
+                continue;
+            }
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if let Some(start) = text.find("<!--") {
+            comment = !text[start..].contains("-->");
+        }
+        outside[index] = true;
+    }
+    outside
+}
+
+/// A YAML scalar for the status in the style the file used: double- or single-quoted, or plain
+/// when that reads back the same (else double-quoted).
+fn yaml_scalar(value: &str, style: Option<char>) -> String {
     let plain = !value.is_empty()
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ' | '/'))
         && !value.starts_with([' ', '-'])
         && !value.ends_with(' ');
-    if plain && !quoted {
-        value.to_owned()
-    } else {
-        serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
+    match style {
+        Some('\'') => format!("'{}'", value.replace('\'', "''")),
+        None if plain => value.to_owned(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\"")),
     }
 }
 
-/// The card file with its frontmatter `status:` set to `done_status` (added when missing; a
-/// file without frontmatter keeps none) and each entry not yet there appended as a bullet under
-/// `## Decisions` (created at the end when missing). Every other line keeps its bytes, and new
-/// lines use the file's line ending (CRLF when it has any).
+/// A `status:` line's value split out: what comes before it, its quote style, its meaning, and
+/// what follows it (spaces and a `# comment`).
+struct StatusValue<'a> {
+    lead: &'a str,
+    style: Option<char>,
+    value: String,
+    tail: &'a str,
+}
+
+fn status_value(rest: &str) -> StatusValue<'_> {
+    let token = rest.trim_start();
+    let lead = &rest[..rest.len() - token.len()];
+    let quote = token.chars().next().filter(|&c| c == '"' || c == '\'');
+    if let Some(quote) = quote {
+        let mut escaped = false;
+        let mut chars = token.char_indices().skip(1).peekable();
+        while let Some((index, c)) = chars.next() {
+            if quote == '"' && escaped {
+                escaped = false;
+            } else if quote == '"' && c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                if quote == '\'' && chars.peek().is_some_and(|&(_, next)| next == '\'') {
+                    chars.next();
+                    continue;
+                }
+                let end = index + c.len_utf8();
+                let quoted = &token[..end];
+                let value = if quote == '"' {
+                    serde_json::from_str(quoted).unwrap_or_else(|_| quoted[1..index].to_owned())
+                } else {
+                    quoted[1..index].replace("''", "'")
+                };
+                return StatusValue {
+                    lead,
+                    style: Some(quote),
+                    value,
+                    tail: &token[end..],
+                };
+            }
+        }
+    }
+    // Plain: up to a ` #` comment, trailing spaces left with the tail.
+    let end = token
+        .char_indices()
+        .find(|&(index, c)| c == '#' && index > 0 && token[..index].ends_with([' ', '\t']))
+        .map_or(token.len(), |(index, _)| index);
+    let value = token[..end].trim_end();
+    StatusValue {
+        lead,
+        style: None,
+        value: value.to_owned(),
+        tail: &token[value.len()..],
+    }
+}
+
+/// `update_markdown`'s result: the new content, and whether the status could be set (false:
+/// a status was configured but the file has no frontmatter).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MarkdownUpdate {
+    pub(crate) content: String,
+    pub(crate) status_set: bool,
+}
+
+/// The card file with its frontmatter `status:` value set to `done_status` (only the value: its
+/// quoting and a trailing comment stay; added when missing, but a file without frontmatter gets
+/// none) and each entry not yet there appended as a bullet under the first `Decisions` heading
+/// of any level outside code and comments (a `## Decisions` is created at the end when there is
+/// none). Every other line keeps its bytes, a UTF-8 BOM stays, and new lines use the file's
+/// line ending (CRLF when it has any).
 pub(crate) fn update_markdown(
     content: &str,
     done_status: Option<&str>,
     entries: &[String],
-) -> String {
+) -> MarkdownUpdate {
+    let (bom, content) = match content.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", content),
+    };
     let newline = if content.contains("\r\n") {
         "\r\n"
     } else {
@@ -327,6 +497,10 @@ pub(crate) fn update_markdown(
         .split_inclusive('\n')
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let status = done_status
+        .map(str::trim)
+        .filter(|status| !status.is_empty());
+    let mut status_set = status.is_none();
 
     // Frontmatter: `---` on the first line up to the next `---` (or `...`).
     let mut body_start = 0;
@@ -338,26 +512,24 @@ pub(crate) fn update_markdown(
             (1..lines.len()).find(|&index| matches!(without_ending(&lines[index]), "---" | "..."))
         {
             body_start = end + 1;
-            if let Some(status) = done_status
-                .map(str::trim)
-                .filter(|status| !status.is_empty())
-            {
+            if let Some(status) = status {
+                status_set = true;
                 match (1..end).find(|&index| lines[index].starts_with("status:")) {
                     Some(index) => {
                         let line = &lines[index];
-                        let ending = &line[without_ending(line).len()..];
-                        let old = without_ending(line)["status:".len()..].trim();
-                        let quoted = old.starts_with(['"', '\'']);
-                        let value = yaml_scalar(status, quoted);
-                        let unquoted = old.trim_matches(['"', '\'']);
-                        if unquoted != status {
-                            lines[index] = format!("status: {value}{ending}");
+                        let text = without_ending(line);
+                        let ending = &line[text.len()..];
+                        let old = status_value(&text["status:".len()..]);
+                        if old.value != status {
+                            let lead = if old.lead.is_empty() { " " } else { old.lead };
+                            let value = yaml_scalar(status, old.style);
+                            lines[index] = format!("status:{lead}{value}{}{ending}", old.tail);
                         }
                     }
                     None => {
                         lines.insert(
                             end,
-                            format!("status: {}{newline}", yaml_scalar(status, false)),
+                            format!("status: {}{newline}", yaml_scalar(status, None)),
                         );
                         body_start += 1;
                     }
@@ -365,24 +537,25 @@ pub(crate) fn update_markdown(
             }
         }
     }
+    let finish = |lines: Vec<String>| MarkdownUpdate {
+        content: format!("{bom}{}", lines.concat()),
+        status_set,
+    };
 
-    // The `## Decisions` section: from its heading to the next heading of level 1 or 2.
-    let mut fenced = false;
-    let mut heading = None;
+    // The Decisions section: from its heading to the next heading of the same or a higher level.
+    let outside = markdown_lines(&lines, body_start);
+    let mut section = None;
     let mut section_end = lines.len();
     for (index, line) in lines.iter().enumerate().skip(body_start) {
-        let text = without_ending(line);
-        if text.trim_start().starts_with("```") || text.trim_start().starts_with("~~~") {
-            fenced = !fenced;
+        if !outside[index] {
             continue;
         }
-        if fenced {
+        let Some((level, title)) = heading(line) else {
             continue;
-        }
-        let top_heading = text.starts_with("# ") || text.starts_with("## ");
-        match heading {
-            None if text.trim_end().eq_ignore_ascii_case("## decisions") => heading = Some(index),
-            Some(_) if top_heading => {
+        };
+        match section {
+            None if title.eq_ignore_ascii_case("decisions") => section = Some((index, level)),
+            Some((_, section_level)) if level <= section_level => {
                 section_end = index;
                 break;
             }
@@ -390,34 +563,36 @@ pub(crate) fn update_markdown(
         }
     }
 
-    let section = heading.map_or(&[][..], |heading| &lines[heading + 1..section_end]);
+    let existing = section.map_or(&[][..], |(heading, _)| &lines[heading + 1..section_end]);
     let mut new_entries = Vec::new();
     for entry in entries {
         let entry = entry.trim();
-        if !entry.is_empty() && !has_entry(section, entry) && !new_entries.contains(&entry) {
+        if !entry.is_empty() && !has_entry(existing, entry) && !new_entries.contains(&entry) {
             new_entries.push(entry);
         }
     }
     if new_entries.is_empty() {
-        return lines.concat();
+        return finish(lines);
     }
     let bullets = new_entries
         .iter()
         .map(|entry| format!("- {entry}{newline}"))
         .collect::<Vec<_>>();
 
-    let Some(heading) = heading else {
+    let Some((heading, _)) = section else {
         // No section: a new one at the end, after a blank line.
-        let mut out = lines.concat();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push_str(newline);
+        if let Some(last) = lines.last_mut() {
+            if !last.ends_with('\n') {
+                last.push_str(newline);
+            }
         }
-        if !out.is_empty() && !out.ends_with(&format!("{newline}{newline}")) && out != newline {
-            out.push_str(newline);
+        if lines.last().is_some_and(|last| !last.trim().is_empty()) {
+            lines.push(newline.to_owned());
         }
-        out.push_str(&format!("## Decisions{newline}{newline}"));
-        out.extend(bullets);
-        return out;
+        lines.push(format!("## Decisions{newline}"));
+        lines.push(newline.to_owned());
+        lines.extend(bullets);
+        return finish(lines);
     };
 
     let last_content = (heading + 1..section_end)
@@ -448,11 +623,13 @@ pub(crate) fn update_markdown(
         insert.push(newline.to_owned());
     }
     lines.splice(at..at, insert);
-    lines.concat()
+    finish(lines)
 }
 
 /// Runs `on_card_done` with the card as JSON on stdin. Fails on a spawn error, a non-zero exit
-/// (with the last line of its stderr) or the timeout, after which it and its children are killed.
+/// (with the last line of its stderr) or the timeout. Only a timeout kills it and its children;
+/// background work a hook that exited normally left running (a detached upload, say) is left
+/// alone.
 async fn run_hook(command: &str, card: &DoneCard, timeout: Duration) -> Result<(), Failure> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -465,16 +642,16 @@ async fn run_hook(command: &str, card: &DoneCard, timeout: Duration) -> Result<(
         .stderr(std::process::Stdio::piped());
     crate::platform::configure_status_command(&mut process);
     let mut process = tokio::process::Command::from(process);
-    process.kill_on_drop(true);
     let mut child = process
         .spawn()
         .map_err(|err| Failure::new("hook_failed", format!("hook did not start: {err}")))?;
-    // Kills the hook's process group when this returns, timeout included.
-    let _guard = crate::platform::StatusCommandGuard::new(&child)
+    // Kills the hook's process group when dropped armed: on the timeout, or if this task goes.
+    let mut guard = crate::platform::StatusCommandGuard::new(&child)
         .map_err(|err| Failure::new("hook_failed", format!("hook did not start: {err}")))?;
+    let deadline = tokio::time::Instant::now() + timeout;
     if let Some(mut stdin) = child.stdin.take() {
         // A hook that does not read its input may close it early; that is its business.
-        let _ = tokio::time::timeout(timeout, stdin.write_all(&input)).await;
+        let _ = tokio::time::timeout_at(deadline, stdin.write_all(&input)).await;
     }
     // Drained to the end (a chatty hook never blocks on a full pipe); the last bytes are kept.
     let stderr = child.stderr.take().map(|mut stderr| {
@@ -506,7 +683,11 @@ async fn run_hook(command: &str, card: &DoneCard, timeout: Duration) -> Result<(
         };
         (status, stderr)
     };
-    match tokio::time::timeout(timeout, operation).await {
+    let finished = tokio::time::timeout_at(deadline, operation).await;
+    if finished.is_ok() {
+        guard.disarm();
+    }
+    match finished {
         Err(_) => Err(Failure::new(
             "hook_failed",
             format!("hook timed out after {}s", timeout.as_secs()),
@@ -565,6 +746,10 @@ mod tests {
         }
     }
 
+    fn md(content: &str, status: Option<&str>, entries: &[String]) -> String {
+        update_markdown(content, status, entries).content
+    }
+
     fn entries(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
@@ -573,7 +758,7 @@ mod tests {
 
     #[test]
     fn markdown_changes_only_status_and_decisions() {
-        let out = update_markdown(
+        let out = md(
             CARD,
             Some("verify"),
             &entries(&["Use Checkout", "Done 2026-10-21: live"]),
@@ -584,20 +769,20 @@ mod tests {
         );
         // Running it again changes nothing; a later decision lands after the earlier ones.
         assert_eq!(
-            update_markdown(
+            md(
                 &out,
                 Some("verify"),
                 &entries(&["Use Checkout", "Done 2026-10-22: live"])
             ),
             out
         );
-        let more = update_markdown(&out, Some("verify"), &entries(&["Second"]));
+        let more = md(&out, Some("verify"), &entries(&["Second"]));
         assert!(more.contains("- Done 2026-10-21: live\n- Second\n\n## Validation"));
     }
 
     #[test]
     fn markdown_without_a_section_gets_one_at_the_end() {
-        let out = update_markdown(
+        let out = md(
             "---\nstatus: todo\n---\n\nBody",
             Some("verify"),
             &entries(&["A"]),
@@ -606,43 +791,40 @@ mod tests {
             out,
             "---\nstatus: verify\n---\n\nBody\n\n## Decisions\n\n- A\n"
         );
-        let out = update_markdown("Body\n\n", None, &entries(&["A"]));
+        let out = md("Body\n\n", None, &entries(&["A"]));
         assert_eq!(out, "Body\n\n## Decisions\n\n- A\n");
         // An empty section at the end of the file.
-        let out = update_markdown("Body\n\n## Decisions\n", None, &entries(&["A"]));
+        let out = md("Body\n\n## Decisions\n", None, &entries(&["A"]));
         assert_eq!(out, "Body\n\n## Decisions\n\n- A\n");
     }
 
     #[test]
     fn markdown_status_is_added_quoted_or_left_alone() {
         assert_eq!(
-            update_markdown("---\nid: X\n---\nBody\n", Some("verify"), &[]),
+            md("---\nid: X\n---\nBody\n", Some("verify"), &[]),
             "---\nid: X\nstatus: verify\n---\nBody\n"
         );
         assert_eq!(
-            update_markdown("---\nstatus: \"todo\"\n---\n", Some("verify"), &[]),
+            md("---\nstatus: \"todo\"\n---\n", Some("verify"), &[]),
             "---\nstatus: \"verify\"\n---\n"
         );
         assert_eq!(
-            update_markdown("---\nstatus: todo\n---\n", Some("needs: review"), &[]),
+            md("---\nstatus: todo\n---\n", Some("needs: review"), &[]),
             "---\nstatus: \"needs: review\"\n---\n"
         );
         // No frontmatter, no done_status, or the status already set: nothing changes.
+        assert_eq!(md("status: todo\n", Some("verify"), &[]), "status: todo\n");
         assert_eq!(
-            update_markdown("status: todo\n", Some("verify"), &[]),
-            "status: todo\n"
-        );
-        assert_eq!(
-            update_markdown("---\nstatus: todo\n---\n", None, &[]),
+            md("---\nstatus: todo\n---\n", None, &[]),
             "---\nstatus: todo\n---\n"
         );
         assert_eq!(
-            update_markdown("---\nstatus: 'verify'\n---\n", Some("verify"), &[]),
+            md("---\nstatus: 'verify'\n---\n", Some("verify"), &[]),
             "---\nstatus: 'verify'\n---\n"
         );
         // An indented `status:` belongs to another key.
         assert_eq!(
-            update_markdown("---\nmeta:\n  status: x\nstatus: a\n---\n", Some("b"), &[]),
+            md("---\nmeta:\n  status: x\nstatus: a\n---\n", Some("b"), &[]),
             "---\nmeta:\n  status: x\nstatus: b\n---\n"
         );
     }
@@ -651,7 +833,7 @@ mod tests {
     fn markdown_keeps_crlf_line_endings() {
         let card = "---\r\nstatus: todo\r\n---\r\n\r\n## Decisions\r\n\r\n- Old\r\n";
         assert_eq!(
-            update_markdown(card, Some("verify"), &entries(&["Old", "New"])),
+            md(card, Some("verify"), &entries(&["Old", "New"])),
             "---\r\nstatus: verify\r\n---\r\n\r\n## Decisions\r\n\r\n- Old\r\n- New\r\n"
         );
     }
@@ -827,5 +1009,172 @@ mod tests {
     fn writeback_needs_a_path_or_a_command() {
         assert!(!enabled(&LedgerWritebackConfig::default()));
         assert!(enabled(&config()));
+    }
+
+    #[test]
+    fn a_bom_stays_and_a_file_without_frontmatter_says_so() {
+        let out = update_markdown(
+            "\u{feff}---\nstatus: todo\n---\nBody\n",
+            Some("verify"),
+            &[],
+        );
+        assert_eq!(out.content, "\u{feff}---\nstatus: verify\n---\nBody\n");
+        assert!(out.status_set);
+        let out = update_markdown("\u{feff}Body\n", Some("verify"), &entries(&["A"]));
+        assert_eq!(out.content, "\u{feff}Body\n\n## Decisions\n\n- A\n");
+        assert!(!out.status_set);
+        assert!(update_markdown("Body\n", None, &[]).status_set);
+
+        let dir = temp_dir("bom");
+        let mut config = config();
+        config.root = Some(dir.display().to_string());
+        std::fs::write(dir.join("sheprd/SHE-1.md"), "Body\n").unwrap();
+        assert_eq!(
+            write_markdown(&config, &card("SHE-1"), "2026-10-21").unwrap(),
+            "wrote SHE-1.md (no frontmatter: status not set)"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_status_value_changes() {
+        let status = |line: &str, value: &str| {
+            md(&format!("---\n{line}\n---\n"), Some(value), &[])
+                .lines()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            status("status: todo  # board column", "verify"),
+            "status: verify  # board column"
+        );
+        assert_eq!(
+            status("status: 'todo' # c", "verify"),
+            "status: 'verify' # c"
+        );
+        assert_eq!(
+            status("status: 'todo'", "it's done"),
+            "status: 'it''s done'"
+        );
+        assert_eq!(
+            status("status: \"a # b\" # c", "verify"),
+            "status: \"verify\" # c"
+        );
+        assert_eq!(status("status:   todo", "verify"), "status:   verify");
+        assert_eq!(status("status:", "verify"), "status: verify");
+        assert_eq!(
+            status("status: verify # same", "verify"),
+            "status: verify # same"
+        );
+        assert_eq!(status("status: \"verify\"", "verify"), "status: \"verify\"");
+    }
+
+    #[test]
+    fn decisions_heading_of_any_level_outside_code_and_comments() {
+        let card = "# Card\n\n```md\n## Decisions\n```\n<!--\n## Decisions\n-->\n### decisions  \n\n- Old\n#### Detail\n\ntext\n### Next\n";
+        assert_eq!(
+            md(card, None, &entries(&["New"])),
+            "# Card\n\n```md\n## Decisions\n```\n<!--\n## Decisions\n-->\n### decisions  \n\n- Old\n#### Detail\n\ntext\n\n- New\n\n### Next\n"
+        );
+        // Only the first Decisions heading gets the entries; a closing "##" is not the title.
+        assert_eq!(
+            md(
+                "## Decisions ##\n- A\n## Decisions\n",
+                None,
+                &entries(&["B"])
+            ),
+            "## Decisions ##\n- A\n- B\n\n## Decisions\n"
+        );
+        // A heading inside a longer fence, closed only by a fence as long.
+        assert_eq!(
+            md("````\n```\n## Decisions\n````\n", None, &entries(&["B"])),
+            "````\n```\n## Decisions\n````\n\n## Decisions\n\n- B\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_its_owner() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = temp_dir("owner");
+        let path = dir.join("sheprd/card.md");
+        std::fs::write(&path, "old").unwrap();
+        // Only root can hand a file to another user; elsewhere the owner is ours anyway.
+        let owner = if unsafe { libc::geteuid() } == 0 {
+            std::os::unix::fs::chown(&path, Some(65534), Some(65534)).unwrap();
+            (65534, 65534)
+        } else {
+            let metadata = std::fs::metadata(&path).unwrap();
+            (metadata.uid(), metadata.gid())
+        };
+        write_atomically(&path, "new").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), owner);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_timed_out_hook_has_its_children_killed() {
+        let dir = temp_dir("children");
+        let pid_file = dir.join("pid");
+        let alive = |pid: &str| {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let hook = |command: String| LedgerWritebackConfig {
+            on_card_done: Some(command),
+            timeout_seconds: Some(1),
+            ..LedgerWritebackConfig::default()
+        };
+        let background = format!(
+            "cat >/dev/null; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'",
+            pid_file.display()
+        );
+
+        let outcome = run(hook(background.clone()), card("SHE-1"), String::new(), 1).await;
+        assert!(outcome.ok, "{outcome:?}");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        assert!(
+            alive(&pid),
+            "a hook that exited leaves its background work alone"
+        );
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+
+        let outcome = run(
+            hook(format!("{background}; sleep 30")),
+            card("SHE-1"),
+            String::new(),
+            1,
+        )
+        .await;
+        assert_eq!(outcome.message, "hook timed out after 1s");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let started = std::time::Instant::now();
+        while alive(&pid) && started.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive(&pid), "a timed-out hook's children are killed");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_fingerprint_follows_what_is_written() {
+        let base = fingerprint(&card("SHE-1"));
+        assert_eq!(base.len(), 16);
+        let mut other = card("SHE-1");
+        other.pane_id = "w9:p9".into();
+        other.agent_session = None;
+        assert_eq!(fingerprint(&other), base, "who wrote it does not count");
+        other.decisions.push("Another".into());
+        assert_ne!(fingerprint(&other), base);
+        let mut moved = card("SHE-1");
+        moved.summary = String::new();
+        moved.title = "Stripe checkoutCheckout live on dev".into();
+        assert_ne!(fingerprint(&moved), base);
     }
 }

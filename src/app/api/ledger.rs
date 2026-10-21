@@ -222,19 +222,19 @@ impl App {
         let result = self.ledger_write(&target, |ledger, session, now| {
             ledger.complete(&item_id, summary, session, now)
         });
-        let changed = matches!(&result, Some(Ok(write)) if write.value);
         let succeeded = matches!(&result, Some(Ok(_)));
         let response = self.ledger_item_response(id, &target, &item_id, result);
         if succeeded {
-            self.start_ledger_writeback(&target, &item_id, changed);
+            self.start_ledger_writeback(&target, &item_id);
         }
         response
     }
 
-    /// Writes a done card back to the tracker, off the server loop. A card that did not change
-    /// is written again only when its last write-back failed or never ran, so `done` twice does
-    /// not run the hook twice.
-    fn start_ledger_writeback(&mut self, target: &LedgerTarget, item_id: &str, changed: bool) {
+    /// Writes a done card back to the tracker, off the server loop. It is written again only
+    /// when its last write-back failed or never ran, or the card changed since (a decision or a
+    /// summary added after `done`), so `done` twice does not run the hook twice; nor does a
+    /// `done` while the card's write-back is still running.
+    fn start_ledger_writeback(&mut self, target: &LedgerTarget, item_id: &str) {
         if !crate::ledger_writeback::enabled(&self.ledger_writeback) {
             return;
         }
@@ -246,7 +246,7 @@ impl App {
         else {
             return;
         };
-        if !item.done || (!changed && item.writeback.as_ref().is_some_and(|last| last.ok)) {
+        if !item.done {
             return;
         }
         let card = crate::ledger_writeback::done_card(
@@ -254,6 +254,13 @@ impl App {
             item,
             &target.public_pane_id,
         );
+        let written = item.writeback.as_ref().is_some_and(|last| {
+            last.ok && last.fingerprint == crate::ledger_writeback::fingerprint(&card)
+        });
+        let key = (target.terminal_id.clone(), item_id.to_owned());
+        if written || self.ledger_writebacks_in_flight.contains(&key) {
+            return;
+        }
         let config = self.ledger_writeback.clone();
         let date = crate::platform::local_datetime()
             .map(|now| now.date().to_string())
@@ -264,6 +271,7 @@ impl App {
             tracing::warn!(card = %item_id, "card write-back needs the server runtime; skipped");
             return;
         };
+        self.ledger_writebacks_in_flight.insert(key);
         runtime.spawn(async move {
             let outcome = crate::ledger_writeback::run(config, card, date, now_ms()).await;
             let _ = event_tx
@@ -283,6 +291,8 @@ impl App {
         item_id: &str,
         outcome: crate::work_ledger::LedgerWriteback,
     ) {
+        self.ledger_writebacks_in_flight
+            .remove(&(terminal_id.clone(), item_id.to_owned()));
         let changed = self
             .state
             .terminals
@@ -1253,6 +1263,78 @@ mod tests {
         ));
         assert!(app.event_rx.try_recv().is_err());
         assert_eq!(app.state.work_ledger_revision, revision);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn done_while_writing_back_starts_no_second_run_and_changes_are_written_again() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let dir = std::env::temp_dir().join(format!(
+            "sheprd-ledger-rerun-{}-{}",
+            std::process::id(),
+            super::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SHE-1.md");
+        std::fs::write(&path, "Body\n").unwrap();
+        app.ledger_writeback = crate::config::LedgerWritebackConfig {
+            markdown_path: Some(format!("{}/{{id}}.md", dir.display())),
+            ..Default::default()
+        };
+        let decide = |app: &mut App, text: &str| {
+            request(
+                app,
+                Method::LedgerDecide(LedgerDecideParams {
+                    pane_id: pane_id.clone(),
+                    item_id: "SHE-1".into(),
+                    text: text.into(),
+                }),
+            );
+        };
+        let complete = |app: &mut App| {
+            request(
+                app,
+                Method::LedgerComplete(LedgerCompleteParams {
+                    pane_id: pane_id.clone(),
+                    item_id: "SHE-1".into(),
+                    summary: None,
+                }),
+            );
+        };
+        async fn finish(app: &mut App) {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(10), app.event_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            app.handle_internal_event(event);
+        }
+
+        decide(&mut app, "First");
+        complete(&mut app);
+        // A second done while the first write-back runs starts none.
+        complete(&mut app);
+        finish(&mut app).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(app.event_rx.try_recv().is_err(), "one write-back only");
+        assert!(app.ledger_writebacks_in_flight.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Body\n\n## Decisions\n\n- First\n"
+        );
+
+        // A decision after done: the next done writes it, though `complete` changes nothing.
+        decide(&mut app, "Second");
+        complete(&mut app);
+        finish(&mut app).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Body\n\n## Decisions\n\n- First\n- Second\n"
+        );
+        // Nothing new: no run.
+        complete(&mut app);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(app.event_rx.try_recv().is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

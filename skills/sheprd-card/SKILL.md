@@ -28,6 +28,7 @@ sheprd card list             # your cards as the user sees them
   on what does not depend on it.
 - **Finished** (PR open and handed over, or merged): `done --summary`. Done writes the summary and
   decisions back to the tracker when the user configured it; don't edit the card file yourself.
+  A decision or summary added after `done` is written back only when you run `done` again.
 - Orchestrating subagents: you keep the ledger for the cards you hand out; subagents report to
   you, you write it.
 

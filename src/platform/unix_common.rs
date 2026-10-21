@@ -518,6 +518,11 @@ impl StatusCommandGuard {
 }
 
 impl StatusCommandGuard {
+    /// Leaves the process group running: dropping the guard no longer kills it.
+    pub(crate) fn disarm(&mut self) {
+        self.process_group_id = None;
+    }
+
     pub(crate) fn terminate(&mut self) {
         if let Some(process_group_id) = self.process_group_id.take() {
             // The command was spawned as this process group's leader. Killing the

@@ -88,6 +88,10 @@ pub struct LedgerWriteback {
     pub message: String,
     #[serde(default)]
     pub at_ms: u64,
+    /// What was written (`ledger_writeback::fingerprint`): a done card whose title, link,
+    /// summary or decisions changed since is written again on the next `done`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2044,6 +2048,7 @@ mod tests {
             code: "missing_file".into(),
             message: "file missing: /tasks/SHE-1.md".into(),
             at_ms: 5,
+            fingerprint: String::new(),
         };
         ledger.update("SHE-1", explicit("Stripe"), None, 1).unwrap();
         assert!(
