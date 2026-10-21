@@ -415,8 +415,9 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     Some((level, title))
 }
 
-/// A Decisions heading's title: "Decisions" alone or followed by a space, "(" or ":", in any
-/// case (`## Decisions (orchestrator + André, 07/10)`).
+/// A Decisions heading's title: "Decisions", optional spaces, then the end, "(" or ":", in any
+/// case (`## Decisions (orchestrator + André, 07/10)`). Not "Decisions needed": those list open
+/// questions, not decisions taken.
 fn is_decisions_title(title: &str) -> bool {
     let Some(word) = title
         .get(..9)
@@ -425,9 +426,10 @@ fn is_decisions_title(title: &str) -> bool {
         return false;
     };
     title[word.len()..]
+        .trim_start_matches([' ', '\t'])
         .chars()
         .next()
-        .is_none_or(|next| matches!(next, ' ' | '\t' | '(' | ':'))
+        .is_none_or(|next| matches!(next, '(' | ':'))
 }
 
 /// The lines outside fenced code and HTML comments: where a heading can be.
@@ -1427,5 +1429,20 @@ mod tests {
             "the hook ran once"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn decisions_needed_is_not_the_decisions_section() {
+        assert_eq!(
+            md(
+                "## Decisions needed\n- which?\n\n## Decisions\n- a\n",
+                None,
+                &entries(&["b"])
+            ),
+            "## Decisions needed\n- which?\n\n## Decisions\n- a\n- b\n"
+        );
+        assert!(is_decisions_title("Decisions  (07/10)"));
+        assert!(is_decisions_title("Decisions:"));
+        assert!(!is_decisions_title("Decisions to make first"));
     }
 }
