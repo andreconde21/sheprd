@@ -8586,6 +8586,23 @@
               "default": "",
               "type": "string"
             },
+            "fingerprint": {
+              "description": "What was written (`ledger_writeback::fingerprint`): a done card whose title, link,\nsummary or decisions changed since is written again on the next `done`.",
+              "type": "string"
+            },
+            "hook": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "markdown": {
+              "description": "Whether the Markdown file and the command hook went through, each when configured: the\nnext `done` re-runs only a part that failed (unless the card changed).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "message": {
               "description": "Short, one line: the file written, or why it failed.",
               "type": "string"
