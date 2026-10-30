@@ -327,6 +327,7 @@
         <h2>Ask the agent on the server. Tell the one on your laptop.</h2>
         <p class="lede">Any agent that can run a shell command can take part. Every message says who sent it and how to reply.</p>
         <ul class="notes">
+          <li><b>Claude Code and OpenCode</b> get the skills and a small integration, so the list shows which agent runs where and on which model.</li>
           <li><b>Laptop to server</b> goes direct, over the SSH link sheprd already uses.</li>
           <li><b>Server to laptop</b> waits in a small queue on the server. sheprd collects it while it's open, so the server never gets access to your machine.</li>
           <li><b>Guardrails:</b> the receiver is told the message comes from another agent, and to ask you before anything destructive or public. A rate limit stops two agents from ping-ponging.</li>
@@ -348,8 +349,9 @@
           </div>
         </div>
 <pre class="cfg"><span class="c">$</span> sheprd msg list
-<span class="k">laptop</span>/billing        w3:p1   idle
-<span class="k">server</span>/api            w8:p1   working  321k
+<span class="k">laptop</span>/billing   w3:p1  idle          claude    opus-5-5
+<span class="k">laptop</span>/notes     w5:p1  working       opencode  claude-agent/opus
+<span class="k">server</span>/api       w8:p1  working  321k  codex     ?
 <span class="c">$</span> sheprd msg send server/api <span class="s">"Is the webhook retry merged?"</span>
 delivered to server/api (w8:p1, was working)</pre>
       </div>

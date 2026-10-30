@@ -197,5 +197,35 @@ class SummaryQuestionTests(unittest.TestCase):
         self.assertEqual(self.asked(None, "build\nrun\n$ git status?\n"), [])
 
 
+class ModelTokenTests(unittest.TestCase):
+    """sheprd_model: the model of the agent's last real reply (SHE-100011)."""
+
+    def reply(self, msg_id, model):
+        return json.dumps({
+            "type": "assistant", "timestamp": "2026-10-30T10:00:00Z",
+            "message": {"id": msg_id, "model": model, "content": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 5}},
+        }) + "\n"
+
+    def read(self, *lines):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+            handle.writelines(lines)
+        self.addCleanup(os.unlink, handle.name)
+        cache = hook.fresh_cache()
+        hook.read_new_lines(cache, handle.name, [])
+        return hook.tokens(cache)
+
+    def test_the_last_reply_names_the_model(self):
+        tokens = self.read(self.reply("a", "claude-sonnet-4-6"), self.reply("b", "claude-opus-5-5"))
+        self.assertEqual(tokens["sheprd_model"], "claude-opus-5-5")
+
+    def test_synthetic_messages_do_not_replace_the_model(self):
+        tokens = self.read(self.reply("a", "claude-opus-5-5"), self.reply("b", "<synthetic>"))
+        self.assertEqual(tokens["sheprd_model"], "claude-opus-5-5")
+
+    def test_no_reply_yet_reports_no_model(self):
+        self.assertNotIn("sheprd_model", self.read())
+
+
 if __name__ == "__main__":
     unittest.main()

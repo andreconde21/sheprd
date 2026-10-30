@@ -64,6 +64,7 @@ jobs:
           for script in scripts/sheprd-msg scripts/sheprd-claude-hook scripts/sheprd-doc scripts/sheprd-status-github; do
             python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$script"
           done
+          node --check scripts/sheprd-opencode.js
 
       - name: Claude hook tests
         run: python3 -m unittest scripts.test_sheprd_claude_hook
