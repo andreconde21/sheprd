@@ -8,6 +8,8 @@ description: Keep the sheprd card ledger for the cards (tickets, issues, tasks) 
 The user triages your work from the CARDS panel, not from your transcript. Write to it
 explicitly; anything you don't write there they will not see. Commands target your own pane.
 If `sheprd` is not on PATH, the same commands are `herdr card …` (or `"$HERDR_BIN_PATH" card …`).
+In the Herdr app (`$HC_TERMINAL_ID` is set and `$HERDR_PANE_ID` is not), use `cards …` with the
+same arguments: `cards update SHE-12 --status dev`, `cards ask …`, `cards answers`.
 
 ```bash
 sheprd card update SHE-12 --title "Stripe checkout" --status dev --summary "Checkout wired, webhooks next"
