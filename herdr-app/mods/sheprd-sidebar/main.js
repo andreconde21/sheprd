@@ -25,11 +25,13 @@ const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false
 const view = () => ({ ...EMPTY_VIEW, .../** @type {object} */ (shared("sheprd.view") ?? {}) });
 const marks = () => ({ unread: [], kept: [], dismissed: [], ...(view().marks ?? {}) });
 
-// Changes show at once; the hub's document follows. A failed write leaves the
+// Changes show at once; the hub's document follows, one write at a time so a
+// quick second click can't land before the first. A failed write leaves the
 // screen ahead of the document until the next start, which is the lesser harm.
+let writes = Promise.resolve();
 function saveView(patch) {
   setShared("sheprd.view", { ...view(), ...patch });
-  exec("cards", ["view-set", JSON.stringify(patch)]).catch(() => {});
+  writes = writes.then(() => exec("cards", ["view-set", JSON.stringify(patch)])).then(() => {}, () => {});
 }
 
 function saveMarks(change) {
@@ -61,7 +63,25 @@ function cardsByAddress() {
   return out;
 }
 
-const openQuestions = (cards) => (cards ?? []).filter((c) => !c.dismissed).flatMap((c) => c.questions.filter((q) => q.state === "open" || q.state === "staged"));
+const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
+const openQuestions = (cards) => (cards ?? []).filter((c) => !c.dismissed).flatMap((c) => c.questions.filter(live));
+
+// `cards json` from the given machines, merged over the last good result.
+async function fetchCards(list) {
+  const docs = { .../** @type {object} */ (shared("sheprd.cards") ?? {}) };
+  const present = new Set(machines().map((m) => m.name ?? "local"));
+  for (const key of Object.keys(docs)) if (!present.has(key)) delete docs[key];
+  const got = await Promise.all(list.filter((m) => m.layout !== "unavailable").map(async (m) => {
+    try {
+      const r = await exec("cards", ["json"], { on: m.name });
+      return r.code === 0 ? [m.name ?? "local", JSON.parse(r.stdout)] : null;
+    } catch {
+      return null; // not installed there, or the machine went away
+    }
+  }));
+  for (const entry of got) if (entry) docs[entry[0]] = entry[1];
+  return docs;
+}
 
 function duration(ms) {
   const m = Math.floor(ms / 60000);
@@ -94,21 +114,19 @@ export default class SheprdSidebar extends View {
     cx.timer.every(30000, (cx) => cx.notify());
   }
 
-  // Every reachable machine's cards, into shared state for the panel too.
+  // Every reachable machine's cards, into shared state for the panel too. One
+  // load at a time, machines asked in parallel; a machine that fails this time
+  // keeps its last cards.
   loadCards(cx) {
+    if (this.loading) return;
+    this.loading = true;
     cx.spawn(async (cx) => {
-      const docs = {};
-      for (const m of machines()) {
-        if (m.layout === "unavailable") continue;
-        try {
-          const r = await exec("cards", ["json"], { on: m.name });
-          if (r.code === 0) docs[m.name ?? "local"] = JSON.parse(r.stdout);
-        } catch {
-          // Not installed there, or the machine went away: no cards from it.
-        }
+      try {
+        setShared("sheprd.cards", await fetchCards(machines()));
+        setShared("sheprd.cards.at", Date.now());
+      } finally {
+        this.loading = false;
       }
-      setShared("sheprd.cards", docs);
-      setShared("sheprd.cards.at", Date.now());
       cx.notify();
     });
   }

@@ -128,6 +128,14 @@ def change(mutate):
                 core.call("doc.set", {"name": DOC, "value": doc, "version": version})
                 return out
             except RpcError as err:
+                if "exceeds" in str(err):
+                    # Past herdr-core's 1 MiB cap every write fails; drop history so this one lands.
+                    prune(doc, hard=True)
+                    try:
+                        core.call("doc.set", {"name": DOC, "value": doc, "version": version})
+                        return out
+                    except RpcError as again:
+                        err = again
                 if (err.error.get("data") or {}).get("kind") != "conflict":
                     fail(f"hc refused the write: {err}")
                 time.sleep(0.05 * (attempt + 1))
@@ -144,17 +152,72 @@ def read_doc():
         core.close()
 
 
-def prune(doc):
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=KEEP_DONE_DAYS)
+def age_days(stamp):
+    if not stamp:
+        return 0
+    return (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(stamp)).total_seconds() / 86400
+
+
+def prune(doc, hard=False):
+    """Keeps the document well under herdr-core's 1 MiB: old cards, answered
+    questions and read answers go. `hard` (after a write hit the cap) keeps
+    only what is still in play."""
+    done_days, dismissed_days, stale_days = (0, 0, 7) if hard else (KEEP_DONE_DAYS, 7, 30)
+    resolved_kept, decisions_kept, read_kept = (5, 20, 0) if hard else (20, MAX_DECISIONS, 5)
     for key in list(doc["cards"]):
         card = doc["cards"][key]
-        done_at = card.get("done_at")
-        if card.get("done") and done_at and dt.datetime.fromisoformat(done_at) < cutoff:
+        if card.get("done") and age_days(card.get("done_at")) >= done_days:
+            del doc["cards"][key]
+        elif card.get("dismissed") and age_days(card.get("updated_at")) >= dismissed_days:
+            del doc["cards"][key]
+        elif not card.get("done") and age_days(card.get("updated_at")) >= stale_days:
             del doc["cards"][key]
         else:
-            card["decisions"] = card.get("decisions", [])[-MAX_DECISIONS:]
+            questions = card.get("questions", [])
+            resolved = [q for q in questions if not live(q)]
+            keep = {id(q) for q in resolved[-resolved_kept:]} if resolved_kept else set()
+            card["questions"] = [q for q in questions if live(q) or id(q) in keep]
+            card["decisions"] = card.get("decisions", [])[-decisions_kept:]
     for terminal in list(doc["inbox"]):
-        doc["inbox"][terminal] = doc["inbox"][terminal][-MAX_INBOX:]
+        entries = [a for a in doc["inbox"][terminal] if age_days(a.get("at")) < KEEP_DONE_DAYS]
+        unread = [a for a in entries if not a.get("read")]
+        read = [a for a in entries if a.get("read")][-read_kept:] if read_kept else []
+        entries = sorted(read + unread, key=lambda a: a["at"])[-MAX_INBOX:]
+        if entries:
+            doc["inbox"][terminal] = entries
+        else:
+            del doc["inbox"][terminal]
+
+
+def live(question):
+    return question.get("state") in ("open", "staged", "sending")
+
+
+# A terminal id (t7) can come back for a new program after a core restart; its
+# start time tells the two apart, so a new agent never inherits old cards.
+_born = {}
+
+
+def born_of(terminal):
+    if terminal not in _born:
+        try:
+            got = subprocess.run([hc_binary(), "get", terminal, "--json"], capture_output=True, text=True, timeout=10)
+            _born[terminal] = json.loads(got.stdout).get("created_ms") if got.returncode == 0 else None
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+            _born[terminal] = None
+    return _born[terminal]
+
+
+def forget_previous(doc, terminal, born):
+    """Drops cards and answers a previous program in this terminal left behind."""
+    if born is None:
+        return
+    for key in list(doc["cards"]):
+        card = doc["cards"][key]
+        if card["terminal"] == terminal and card.get("born") not in (None, born):
+            del doc["cards"][key]
+    if terminal in doc["inbox"]:
+        doc["inbox"][terminal] = [a for a in doc["inbox"][terminal] if a.get("born") in (None, born)]
 
 
 def my_terminal(args):
@@ -169,12 +232,16 @@ def card_key(terminal, card_id):
 
 
 def get_card(doc, terminal, card_id, create=False):
+    """`create` is the agents' path: it also drops what an earlier program in this terminal left."""
+    if create:
+        forget_previous(doc, terminal, born_of(terminal))
     key = card_key(terminal, card_id)
     card = doc["cards"].get(key)
     if card is None:
         if not create:
             fail(f"no card {card_id} for {terminal}")
         card = {
+            "born": born_of(terminal),
             "id": card_id,
             "terminal": terminal,
             "title": None,
@@ -294,6 +361,7 @@ def cmd_answers(args):
     terminal = my_terminal(args)
 
     def mutate(doc):
+        forget_previous(doc, terminal, born_of(terminal))
         unread = [a for a in doc["inbox"].get(terminal, []) if not a.get("read")]
         if not args.peek:
             for a in unread:
@@ -321,7 +389,7 @@ def cmd_list(args):
         if c.get("summary"):
             print(f"    {c['summary']}")
         for q in c["questions"]:
-            if q["state"] in ("open", "staged"):
+            if live(q):
                 print(f"    Q{q['n']} ({q['state']}): {q['text']}")
 
 
@@ -339,6 +407,8 @@ def cmd_stage(args):
             if q["n"] == args.n:
                 if q["state"] == "sent":
                     fail(f"{args.id} Q{args.n} was already sent")
+                if q["state"] == "sending" and not stale_claim(q):
+                    fail(f"{args.id} Q{args.n} is being sent")
                 q["answer"] = clip(args.answer, 300)
                 q["state"] = "staged"
                 card["updated_at"] = now()
@@ -371,37 +441,62 @@ def answer_text(answer):
     return answer if re.fullmatch(r"[\w .,:/#@+-]{1,80}", answer) else json.dumps(answer, ensure_ascii=False)
 
 
+# A claim older than this belongs to a send that died midway; its answers can be staged again.
+CLAIM_TIMEOUT_S = 120
+
+
+def stale_claim(q):
+    at = q.get("claimed_at")
+    return not at or (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(at)).total_seconds() > CLAIM_TIMEOUT_S
+
+
 def cmd_send(args):
-    doc = read_doc()
-    parts = []
-    for card in sorted(doc["cards"].values(), key=lambda c: c["id"]):
-        if card["terminal"] != args.terminal:
-            continue
-        staged = [q for q in card["questions"] if q["state"] == "staged"]
-        if not staged:
-            continue
-        bits = []
-        for i, q in enumerate(staged):
-            label = f"Q{q['n']} ({clip(q['text'], 60)})" if i == 0 else f"Q{q['n']}"
-            bits.append(f"{label} → {answer_text(q['answer'])}")
-        parts.append(f"{card['id']} " + " · ".join(bits))
-    if not parts:
+    """Claims the staged answers (staged → sending), types exactly those into
+    the agent, then marks exactly those sent. An answer staged or changed
+    during the send stays staged for the next one; a second Send finds nothing."""
+    token = f"{os.getpid()}-{time.time()}"
+
+    def claim(doc):
+        parts, claimed = [], []
+        for key, card in sorted(doc["cards"].items(), key=lambda kv: kv[1]["id"]):
+            if card["terminal"] != args.terminal:
+                continue
+            staged = [q for q in card["questions"] if q["state"] == "staged" or (q["state"] == "sending" and stale_claim(q))]
+            if not staged:
+                continue
+            bits = []
+            for i, q in enumerate(staged):
+                label = f"Q{q['n']} ({clip(q['text'], 60)})" if i == 0 else f"Q{q['n']}"
+                bits.append(f"{label} → {answer_text(q['answer'])}")
+                q.update(state="sending", claim=token, claimed_at=now())
+                claimed.append((key, q["n"], q["answer"]))
+            parts.append(f"{card['id']} " + " · ".join(bits))
+        return " | ".join(parts), claimed
+
+    line, claimed = change(claim)
+    if not claimed:
         fail("nothing staged for that terminal")
-    line = " | ".join(parts)
-    sent = subprocess.run([hc_binary(), "send", args.terminal, line], capture_output=True, text=True)
-    if sent.returncode != 0:
-        fail(f"hc send refused: {(sent.stderr or sent.stdout).strip()}")
+    sent = subprocess.run([hc_binary(), "send", "--", args.terminal, line], capture_output=True, text=True)
+    ok = sent.returncode == 0
+    born = born_of(args.terminal)
 
-    def mutate(doc):
-        for card in doc["cards"].values():
-            if card["terminal"] == args.terminal:
-                for q in card["questions"]:
-                    if q["state"] == "staged":
-                        q["state"] = "sent"
+    def settle(doc):
+        for key, n, answer in claimed:
+            card = doc["cards"].get(key)
+            for q in card["questions"] if card else []:
+                if q["n"] == n and q.get("claim") == token and q["state"] == "sending":
+                    q["state"] = "sent" if ok else "staged"
+                    q["answer"] = answer
+                    q.pop("claim", None)
+                    q.pop("claimed_at", None)
+            if card:
                 card["updated_at"] = now()
-        doc["inbox"].setdefault(args.terminal, []).append({"line": line, "at": now(), "read": False})
+        if ok:
+            doc["inbox"].setdefault(args.terminal, []).append({"line": line, "at": now(), "read": False, "born": born})
 
-    change(mutate)
+    change(settle)
+    if not ok:
+        fail(f"hc send refused: {(sent.stderr or sent.stdout).strip()}")
     print(line)
 
 
@@ -506,8 +601,12 @@ def writeback(card):
     path = config["markdown_path"].format(root=config.get("root", ""), project=project, id=card["id"])
     if not os.path.exists(path):
         return {"ok": False, "message": f"file missing: {path}"}
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
+    with open(path, encoding="utf-8", newline="") as f:
+        original = f.read()
+    # Edit as LF without a BOM, then put the file's own line endings and BOM back.
+    bom = "\ufeff" if original.startswith("\ufeff") else ""
+    newline = "\r\n" if "\r\n" in original else "\n"
+    text = original[len(bom):].replace("\r\n", "\n")
     new = set_status(text, config.get("done_status", "done"))
     entries = [d["text"] for d in card.get("decisions", [])]
     if card.get("summary"):
@@ -516,9 +615,10 @@ def writeback(card):
     name = os.path.basename(path)
     if new == text:
         return {"ok": True, "message": f"{name} already up to date"}
+    new = bom + new.replace("\n", newline)
     directory = os.path.dirname(path)
     fd, temp = tempfile.mkstemp(prefix=f".{name}.cards-", dir=directory)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(new)
     os.chmod(temp, os.stat(path).st_mode & 0o7777)
     os.replace(temp, path)
@@ -526,29 +626,47 @@ def writeback(card):
 
 
 def set_status(text, status):
-    if not text.startswith("---\n"):
+    """The front matter's status, set or added; a file without front matter is left alone."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
         return text
-    end = text.find("\n---", 4)
-    if end < 0:
+    close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if close is None:
         return text
-    head = text[4:end]
-    if re.search(r"(?m)^status:", head):
-        head = re.sub(r"(?m)^status:.*$", f"status: {status}", head, count=1)
-    else:
-        head += f"\nstatus: {status}"
-    return "---\n" + head + text[end:]
+    for i in range(1, close):
+        if re.match(r"status\s*:", lines[i]):
+            lines[i] = f"status: {status}"
+            return "\n".join(lines)
+    return "\n".join(lines[:close] + [f"status: {status}"] + lines[close:])
+
+
+def outside_fences(lines):
+    """For each line, whether it is outside a ``` or ~~~ code block."""
+    out, fence = [], None
+    for line in lines:
+        mark = re.match(r"\s*(```|~~~)", line)
+        if fence is None:
+            out.append(not mark)
+            if mark:
+                fence = mark.group(1)
+        else:
+            out.append(False)
+            if mark and mark.group(1) == fence:
+                fence = None
+    return out
 
 
 def add_decisions(text, entries):
     lines = text.split("\n")
-    start = next((i for i, l in enumerate(lines) if re.fullmatch(r"##\s+Decisions\s*", l.strip())), None)
+    real = outside_fences(lines)
+    start = next((i for i, l in enumerate(lines) if real[i] and re.fullmatch(r"##\s+Decisions\s*", l.strip())), None)
     if start is None:
         new = [f"- {e}" for e in entries]
         if not new:
             return text
         body = text.rstrip("\n")
         return body + "\n\n## Decisions\n\n" + "\n".join(new) + "\n"
-    end = next((i for i in range(start + 1, len(lines)) if re.match(r"#{1,2}\s", lines[i])), len(lines))
+    end = next((i for i in range(start + 1, len(lines)) if real[i] and re.match(r"#{1,2}\s", lines[i])), len(lines))
     section = lines[start + 1 : end]
     existing = {l.strip()[2:].strip() for l in section if l.strip().startswith(("- ", "* "))}
     new = [f"- {e}" for e in entries if e.strip() not in existing]

@@ -32,7 +32,7 @@ function cardsByAddress() {
   return out;
 }
 
-const live = (q) => q.state === "open" || q.state === "staged";
+const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
 
 export default class SheprdPanel extends View {
   init(_props, cx) {
@@ -52,21 +52,29 @@ export default class SheprdPanel extends View {
     this.loadCards(cx);
   }
 
+  // `only`: just that machine (after an action there), even while a full load runs.
   loadCards(cx, only) {
+    const full = only === undefined;
+    if (full && this.loading) return;
+    if (full) this.loading = true;
     cx.spawn(async (cx) => {
-      const docs = { .../** @type {object} */ (shared("sheprd.cards") ?? {}) };
-      for (const m of machines()) {
-        const key = m.name ?? "local";
-        if (m.layout === "unavailable" || (only !== undefined && key !== (only ?? "local"))) continue;
-        try {
-          const r = await exec("cards", ["json"], { on: m.name });
-          if (r.code === 0) docs[key] = JSON.parse(r.stdout);
-        } catch {
-          // Not installed there, or the machine went away.
-        }
+      try {
+        const list = machines().filter((m) => full || (m.name ?? null) === only);
+        const docs = { .../** @type {object} */ (shared("sheprd.cards") ?? {}) };
+        const got = await Promise.all(list.filter((m) => m.layout !== "unavailable").map(async (m) => {
+          try {
+            const r = await exec("cards", ["json"], { on: m.name });
+            return r.code === 0 ? [m.name ?? "local", JSON.parse(r.stdout)] : null;
+          } catch {
+            return null; // not installed there, or the machine went away
+          }
+        }));
+        for (const entry of got) if (entry) docs[entry[0]] = entry[1];
+        setShared("sheprd.cards", docs);
+        if (full) setShared("sheprd.cards.at", Date.now());
+      } finally {
+        if (full) this.loading = false;
       }
-      setShared("sheprd.cards", docs);
-      setShared("sheprd.cards.at", Date.now());
       cx.notify();
     });
   }
