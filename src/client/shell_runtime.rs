@@ -52,7 +52,11 @@ pub(super) fn dispatch_client_shell_actions(
                 }
             }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
-                crate::selection::write_osc52_bytes(&bytes);
+                if crate::selection::write_osc52_bytes(&bytes) {
+                    if let Some(shell) = shell.as_deref_mut() {
+                        repaint |= shell.show_copy_feedback(std::time::Instant::now());
+                    }
+                }
             }
             shell::ClientShellAction::ActivateEndpoint {
                 endpoint_id,
@@ -382,7 +386,7 @@ pub(super) fn begin_endpoint_activation(
                 let outcome = activation.supersede(endpoint_id, target, endpoints);
                 if let endpoint::ActivationRollback::Unavailable(message) = outcome {
                     *pending = None;
-                    present_handoff_unavailable(state, message);
+                    present_handoff_unavailable(state, message, None);
                 }
             }
             return Ok(());
@@ -599,12 +603,55 @@ pub(super) fn complete_endpoint_activation(
     Ok(None)
 }
 
-pub(super) fn present_handoff_unavailable(state: &mut ClientState, message: String) {
+pub(super) fn present_endpoint_connection_failure(
+    state: &mut ClientState,
+    endpoint_id: &endpoint::ClientEndpointId,
+    status: endpoint::ClientEndpointStatus,
+    message: String,
+) {
+    let active_failure = state
+        .shell
+        .as_ref()
+        .is_some_and(|shell| shell.endpoint_is_active(endpoint_id));
+    if active_failure {
+        state.freeze_presentation();
+    }
+    let unavailable = state.shell.as_mut().and_then(|shell| {
+        shell.set_endpoint_status(endpoint_id, status);
+        shell.set_machine_diagnostic(endpoint_id, message.clone());
+        let requested = shell.report_machine_retry(endpoint_id);
+        (active_failure && status == endpoint::ClientEndpointStatus::Attention && !requested)
+            .then(|| format!("{}: {message}", shell.endpoint_label(endpoint_id)))
+    });
+    if let Some(message) = unavailable {
+        present_handoff_unavailable(state, message, Some(endpoint_id));
+    } else if let Some(frame) = state
+        .shell
+        .as_mut()
+        .and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1))
+    {
+        if active_failure {
+            state.present_frozen_chrome(frame);
+        } else {
+            state.present_frame(frame);
+        }
+    }
+}
+
+pub(super) fn present_handoff_unavailable(
+    state: &mut ClientState,
+    message: String,
+    machine: Option<&endpoint::ClientEndpointId>,
+) {
     // An unavailable committed endpoint has no presentation lease. Keep all pane input and late
     // source output blocked, while allowing this client-owned chrome frame through the freeze.
     state.freeze_presentation();
     let frame = state.shell.as_mut().and_then(|shell| {
-        shell.receive_endpoint_unavailable(message);
+        if let Some(machine) = machine {
+            shell.receive_machine_unavailable(machine, message);
+        } else {
+            shell.receive_endpoint_unavailable(message);
+        }
         shell.compose(state.reported_size.0, state.reported_size.1)
     });
     if let Some(frame) = frame {
@@ -628,7 +675,7 @@ pub(super) fn rollback_endpoint_activation(
             *pending = None;
             // No endpoint has been proven safe to present. Keep pane input frozen, but render
             // the client-owned unavailable chrome rather than silently swallowing the error.
-            present_handoff_unavailable(state, message);
+            present_handoff_unavailable(state, message, None);
         }
     }
 }
@@ -663,7 +710,7 @@ pub(super) fn handle_endpoint_disconnect(
             endpoint::ActivationRollback::Pending => {}
             endpoint::ActivationRollback::Unavailable(error) => {
                 *pending_activation = None;
-                present_handoff_unavailable(state, error);
+                present_handoff_unavailable(state, error, None);
             }
         }
     }
@@ -677,7 +724,7 @@ pub(super) fn handle_endpoint_disconnect(
         endpoint_was_active.then(|| format!("{} {notice}", shell.endpoint_label(endpoint_id)))
     });
     if let Some(message) = unavailable {
-        present_handoff_unavailable(state, message);
+        present_handoff_unavailable(state, message, Some(endpoint_id));
     } else if let Some(frame) = state
         .shell
         .as_mut()
@@ -722,7 +769,7 @@ pub(super) fn handle_endpoint_attention(
             );
         if let endpoint::ActivationRollback::Unavailable(error) = outcome {
             *pending_activation = None;
-            present_handoff_unavailable(state, error);
+            present_handoff_unavailable(state, error, None);
         }
     }
     let endpoint_was_active = endpoints.active_id() == endpoint_id;
@@ -736,7 +783,7 @@ pub(super) fn handle_endpoint_attention(
         endpoint_was_active.then(|| format!("{}: {message}", shell.endpoint_label(endpoint_id)))
     });
     if let Some(message) = unavailable {
-        present_handoff_unavailable(state, message);
+        present_handoff_unavailable(state, message, Some(endpoint_id));
     } else if let Some(frame) = state
         .shell
         .as_mut()

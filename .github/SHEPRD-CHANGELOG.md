@@ -5,6 +5,18 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
+## sheprd-v0.9.5-7 (2026-11-01)
+
+### Changed
+- Merged 39 upstream herdr fixes (up to herdr's post-0.9.5 master). Among them: endpoint connections
+  recover promptly after the laptop wakes, a busy or slow server gets time to answer instead of
+  being treated as dead, blocked shared SSH connections recover, a hung `wl-copy`/`wl-paste` can no
+  longer freeze herdr, the saved layout survives panes dying during host shutdown, named Claude
+  sessions show blocked questions, and Windows/tcsh remotes connect more reliably.
+- Machine reconnects now use upstream's wake handling instead of sheprd's own clock-jump check, and
+  the longest wait between reconnect attempts is upstream's 120 s again (sheprd had 10 s). Selecting
+  a reconnecting machine still retries it immediately.
+
 ## sheprd-v0.9.5-6 (2026-10-21)
 
 ### Added
