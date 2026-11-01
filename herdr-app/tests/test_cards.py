@@ -168,6 +168,30 @@ class LedgerTests(unittest.TestCase):
         quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))
         self.assertEqual(self.sent[-1], "SHE-1 Q2 (Currency?) → late answer")
 
+    def test_send_puts_dashes_after_double_dash(self):
+        self.ask("SHE-1", "Provider?")
+        self.stage(1, "-h")
+        argv = []
+        subprocess.run = lambda a, **kw: argv.extend(a) or subprocess.CompletedProcess(a, 0, "", "")
+        quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))
+        self.assertEqual(argv[1:4], ["send", "--", "t7"])
+
+    def test_a_claim_left_by_a_dead_send_expires(self):
+        self.ask("SHE-1", "Provider?")
+        self.stage(1, "A")
+        value, version = FakeCore.docs[cards.DOC]
+        q = value["cards"]["t7/SHE-1"]["questions"][0]
+        q.update(state="sending", claim="dead", claimed_at=cards.now())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.stage(1, "B")  # fresh claim: refused
+        q["claimed_at"] = "2000-01-01T00:00:00+00:00"
+        self.stage(1, "B")  # stale claim: may be staged again
+        quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))
+        self.assertEqual(self.sent, ["SHE-1 Q1 (Provider?) → B"])
+        sent = self.doc()["cards"]["t7/SHE-1"]["questions"][0]
+        self.assertEqual(sent["state"], "sent")
+        self.assertNotIn("claim", sent)
+
     def test_second_send_finds_nothing(self):
         self.ask("SHE-1", "Provider?")
         self.stage(1, "A")

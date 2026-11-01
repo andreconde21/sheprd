@@ -36,13 +36,27 @@ by apps through `cards stage / dismiss / send`.
 }
 ```
 
-- `questions[].state`: `open` → `staged` (an app chose an answer) → `sent`
-  (delivered with `hc send`), or `dismissed`.
+- `questions[].state`: `open` → `staged` (an app chose an answer) →
+  `sending` (claimed by one `cards send`) → `sent` (delivered with
+  `hc send`), or `dismissed`. A failed send puts `sending` back to `staged`.
+  While `sending`, a question carries `claim` and `claimed_at`; a claim older
+  than 120 s belongs to a send that died and may be staged and sent again
+  (if that send had already typed the line, the agent gets it twice).
+  Clients show `sending` as in progress and never write it themselves.
 - Sending joins every staged answer of one terminal into one line, e.g.
   `SHE-12 Q1 (Which provider?) → Stripe · Q2 → "EUR only"`, delivered with
   `hc send <terminal>` and kept in `inbox` until the agent runs `cards answers`.
 - `dismissed` hides a card from views until its next update.
-- Done cards are pruned 14 days after `done_at`.
+- `born` (cards and inbox entries) is the terminal's `created_ms`: when a
+  core restart reuses `t7` for a new program, that program's first `cards`
+  write drops whatever an older `born` left behind.
+- Pruning on every write: done cards 14 days after `done_at`; dismissed cards
+  7 days and not-done cards 30 days after `updated_at`; per card all live
+  questions plus the last 20 answered, the last 50 decisions; inbox entries
+  after 14 days, read ones beyond the last 5. A write that hits herdr-core's
+  1 MiB cap prunes hard (no done or dismissed cards, not-done cards older than
+  7 days, last 5 answered questions, last 20 decisions, no read entries) and
+  is retried once.
 
 ## `sheprd-view`: the sidebar layout
 

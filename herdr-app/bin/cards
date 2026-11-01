@@ -476,7 +476,12 @@ def cmd_send(args):
     line, claimed = change(claim)
     if not claimed:
         fail("nothing staged for that terminal")
-    sent = subprocess.run([hc_binary(), "send", "--", args.terminal, line], capture_output=True, text=True)
+    # Under the claim timeout, so a slow send can't be claimed again and typed twice.
+    try:
+        sent = subprocess.run([hc_binary(), "send", "--", args.terminal, line], capture_output=True, text=True,
+                              timeout=CLAIM_TIMEOUT_S - 20)
+    except subprocess.TimeoutExpired:
+        sent = subprocess.CompletedProcess([], 1, "", "the agent never paused long enough to type into it")
     ok = sent.returncode == 0
     born = born_of(args.terminal)
 

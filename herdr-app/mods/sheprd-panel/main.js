@@ -155,7 +155,9 @@ export default class SheprdPanel extends View {
           cx.notify();
         }, { active: editing })))
       .when(editing, (el) => el.child(Input.new(this.input).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.chrome).text_size(12.5)))
-      .when(q.state === "staged" && !q.options.includes(q.answer) && !editing, (el) => el.child(div().text_size(11.5).text_color(t.accent).child(`→ ${q.answer}`)));
+      .when(q.state === "staged" && !q.options.includes(q.answer) && !editing, (el) => el.child(div().text_size(11.5).text_color(t.accent).child(`→ ${q.answer}`)))
+      .when(q.state === "sending", (el) => el.child(div().text_size(11.5).text_color(t.dim)
+        .child(`Sending → ${q.answer}. If this stays for 2 minutes the send died: choose the answer again to resend.`)));
   }
 
   card(t, address, card) {
