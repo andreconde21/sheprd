@@ -18,6 +18,8 @@ const DOC: &str = include_str!("../scripts/sheprd-doc");
 const MOVE: &str = include_str!("../scripts/sheprd-move");
 /// The agent skill for the card ledger (SHE-100010); `setup` installs it from next to the script.
 const CARD_SKILL: &str = include_str!("../skills/sheprd-card/SKILL.md");
+/// The OpenCode TUI plugin that reports the model (SHE-100011); `setup` installs it.
+const OPENCODE_PLUGIN: &str = include_str!("../scripts/sheprd-opencode.js");
 
 /// Writes the bundled scripts next to the sheprd binary (only when they changed) and returns
 /// the messaging script's path.
@@ -29,6 +31,7 @@ fn script_path() -> std::io::Result<PathBuf> {
         ("sheprd-doc", DOC),
         ("sheprd-move", MOVE),
         ("sheprd-card-skill.md", CARD_SKILL),
+        ("sheprd-opencode.js", OPENCODE_PLUGIN),
         ("sheprd-msg", SCRIPT),
     ] {
         let path = exe.with_file_name(name);

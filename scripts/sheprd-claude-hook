@@ -7,6 +7,7 @@ tokens (the sheprd token format, see the sheprd README), which sheprd shows in i
 characters and a report at 16 tokens, hence many short tokens sent in batches.
 
   sheprd_ctx            current context size in tokens
+  sheprd_model          the model of the agent's last reply ("claude-opus-5-5")
   sheprd_session        Claude session id
   sheprd_u_YYYYMMDD     "input,output,cache_read,cache_write,active_minutes" per day (last 7)
   sheprd_todo           "done/total" of the agent's to-do list
@@ -132,7 +133,7 @@ def task_patterns():
 
 def fresh_cache():
     return {
-        "offset": 0, "last_id": None, "ctx": 0, "days": {},
+        "offset": 0, "last_id": None, "ctx": 0, "model": "", "days": {},
         "todos": [], "pending_creates": {}, "timeline": [], "tasks": [], "sent": [],
     }
 
@@ -243,6 +244,9 @@ def read_new_lines(cache, transcript, patterns):
             if message.get("id") and message.get("id") == cache["last_id"]:
                 continue
             cache["last_id"] = message.get("id")
+            # "<synthetic>" marks Claude Code's own messages (errors, interruptions), not a model.
+            if isinstance(message.get("model"), str) and message["model"] and not message["model"].startswith("<"):
+                cache["model"] = message["model"]
             when = local_time(entry["timestamp"])
             totals = cache["days"].setdefault(when.strftime("%Y-%m-%d"), [0, 0, 0, 0, []])
             totals[0] += usage.get("input_tokens", 0)
@@ -808,6 +812,8 @@ def report(pane, values, clear):
 
 def tokens(cache):
     out = {"sheprd_ctx": str(cache["ctx"])}
+    if cache.get("model"):
+        out["sheprd_model"] = fit(cache["model"])
     for day, t in sorted(cache["days"].items()):
         out[f"sheprd_u_{day.replace('-', '')}"] = ",".join(str(v) for v in t[:4] + [len(t[4])])
     todos = cache["todos"]

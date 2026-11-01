@@ -78,7 +78,7 @@ that need you show as ` ● 2 ` at the right end of the tab bar.
 you don't have to read its transcript:
 
 ```
- claude · dev
+ claude · claude-opus-5-5 · dev     ← agent · model (when reported) · machine
  card CB-12 ↗                       ← the card its launcher reported
  ✗ PR #7 · checks ✗ 1 ↗             ← [[status]] lines (below)
 
@@ -335,6 +335,7 @@ Any integration can feed the sidebar by reporting herdr pane metadata tokens
 | Token | Value |
 |---|---|
 | `sheprd_ctx` | current context size in tokens |
+| `sheprd_model` | the model the agent runs on (`claude-opus-5-5`, `claude-agent/opus`); shown in the right panel, `sheprd msg list` and view.json (`model`) |
 | `sheprd_session` | the agent's session id |
 | `sheprd_u_YYYYMMDD` | `input,output,cache_read,cache_write,active_minutes` for that day |
 | `sheprd_todo` | `done/total` of the agent's to-do list |
@@ -400,23 +401,42 @@ machine can talk to an agent on another, for example "ask the agent on the serve
 tell the one on my laptop to wait for it".
 
 ```bash
-sheprd msg list                          # every agent on every machine: machine/workspace, status, context
+sheprd msg list                          # every agent on every machine: machine/workspace, status, context, agent, model
 sheprd msg send dev/api "text"           # submit a prompt to that agent, marked as from another agent
 sheprd msg read dev/api -n 80            # its recent output
 ```
+
+```
+laptop (local)
+  laptop/billing     w3:p1    idle      82k  claude    opus-5-5             Invoice rounding
+  laptop/notes       w5:p1    working        opencode  claude-agent/opus    Weekly notes
+dev (direct)
+  dev/api            w8:p1    working  321k  codex     ?                    Webhook retries
+```
+
+The agent column is what herdr identified in the pane. The model comes from the agent's sheprd
+integration: the Claude Code hook (the model of its last reply) and the OpenCode plugin (the model
+its prompt is set to); `?` when nothing reports one.
 
 - **Laptop → server** goes direct, over the SSH link sheprd already uses.
 - **Server → laptop** works even when the server can't reach your laptop: the message waits in a
   queue on the server, and sheprd collects and delivers it while it's open. The server never gets
   access to your machine.
 - **Any agent.** It's a shell command, and every delivered message carries the command to reply.
-  A Claude skill is included.
+  Claude Code and OpenCode get the skills (`sheprd-msg`, `sheprd-doc`, `sheprd-card`): OpenCode
+  reads them from `~/.claude/skills` itself. Tested in OpenCode 2.2.4, Claude Agent provider
+  included: messages are submitted into its prompt and its replies arrive.
 - **Guardrails.** Messages tell the receiver they come from another agent, not from you, and to
-  ask you before anything destructive, outward-facing or involving secrets. A per-target rate
-  limit stops two agents ping-ponging.
+  ask you before anything destructive, outward-facing or involving secrets, and to reply only
+  when there is something to answer. A per-target rate limit stops two agents ping-ponging.
 
 Run `sheprd setup` once: it installs `sheprd-msg` (python3 only, no sheprd needed), the
-skill and the Claude Code hook on this machine and on every saved herdr machine.
+skills, the Claude Code hook and, where OpenCode is set up, the OpenCode plugin on this machine
+and on every saved herdr machine. The OpenCode plugin goes to
+`~/.config/opencode/sheprd-opencode/` and into `plugins` in OpenCode 2's `cli.json`, next to
+herdr's. If OpenCode has not created `cli.json` yet (it moves its old TUI settings there on its
+first run), start OpenCode once and run `sheprd setup` again; a `cli.json` with comments is left
+alone with a note to add `"./sheprd-opencode"` by hand.
 
 ## Install
 Linux (x86_64, aarch64; static) and macOS (Apple Silicon, Intel):
@@ -441,7 +461,7 @@ The server keeps running stock herdr; use the matching herdr version on each mac
   `work_panel.rs` (right panel), `board.rs` (status board), `status.rs`
   ([[status]] worker), `predict.rs` (local echo), `view_sync.rs` (sharing), plus
   `src/sheprd_msg.rs` and the bundled scripts in `scripts/` (`sheprd-msg`,
-  `sheprd-claude-hook`, `sheprd-doc`, `sheprd-status-github`). Small hooks in
+  `sheprd-claude-hook`, `sheprd-doc`, `sheprd-status-github`, `sheprd-opencode.js`). Small hooks in
   upstream files are tagged: `grep -rn "andreconde fork" src`.
 - **Following herdr is automatic**: *sheprd rebase* runs daily. When herdr ships
   a new stable release it rebases sheprd onto it; if that's clean and the tests

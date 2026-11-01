@@ -290,13 +290,17 @@ pub(super) fn render(
     }
     let title = match agent {
         Some(agent) => format!(
-            " {}{}",
+            " {}{}{}",
             agent
                 .name
                 .as_deref()
                 .or(agent.display_agent.as_deref())
                 .or(agent.agent.as_deref())
                 .unwrap_or("agent"),
+            // andreconde fork (SHE-100011): which model, when the agent's integration reports it.
+            projects::agent_model(agent)
+                .map(|model| format!(" · {model}"))
+                .unwrap_or_default(),
             machine
                 .as_deref()
                 .map(|machine| format!(" · {machine}"))
@@ -1419,6 +1423,25 @@ mod tests {
             !text.contains("CARDS · ?"),
             "a sent question no longer waits:\n{text}"
         );
+    }
+
+    #[test]
+    fn the_title_names_the_reported_model_and_omits_an_unknown_one() {
+        let endpoint = panel_endpoint(
+            None,
+            vec![("sheprd_model".into(), "claude-agent/opus".into())],
+        );
+        let (lines, _) = render_panel(&endpoint, &HashSet::new(), FULL_WIDTH);
+        assert!(
+            lines[0].contains("orchestrator · claude-agent/opus"),
+            "{lines:?}"
+        );
+        let (lines, _) = render_panel(
+            &panel_endpoint(None, Vec::new()),
+            &HashSet::new(),
+            FULL_WIDTH,
+        );
+        assert!(lines[0].ends_with(" orchestrator"), "{lines:?}");
     }
 
     #[test]

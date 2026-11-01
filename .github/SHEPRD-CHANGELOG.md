@@ -5,7 +5,7 @@ workflow publishes the section named after the tag as the GitHub release notes.
 
 ## Unreleased
 
-## sheprd-v0.9.5-7 (2026-11-01)
+## sheprd-v0.9.5-8 (2026-11-01)
 
 ### Changed
 - Merged 39 upstream herdr fixes (up to herdr's post-0.9.5 master). Among them: endpoint connections
@@ -17,6 +17,18 @@ workflow publishes the section named after the tag as the GitHub release notes.
   the longest wait between reconnect attempts is upstream's 120 s again (sheprd had 10 s). Selecting
   a reconnecting machine still retries it immediately.
 
+## sheprd-v0.9.5-7 (2026-10-30)
+
+### Added
+- Agent kind and model per pane. `sheprd msg list` shows what runs in each pane (claude, opencode…)
+  and its model (`?` when nothing reports one); the model also shows in the right panel title and
+  the shared view. Claude Code's hook reports the model of the last reply; a new OpenCode 2 TUI
+  plugin, installed by `sheprd setup` and registered in OpenCode's `cli.json`, reports the model
+  the prompt is set to (e.g. `claude-agent/opus`).
+
+### Changed
+- Messages between agents ask for a reply only when there is something to answer, so two agents
+  no longer acknowledge each other's acknowledgements.
 ## sheprd-v0.9.5-6 (2026-10-21)
 
 ### Added

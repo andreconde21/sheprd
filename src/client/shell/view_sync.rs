@@ -134,6 +134,8 @@ pub(super) fn view_json(
                     "number": numbers.get(&key),
                     "idle_since": idle_since,
                     "ctx": projects::agent_context_tokens(agent),
+                    // Extra v1 key: the model, when the agent's integration reports one.
+                    "model": projects::agent_model(agent),
                     "todo": projects::agent_todo(agent).map(|((done, total), _)| [done, total]),
                 }),
             );
