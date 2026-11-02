@@ -469,20 +469,10 @@ export default class SheprdSidebar extends View {
     };
 
     return v_flex().size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
-      .child(h_flex().px(10).pt(10).pb(2).gap(4).flex_none().items_center()
+      // Detailed/compact and Active only are settings: they sit in the header
+      // (sheprd-chrome), the filters stay here.
+      .child(h_flex().px(10).pt(10).pb(6).gap(4).flex_none().items_center()
         .children(FILTERS.map(chip)))
-      .child(h_flex().px(10).pb(6).gap(4).flex_none().items_center()
-        .child(div().flex_1())
-        .child(div().id("f-density").h(22).px(7).rounded(6).flex().items_center().text_size(11)
-          .text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
-          .tooltip(detailed ? "Detailed: two lines per agent. Click for compact" : "Compact: one line per agent. Click for detailed")
-          .on_click(() => saveView({ density: detailed ? "compact" : "detailed" }))
-          .child(detailed ? "detailed" : "compact"))
-        .child(div().id("f-active").h(22).px(7).rounded(6).flex().items_center().text_size(11)
-          .bg(v.active_only ? t.selected : t.chrome).text_color(v.active_only ? t.foreground : t.dim)
-          .cursor_pointer().tooltip("Active only: hide agents idle for 8 hours, unless kept")
-          .on_click(() => saveView({ active_only: !v.active_only }))
-          .child("Active")))
       .when(Boolean(this.problem), (el) => el.child(div().px(12).py(6).text_size(11.5).text_color(t.blocked).child(this.problem)))
       .when(list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
         .child(rows.length === 0 ? "No agents yet. They show up here when they report their status." : "Nothing here with this filter.")))
