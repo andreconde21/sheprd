@@ -22,6 +22,11 @@ On the computer that runs the app:
 ./install.sh            # cards + mods + layout, copied; --link symlinks them to edit from this checkout
 ```
 
+Use the default copy install. `--link` (symlinks into this checkout, for editing
+mods) leaves images loaded with `image()` blank, such as the sheprd mark in the
+header: Herdr's image loader doesn't follow symlinks. Icons drawn with `svg()`
+are fine.
+
 On every server the app reaches over SSH (where agents run), only the CLI:
 
 ```sh

@@ -7,6 +7,7 @@
 #   ./install.sh               everything (run on the machine with the app)
 #   ./install.sh --cards-only  just the CLI (servers the app reaches over SSH)
 #   ./install.sh --link        symlink instead of copy, to edit mods from this checkout
+#                              (images via image(), like the header logo, stay blank: not followed)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -32,6 +33,7 @@ place() {
 command -v python3 >/dev/null || { echo "cards needs python3 (3.11+)" >&2; exit 1; }
 command -v hc >/dev/null || [ -x "$HOME/.local/bin/hc" ] || echo "note: hc (herdr-core) is not installed here yet; cards needs it"
 
+$link && ! $cards_only && echo "note: --link leaves image() assets (the header's sheprd mark) blank; use a copy install to see them"
 echo "Installing:"
 chmod +x "$here/bin/cards"
 place "$here/bin/cards" "$HOME/.local/bin/cards"
