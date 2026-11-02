@@ -4,12 +4,16 @@
 // herdr-core document (see herdr-app/CONTRACT.md in the sheprd repo), read and
 // written through the `cards` CLI; cards come from each machine's `sheprd-cards`.
 //
+// Narrowed to a rail (the sidebar toggle, or dragging it under 160 px) it shows
+// one tag per project with its most urgent status, a needs-you count and a dot
+// per agent, like sheprd's collapsed sidebar.
+//
 // Opened as a popup with props { menu } (a row's right-click menu) or
 // { newProject } (name a new project).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec } from "herdr";
+import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const FILTERS = [
@@ -81,6 +85,39 @@ async function fetchCards(list) {
   }));
   for (const entry of got) if (entry) docs[entry[0]] = entry[1];
   return docs;
+}
+
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The rail goes by the sidebar's width, as in Herdr's own sidebar mods.
+const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
+
+// To the rail, or back to the width it had (the same toggle as workspace-chrome's).
+function toggleSidebar() {
+  const width = find(layout(), "sidebar")?.size?.px;
+  if (!narrow()) setShared("sidebar.width", width);
+  setShared("sidebar.collapsed", !narrow());
+  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 300) : window()?.platform === "macos" ? 76 : 44 });
+}
+
+// A project's rail tag, as sheprd makes it: `short`, else the first letters of
+// the first two words ("Acme ops" -> "AO"), else two capitals ("StoreFront" ->
+// "SF"), else the first two letters ("Infrastructure" -> "In").
+function projectTag(name, short) {
+  if (short?.trim()) return [...short.trim()].slice(0, 2).join("");
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return words.slice(0, 2).map((w) => [...w][0].toUpperCase()).join("");
+  const capitals = [...name].filter((c) => c !== c.toLowerCase() && c === c.toUpperCase()).slice(0, 2);
+  if (capitals.length === 2) return capitals.join("");
+  const [first = "", second = ""] = [...name];
+  return first.toUpperCase() + second;
 }
 
 function duration(ms) {
@@ -215,6 +252,51 @@ export default class SheprdSidebar extends View {
     return div().size(7).mx(3).flex_none().rounded(4).bg(s === "done" ? t.done : t.dim + "00");
   }
 
+  // ---- the rail ----------------------------------------------------------
+
+  // One column: each project's tag in the colour of its most urgent agent
+  // (blocked > done > working > idle) with a needs-you count, then a dot per
+  // agent (tooltip: space and summary, click: focus). Other comes last.
+  rail(t, list, m) {
+    const colour = (s) => ({ blocked: t.blocked, done: t.done, working: t.working })[s] ?? t.idle ?? t.dim;
+    const dot = (r) => {
+      const a = r.a;
+      const machine = a.address.includes("/") ? `${a.address.split("/")[0]} · ` : "";
+      const name = a.space_name || a.title || a.program?.name || a.address;
+      return div().id(`rd-${a.address}`).size(14).flex_none().flex().items_center().justify_center().rounded(4)
+        .when(a.focused, (el) => el.bg(t.selected))
+        .cursor_pointer().hover((el) => el.bg(t.hover))
+        .tooltip(`${machine}${name}${r.summary ? ` — ${r.summary}` : ""}`)
+        .on_click(() => {
+          run("pane.focus", { pane: a.pane });
+          if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
+        })
+        .child(div().size(7).rounded(4).bg(colour(a.status)));
+    };
+    const block = (g) => {
+      const top = g.rows.reduce((best, r) => ((RANK[r.a.status] ?? 0) > (RANK[best] ?? 0) ? r.a.status : best), "idle");
+      const waiting = g.rows.filter((r) => r.needs).length;
+      const tag = g.other ? "··" : projectTag(g.project.name, g.project.short);
+      const dots = [];
+      for (let i = 0; i < g.rows.length; i += 2) dots.push(h_flex().gap(2).justify_center().children(g.rows.slice(i, i + 2).map(dot)));
+      return v_flex().id(`rp-${g.project.name}`).flex_none().items_center().gap(3).pt(6)
+        .child(div().relative().w(30).h(22).flex().items_center().justify_center().rounded(6)
+          .bg(colour(top) + "26").text_color(colour(top)).text_size(11).font_semibold()
+          .tooltip(`${g.project.name}: ${g.rows.length} agent${g.rows.length === 1 ? "" : "s"}${waiting ? `, ${waiting} need you` : ""}`)
+          .child(tag)
+          .when(waiting > 0, (el) => el.child(div().absolute().top(-5).right(-6).min_w(14).h(14).px(3).rounded(7)
+            .bg(t.blocked).text_color(t.solid_foreground ?? t.background).text_size(9).font_bold()
+            .flex().items_center().justify_center().child(String(waiting)))))
+        .children(dots);
+    };
+    // Other at the bottom; the list already puts it last.
+    return v_flex().size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border)
+      .child(v_flex().id("sp-rail").flex_1().min_h(0).pb(6).overflow_y_scrollbar().children(list.map(block)))
+      .child(h_flex().h(28).flex_none().items_center().justify_center()
+        .child(div().id("rail-expand").text_size(13).text_color(t.dim).cursor_pointer()
+          .hover((el) => el.text_color(t.foreground)).tooltip("Expand the sidebar").on_click(toggleSidebar).child("»")));
+  }
+
   render(cx) {
     const t = theme();
     const p = props() ?? {};
@@ -237,7 +319,8 @@ export default class SheprdSidebar extends View {
         const questions = openQuestions(cards.get(a.address)).length;
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
-        return { a, space, key: spaceKey(space), questions, needs, rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
+        return { a, space, key: spaceKey(space), questions, needs, summary, rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       })
       .filter((r) => !hidden.has(r.key));
 
@@ -257,11 +340,17 @@ export default class SheprdSidebar extends View {
 
     // Projects in their saved order, pinned first; Other last.
     const order = [...v.projects.filter((x) => x.pinned), ...v.projects.filter((x) => !x.pinned)];
-    const groups = new Map(order.map((x) => [x.name, { project: x, rows: [] }]));
-    const other = { project: { name: "Other", collapsed: v.other_collapsed }, rows: [], other: true };
-    for (const r of shown) (groups.get(projectOf(r.space, v.projects)?.name)?.rows ?? other.rows).push(r);
-    const list = [...groups.values(), other].filter((g) => g.rows.length > 0);
-    for (const g of list) g.rows.sort((x, y) => y.rank - x.rank || (this.changed[y.a.address]?.at ?? 0) - (this.changed[x.a.address]?.at ?? 0) || y.a.seq - x.a.seq);
+    const grouped = (source) => {
+      const groups = new Map(order.map((x) => [x.name, { project: x, rows: [] }]));
+      const other = { project: { name: "Other", collapsed: v.other_collapsed }, rows: [], other: true };
+      for (const r of source) (groups.get(projectOf(r.space, v.projects)?.name)?.rows ?? other.rows).push(r);
+      const out = [...groups.values(), other].filter((g) => g.rows.length > 0);
+      for (const g of out) g.rows.sort((x, y) => y.rank - x.rank || (this.changed[y.a.address]?.at ?? 0) - (this.changed[x.a.address]?.at ?? 0) || y.a.seq - x.a.seq);
+      return out;
+    };
+    // The rail has no filter chips, so it shows every agent that isn't hidden.
+    if (narrow()) return this.rail(t, grouped(rows), m);
+    const list = grouped(shown);
 
     const fold = (g) => {
       if (g.other) return saveView({ other_collapsed: !v.other_collapsed });

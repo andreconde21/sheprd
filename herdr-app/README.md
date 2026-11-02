@@ -6,7 +6,7 @@ Herdr: it survives Herdr updates.
 
 | Piece | What it does |
 |---|---|
-| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / All, Active only, right-click: mark read, keep in view, move a space to a project, new project, hide. |
+| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / All, Active only, right-click: mark read, keep in view, move a space to a project, new project, hide. Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
 | `mods/sheprd-panel` | The focused agent's cards, its open questions with answer buttons (★ = recommended, ✎ = your own text), Send, decisions, and its last output. "All cards" shows every agent's open cards. |
 | `layouts/sheprd.json` | Herdr's main layout with the sidebar on the left and the panel on the right (Files and Changes stay in the panel stack). |
 | `bin/cards` | The card ledger CLI agents use (`cards update/ask/decide/done/answers/list`, same arguments as `sheprd card`), plus the commands the mods call. |
@@ -43,5 +43,5 @@ card back to its task file with the same `[ledger.writeback]` section of
 
 - Write-back covers status, decisions and the Done line; sheprd's
   `on_card_done` hook is not ported.
-- The sidebar has no collapsed rail and no per-project notification setting.
+- The sidebar has no per-project notification setting.
 - Cards refresh every 5 s (herdr-core has no doc events through `exec`).
