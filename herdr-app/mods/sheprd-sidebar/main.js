@@ -16,14 +16,13 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+// Each filter's label, and the shorter one for a narrow sidebar.
 const FILTERS = [
-  ["needs-you", "Needs you"],
-  ["working", "Working"],
-  ["marked", "Marked"],
-  ["all", "All"],
+  ["needs-you", "Needs you", "Needs"],
+  ["working", "Working", "Work"],
+  ["marked", "Marked", "★"],
+  ["all", "All", "All"],
 ];
-// Active only: idle agents drop out this long after their last change, unless kept.
-const RECENT_MS = 8 * 3600000;
 const CARDS_EVERY_MS = 5000;
 
 const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [] } };
@@ -247,7 +246,6 @@ export default class SheprdSidebar extends View {
     const p = props();
     const { address, seq, key } = p.menu;
     const m = marks();
-    const kept = m.kept.includes(address);
     const marked = m.marked.includes(address);
     const projects = view().projects;
     const item = (id, label, action, dim = false) => h_flex().id(id).h(28).px(8).rounded(6).items_center()
@@ -263,7 +261,6 @@ export default class SheprdSidebar extends View {
     return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
-      .child(item("m-keep", kept ? "Stop keeping in view" : "Keep in view", () => saveMarks((x) => ({ ...x, kept: kept ? x.kept.filter((k) => k !== address) : [...x.kept, address] }))))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).child(`Move ${key} to`))
       .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
@@ -365,9 +362,6 @@ export default class SheprdSidebar extends View {
       if (v.filter === "needs-you" && !r.needs) return false;
       if (v.filter === "working" && r.a.status !== "working") return false;
       if (v.filter === "marked" && !r.marked) return false;
-      if (v.active_only && !r.needs && r.a.status === "idle" && !r.a.focused && !r.a.pinned && !m.kept.includes(r.a.address)) {
-        return now - (this.changed[r.a.address]?.at ?? 0) < RECENT_MS;
-      }
       return true;
     });
 
@@ -458,20 +452,24 @@ export default class SheprdSidebar extends View {
           .child(div().truncate().text_size(11).text_color(t.dim).child(machine ? `${space} · ${machine}` : space)));
     };
 
-    const chip = ([id, label]) => {
+    // Narrower than the default width: short labels, and chips shrink before
+    // anything is cut.
+    const short = (find(layout(), "sidebar")?.size?.px ?? Infinity) < 280;
+    const chip = ([id, long, brief]) => {
       const on = v.filter === id;
-      return h_flex().id(`f-${id}`).h(22).px(8).gap(4).rounded(6).items_center().text_size(11)
+      const label = short ? brief : long;
+      return h_flex().id(`f-${id}`).h(22).px(short ? 6 : 8).gap(4).rounded(6).items_center().text_size(11).min_w(0)
         .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.dim)
         .cursor_pointer().hover((s) => s.text_color(t.foreground))
         .on_click(() => saveView({ filter: id }))
-        .child(label)
-        .child(div().text_color(id === "needs-you" && counts[id] ? t.blocked : t.dim).child(String(counts[id])));
+        .child(div().min_w(0).truncate().child(label))
+        .child(div().flex_none().text_color(id === "needs-you" && counts[id] ? t.blocked : t.dim).child(String(counts[id])));
     };
 
     return v_flex().size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
-      // Detailed/compact and Active only are settings: they sit in the header
-      // (sheprd-chrome), the filters stay here.
-      .child(h_flex().px(10).pt(10).pb(6).gap(4).flex_none().items_center()
+      // Settings (detailed/compact) sit in the header (sheprd-chrome); the
+      // filters stay here.
+      .child(h_flex().px(10).pt(10).pb(6).gap(4).flex_none().items_center().min_w(0)
         .children(FILTERS.map(chip)))
       .when(Boolean(this.problem), (el) => el.child(div().px(12).py(6).text_size(11.5).text_color(t.blocked).child(this.problem)))
       .when(list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)

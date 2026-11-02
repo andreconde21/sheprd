@@ -91,6 +91,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
   Members win over rules; the first matching project takes the space; the
   rest go to Other. `short` is the two-letter rail tag.
 - `filter`: `needs-you` | `working` | `marked` | `all`.
+- `active_only` and `marks.kept`: sheprd's Active view. The app's sidebar no
+  longer offers it (Marked covers it) and leaves them as they are.
 - `density`: `detailed` (two lines per agent: its work, then `space · machine`)
   | `compact` (one line, the space name). Missing means `detailed`.
 - `machine_tags`: a short tag per machine name, shown instead of the host name.
