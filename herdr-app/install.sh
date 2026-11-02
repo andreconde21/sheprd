@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs sheprd's pieces for the Herdr app (herdr-app + herdr-core):
 #   cards                      -> ~/.local/bin/cards (every machine with agents)
-#   mods/sheprd-sidebar, -panel, -chrome -> ~/.config/herdr-app/mods/ (the machine running the app)
+#   mods/sheprd-sidebar, -panel, -chrome, -tabs -> ~/.config/herdr-app/mods/ (the machine running the app)
 #   layouts/sheprd.json         -> ~/.config/herdr-app/layouts/
 #
 #   ./install.sh               everything (run on the machine with the app)
@@ -39,11 +39,13 @@ if ! $cards_only; then
   place "$here/mods/sheprd-sidebar" "$app/mods/sheprd-sidebar"
   place "$here/mods/sheprd-panel" "$app/mods/sheprd-panel"
   place "$here/mods/sheprd-chrome" "$app/mods/sheprd-chrome"
+  place "$here/mods/sheprd-tabs" "$app/mods/sheprd-tabs"
   place "$here/layouts/sheprd.json" "$app/layouts/sheprd.json"
   if command -v herdr-app >/dev/null; then
     herdr-app check "$app/mods/sheprd-sidebar"
     herdr-app check "$app/mods/sheprd-panel"
     herdr-app check "$app/mods/sheprd-chrome"
+    herdr-app check "$app/mods/sheprd-tabs"
   fi
   echo "Switch to it: ctrl-shift-l cycles layouts, or: herdr-app do layout.switch '{\"name\":\"sheprd\"}'"
 fi

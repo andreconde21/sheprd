@@ -1,6 +1,6 @@
-// sheprd's work panel: the focused agent's cards (status, summary, decisions),
-// its open questions with answer buttons, and what it printed last; or every
-// agent's cards at once. Cards come from each machine's `sheprd-cards`
+// sheprd's work panel: the focused agent's cards, each with its summary first,
+// then its latest decisions, then its open questions with answer buttons; what
+// the agent printed last stays folded until asked for. Or every agent's cards. Cards come from each machine's `sheprd-cards`
 // herdr-core document through the `cards` CLI (herdr-app/CONTRACT.md in the
 // sheprd repo). Answers are staged per question, then sent as one line with
 // `cards send`, which types them into the agent with `hc send`.
@@ -9,7 +9,9 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, machines, focused, run, theme, shared, setShared, exec, hc } from "herdr";
 
-const OUTPUT_LINES = 40;
+const OUTPUT_LINES = 15;
+// Decisions shown before "N more".
+const DECISIONS_SHOWN = 4;
 const OUTPUT_EVERY_MS = 3000;
 // The sidebar loads cards every 5 s; the panel loads them itself only when that stops.
 const CARDS_STALE_MS = 12000;
@@ -32,6 +34,15 @@ function cardsByAddress() {
   return out;
 }
 
+// The sidebar's short machine tag (CONTRACT.md: machine_tags, else the name's
+// first part, cut to 3 letters when longer than 5).
+function machineTag(name) {
+  const tag = /** @type {any} */ (shared("sheprd.view") ?? {}).machine_tags?.[name];
+  if (tag) return tag;
+  const first = name.split(/[-_.\s]/)[0] || name;
+  return first.length > 5 ? first.slice(0, 3) : first;
+}
+
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
 
 export default class SheprdPanel extends View {
@@ -40,6 +51,7 @@ export default class SheprdPanel extends View {
     this.output = "";
     this.outputFor = null;
     this.openDecisions = new Set();
+    this.showOutput = localStorage.getItem("output") === "1";
     this.editing = null;
     this.note = null;
     this.input = InputState.new({ value: "" });
@@ -81,7 +93,7 @@ export default class SheprdPanel extends View {
 
   readOutput(cx) {
     const address = focused()?.agent;
-    if (!address || this.mode !== "agent") return;
+    if (!address || this.mode !== "agent" || !this.showOutput) return;
     cx.spawn(async (cx) => {
       try {
         const r = await hc(["read", address, "--lines", String(OUTPUT_LINES)]);
@@ -163,21 +175,31 @@ export default class SheprdPanel extends View {
   card(t, address, card) {
     const qs = card.questions.filter(live);
     const key = `${address}/${card.id}`;
-    const showDecisions = this.openDecisions.has(key);
-    return v_flex().gap(6).p(10).rounded(10).bg(t.surface).border_1().border_color(t.border)
+    const allDecisions = this.openDecisions.has(key);
+    // Newest first; the rest behind "N more".
+    const decisions = [...card.decisions].reverse();
+    const shownDecisions = allDecisions ? decisions : decisions.slice(0, DECISIONS_SHOWN);
+    const label = (text) => div().pt(2).text_size(10.5).font_medium().text_color(t.dim).child(text);
+    return v_flex().gap(6).p(10).rounded(10).bg(t.surface).border_1().border_color(qs.length ? t.blocked + "66" : t.border)
       .when(card.done, (el) => el.opacity(0.7))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_none().text_size(11).font_semibold().text_color(t.accent).child(card.id))
-        .child(div().flex_1().min_w(0).truncate().text_size(12.8).font_medium().child(card.title ?? ""))
+        .child(div().flex_1())
         .when(Boolean(card.status), (el) => el.child(div().flex_none().px(6).h(18).rounded(5).bg(t.raised).text_size(10.5).text_color(t.muted).flex().items_center().child(card.status))))
-      .when(Boolean(card.summary), (el) => el.child(div().text_size(12).text_color(t.muted).child(card.summary)))
+      .when(Boolean(card.title), (el) => el.child(div().text_size(13).font_semibold().child(card.title)))
+      .when(Boolean(card.summary), (el) => el.child(div().text_size(12.5).text_color(t.foreground).child(card.summary)))
+      .when(decisions.length > 0, (el) => el
+        .child(label("Decisions"))
+        .children(shownDecisions.map((d, i) => h_flex().id(`d-${key}-${i}`).gap(6).items_start().text_size(11.5).text_color(t.muted)
+          .child(div().flex_none().child("•")).child(div().flex_1().min_w(0).child(d.text))))
+        .when(decisions.length > DECISIONS_SHOWN, (el) => el.child(div().id(`dc-${key}`).text_size(11).text_color(t.dim).cursor_pointer()
+          .hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => { allDecisions ? this.openDecisions.delete(key) : this.openDecisions.add(key); cx.notify(); })
+          .child(allDecisions ? "Fewer" : `${decisions.length - DECISIONS_SHOWN} more`))))
+      .when(qs.length > 0, (el) => el.child(label(qs.length === 1 ? "Question" : `${qs.length} questions`)))
+      .children(qs.map((q) => this.question(t, address, card, q)))
       .when(Boolean(card.link), (el) => el.child(div().id(`ln-${key}`).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
         .on_click(() => exec("xdg-open", [card.link]).catch(() => {})).child(card.link)))
-      .children(qs.map((q) => this.question(t, address, card, q)))
-      .when(card.decisions.length > 0, (el) => el.child(div().id(`dc-${key}`).text_size(11).text_color(t.dim).cursor_pointer()
-        .on_click((_e, cx) => { showDecisions ? this.openDecisions.delete(key) : this.openDecisions.add(key); cx.notify(); })
-        .child(`${showDecisions ? "▾" : "▸"} ${card.decisions.length} decision${card.decisions.length === 1 ? "" : "s"}`)))
-      .when(showDecisions, (el) => el.children(card.decisions.map((d, i) => div().id(`d-${key}-${i}`).pl(10).text_size(11.5).text_color(t.muted).child(`• ${d.text}`))))
       .when(Boolean(card.writeback), (el) => el.child(div().text_size(10.5).text_color(card.writeback.ok ? t.dim : t.blocked).child(`${card.writeback.ok ? "✓" : "!"} ${card.writeback.message}`)));
   }
 
@@ -188,8 +210,8 @@ export default class SheprdPanel extends View {
     return v_flex().gap(8)
       .when(compact, (el) => el.child(h_flex().id(`ab-${address}`).gap(6).items_center().cursor_pointer()
         .on_click(() => a && run("pane.focus", { pane: a.pane }))
-        .child(div().text_size(12).font_semibold().child(a ? `${a.space_name} · ${a.tab_name}` : address))
-        .child(div().text_size(10.5).text_color(t.dim).child(address))))
+        .child(div().text_size(12).font_semibold().child(a?.space_name || address))
+        .child(div().text_size(10.5).text_color(t.dim).child(split(address).on ? machineTag(split(address).on) : "here"))))
       .children(cards.map((c) => this.card(t, address, c)))
       .when(staged > 0, (el) => el.child(h_flex().justify_end()
         .child(this.button(t, `send-${address}`, `Send ${staged} answer${staged === 1 ? "" : "s"}`,
@@ -223,12 +245,19 @@ export default class SheprdPanel extends View {
       const lines = this.outputFor === address && this.output ? this.output.split("\n") : [];
       body = v_flex().gap(10)
         .child(h_flex().gap(6).items_center()
-          .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(agent ? `${agent.space_name} · ${agent.tab_name}` : address))
-          .child(div().text_size(10.5).text_color(t.dim).child(address)))
+          .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(agent?.space_name || address))
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child(split(address).on ? machineTag(split(address).on) : "here")))
         .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child("No cards from this agent."))
-        .child(div().pt(6).text_size(11).font_medium().text_color(t.dim).child("Last output"))
-        .child(v_flex().p(8).rounded(8).bg(t.background).border_1().border_color(t.border).text_size(11).text_color(t.muted)
-          .children(lines.length ? lines.map((l, i) => div().id(`o-${i}`).truncate().child(l || " ")) : [div().text_color(t.dim).child("…")]));
+        .child(div().id("out-toggle").pt(6).text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => {
+            this.showOutput = !this.showOutput;
+            localStorage.setItem("output", this.showOutput ? "1" : "0");
+            this.readOutput(cx);
+            cx.notify();
+          })
+          .child(`${this.showOutput ? "▾" : "▸"} Last output`))
+        .when(this.showOutput, (el) => el.child(v_flex().p(8).rounded(8).bg(t.background).border_1().border_color(t.border).text_size(11).text_color(t.muted)
+          .children(lines.length ? lines.filter((l, i) => l.trim() || (i > 0 && lines[i - 1].trim())).map((l, i) => div().id(`o-${i}`).truncate().child(l || " ")) : [div().text_color(t.dim).child("…")])));
     }
 
     return v_flex().size_full().min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
