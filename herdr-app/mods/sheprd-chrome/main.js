@@ -1,6 +1,7 @@
-// The sheprd layout's sidebar header and footer: Herdr's workspace-chrome with
-// the sheprd name and mark, plus the sheprd sidebar's settings as icon buttons
-// next to search and the sidebar toggle: detailed/compact rows and Active only.
+// The sheprd layout's sidebar header: Herdr's workspace-chrome with the sheprd
+// name and mark, plus the sheprd sidebar's settings as icon buttons next to
+// search and the sidebar toggle (detailed/compact rows, Active only) and Herdr's
+// Settings, so the layout needs no footer.
 // Those live in the hub's `sheprd-view` document (herdr-app/CONTRACT.md),
 // written through the `cards` CLI like the sidebar does.
 //
@@ -8,7 +9,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, run, props, window, shared, setShared, updates, layout, exec } from "herdr";
+import { theme, run, window, shared, setShared, updates, layout, exec } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -50,22 +51,12 @@ export default class SheprdChrome extends View {
   render() {
     const t = theme();
     const collapsed = narrow();
-    if (props()?.footer) {
-      const row = (id, icon, label, dim, action) => h_flex().id(id).h(28).px(8).gap(9).items_center().rounded(8)
-        .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
-        .on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14))
-        .when(!collapsed, el => el.child(label));
-      return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
-        .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
-          .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent))))
-        .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
-    }
     const v = view();
     const detailed = v.density !== "compact";
     return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(2).items_center().text_size(13.5)
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
       .when(!collapsed, el => el.child(h_flex().flex_1().min_w(0).gap(8).items_center()
-        .child(image("mods/sheprd-chrome/sheprd.svg").size(20).flex_none())
+        .child(image("mods/sheprd-chrome/sheprd.png").size(20).rounded(5).flex_none())
         .child(div().font_semibold().text_color(t.foreground).child("sheprd"))))
       .when(!collapsed, el => el
         .child(this.button("density", svg(`mods/sheprd-chrome/${detailed ? "detailed" : "compact"}.svg`).size(15),
@@ -74,6 +65,9 @@ export default class SheprdChrome extends View {
         .child(this.button("active", svg("mods/sheprd-chrome/active.svg").size(15),
           () => saveView({ active_only: !v.active_only }),
           v.active_only ? "Active only: on. Idle 8 h+ agents are hidden unless kept" : "Active only: off. Click to hide agents idle 8 h+", Boolean(v.active_only)))
+        .child(this.button("settings", h_flex().relative().child(svg("mods/workspace-chrome/settings.svg").size(15))
+            .when(Boolean(updates().app.ready), b => b.child(div().absolute().top(-2).right(-2).size(6).rounded_full().bg(t.accent))),
+          () => run("app.settings"), updates().app.ready ? "Settings (an update is ready)" : "Settings"))
         .child(this.button("search", svg("mods/workspace-chrome/search.svg").size(15), () => run("mod.open", { name: "picker" }), "Search")))
       // On the macOS rail the traffic lights fill the row; the sidebar's » unfolds it.
       .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg("mods/workspace-chrome/sidebar.svg").size(15), toggleSidebar, collapsed ? "Expand the sidebar" : "Collapse the sidebar")));

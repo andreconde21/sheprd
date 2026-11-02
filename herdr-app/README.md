@@ -8,7 +8,7 @@ Herdr: it survives Herdr updates.
 |---|---|
 | `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / All, Active only, right-click: mark read, keep in view, move a space to a project, new project, hide. Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
 | `mods/sheprd-panel` | The focused agent's cards, its open questions with answer buttons (★ = recommended, ✎ = your own text), Send, decisions, and its last output. "All cards" shows every agent's open cards. |
-| `mods/sheprd-chrome` | The sidebar's header and footer: Herdr's own with the sheprd name and mark, plus the sidebar's settings as icons next to search and the sidebar toggle (detailed/compact rows, Active only). |
+| `mods/sheprd-chrome` | The sidebar's header: Herdr's own with the sheprd name and mark, plus icons next to search and the sidebar toggle for the sidebar's settings (detailed/compact rows, Active only) and Herdr's Settings. No footer (Add machine is in Herdr's Settings). |
 | `layouts/sheprd.json` | Herdr's main layout with the sidebar on the left and the panel on the right (Files and Changes stay in the panel stack). |
 | `bin/cards` | The card ledger CLI agents use (`cards update/ask/decide/done/answers/list`, same arguments as `sheprd card`), plus the commands the mods call. |
 | `CONTRACT.md` | The two herdr-core documents (`sheprd-cards`, `sheprd-view`) shared with Conductore. |
@@ -18,7 +18,7 @@ Herdr: it survives Herdr updates.
 On the computer that runs the app:
 
 ```sh
-./install.sh            # cards + mods + layout; add --link to edit mods from this checkout
+./install.sh            # cards + mods + layout, copied; --link symlinks them to edit from this checkout
 ```
 
 On every server the app reaches over SSH (where agents run), only the CLI:
