@@ -153,6 +153,7 @@ export default class SheprdSidebar extends View {
     // Each agent's last state and when it changed (ms; 0 = unknown), kept
     // across restarts. v2: "changed" stamped every first sighting as now.
     this.changed = JSON.parse(localStorage.getItem("changed.v2") ?? "{}");
+    for (const c of Object.values(this.changed)) c.first ??= Date.now();
     localStorage.removeItem("changed");
     cx.spawn(async (cx) => {
       try {
@@ -186,12 +187,15 @@ export default class SheprdSidebar extends View {
     });
   }
 
-  // Stamps agents whose state changed; done and idle count as one. A first
-  // sighting isn't a change: a working agent counts from now, anything else
-  // from its tab's last change if the app saw one, else unknown (0), so the
-  // Active filter doesn't keep every agent it just met for 8 hours.
+  // Stamps agents whose state changed (for the age column and the sort); done
+  // and idle count as one. A first sighting isn't a change: a working agent
+  // counts from now, anything else from its tab's last change if the app saw
+  // one, else unknown (0). Returns the agents never seen before, once the
+  // sidebar has seen any (so a fresh install doesn't count everyone as new).
   track(list, now) {
     let dirty = false;
+    const fresh = [];
+    const known = Object.keys(this.changed).length > 0;
     let tabById = null;
     for (const a of list) {
       const s = a.status === "done" ? "idle" : a.status;
@@ -202,13 +206,17 @@ export default class SheprdSidebar extends View {
         tabById ??= new Map(spaces().flatMap((sp) => sp.tabs ?? []).map((x) => [x.id, x]));
         at = tabById.get(a.tab)?.changed_at ?? 0;
       }
-      this.changed[a.address] = { s, at };
+      if (!prev && known) fresh.push(a.address);
+      this.changed[a.address] = { s, at, first: prev?.first ?? now };
       dirty = true;
     }
-    if (!dirty) return;
+    if (!dirty) return fresh;
+    // Forgotten 30 days after first seen once gone, so an agent on a machine
+    // that drops off for a while isn't "new" when it comes back.
     const listed = new Set(list.map((a) => a.address));
-    for (const [k, c] of Object.entries(this.changed)) if (!listed.has(k) && now - c.at > 30 * 86400000) delete this.changed[k];
+    for (const [k, c] of Object.entries(this.changed)) if (!listed.has(k) && now - (c.first ?? c.at) > 30 * 86400000) delete this.changed[k];
     localStorage.setItem("changed.v2", JSON.stringify(this.changed));
+    return fresh;
   }
 
   // ---- popups -------------------------------------------------------------
@@ -332,10 +340,14 @@ export default class SheprdSidebar extends View {
     if (p.menu) return this.menuView(t);
 
     const v = view();
-    const m = marks();
     const now = Date.now();
     const all = agents();
-    this.track(all, now);
+    const fresh = this.track(all, now);
+    // A new agent started while showing Marked is marked, so it stays in view.
+    if (v.filter === "marked" && fresh.length) {
+      saveMarks((x) => ({ ...x, marked: [...x.marked, ...fresh.filter((a) => !x.marked.includes(a))] }));
+    }
+    const m = marks();
     const spaceById = new Map(spaces().map((s) => [s.id, s]));
     const cards = cardsByAddress();
     const hidden = new Set(v.hidden);

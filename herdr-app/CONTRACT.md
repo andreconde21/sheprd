@@ -101,6 +101,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 - Marks follow sheprd's: `unread` clears on focus; `dismissed` is
   `<address>@<seq>` and lapses when the agent's `seq` moves on; `kept` stays in
   the active view; `marked` is the user's own flag on an agent (★), shown by the
-  `marked` filter. Older documents may lack `marked`: read it as empty.
+  `marked` filter. The sidebar marks an agent it sees for the first time while
+  the filter is `marked`, so a new agent stays in view. Older documents may
+  lack `marked`: read it as empty.
 - An agent "needs you" when blocked, done, or unread; a working agent with a
   staged-but-unsent answer also counts.
