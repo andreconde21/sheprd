@@ -570,6 +570,11 @@ description: Talk to coding agents on other machines (or other workspaces on thi
 
 `sheprd-msg` sends prompts between agents running in herdr panes, across machines.
 
+In the Herdr app (`$HC_TERMINAL_ID` is set) agents are herdr-core terminals, which sheprd-msg
+does not reach. Use `hc` there: `hc ls` (addresses: `t7` here, `omarchy/t14` on another
+machine), `hc send <address> -- "text"` (types it and presses Enter; start with who you are,
+e.g. `[from development-central/t1j]`, so the reply finds you), `hc read <address> --lines 40`.
+
 ```bash
 sheprd-msg list                          # every reachable agent: machine/workspace, pane, status, context, agent, model
 sheprd-msg send dev/billing "text"   # submit a prompt to that agent (by workspace label, id or pane id)

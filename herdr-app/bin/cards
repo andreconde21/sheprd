@@ -1,0 +1,764 @@
+#!/usr/bin/env python3
+"""cards: the sheprd card ledger on herdr-core (hc).
+
+Agents report the cards (tickets, tasks) they work on; the Herdr app's
+sheprd-panel and sheprd-cards mods, and Conductore, show them. Same commands
+as `sheprd card`, so the sheprd-card skill carries over with one word changed.
+
+Storage: one hc document per machine, `sheprd-cards` (see ../CONTRACT.md),
+read and written through `hc connect` with version checks, so two agents
+writing at once never lose an update.
+
+  cards update SHE-12 --title "Stripe checkout" --status dev --summary "..."
+  cards ask SHE-12 "Which provider?" --option Stripe --option Multibanco --recommend 1
+  cards decide SHE-12 "Use Checkout, not Elements"
+  cards done SHE-12 --summary "Merged as #41; live on dev"
+  cards answers [--peek]     answers the user sent you (marks them read)
+  cards list                 your cards
+
+For the app and Conductore (not agents):
+  cards json                         the whole document
+  cards stage <terminal> <ID> <N> <answer>
+  cards dismiss <terminal> <ID> [--question N]
+  cards send <terminal>              deliver staged answers with `hc send`
+  cards view                         the sidebar layout (sheprd-view)
+  cards view-set '<json>'            merge top-level keys into it
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+DOC = os.environ.get("CARDS_DOC", "sheprd-cards")
+VIEW_DOC = os.environ.get("CARDS_VIEW_DOC", "sheprd-view")
+VERSION = 1
+KEEP_DONE_DAYS = 14
+MAX_DECISIONS = 50
+MAX_INBOX = 50
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def fail(message, code=1):
+    print(f"cards: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def hc_binary():
+    found = shutil.which("hc") or os.path.expanduser("~/.local/bin/hc")
+    if not os.path.exists(found):
+        fail("hc (herdr-core) is not installed on this machine")
+    return found
+
+
+class Core:
+    """One `hc connect` session: JSON-RPC lines over stdin/stdout."""
+
+    def __init__(self):
+        self.proc = subprocess.Popen(
+            [hc_binary(), "connect"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.next_id = 0
+
+    def call(self, method, params):
+        self.next_id += 1
+        request = {"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}
+        self.proc.stdin.write(json.dumps(request) + "\n")
+        self.proc.stdin.flush()
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                err = self.proc.stderr.read().strip()
+                fail(f"hc connect closed: {err or 'no reply'}")
+            reply = json.loads(line)
+            if reply.get("id") != self.next_id:
+                continue  # a notification
+            if "error" in reply:
+                raise RpcError(reply["error"])
+            return reply["result"]
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+
+
+class RpcError(Exception):
+    def __init__(self, error):
+        super().__init__(error.get("message", str(error)))
+        self.error = error
+
+
+def empty_doc():
+    return {"v": VERSION, "cards": {}, "inbox": {}}
+
+
+def load(core):
+    result = core.call("doc.get", {"name": DOC})
+    value = result.get("value") or empty_doc()
+    value.setdefault("cards", {})
+    value.setdefault("inbox", {})
+    return value, result.get("version", 0)
+
+
+def change(mutate):
+    """Read, mutate, write with the version; retry when someone wrote in between."""
+    core = Core()
+    try:
+        for attempt in range(8):
+            doc, version = load(core)
+            out = mutate(doc)
+            prune(doc)
+            try:
+                core.call("doc.set", {"name": DOC, "value": doc, "version": version})
+                return out
+            except RpcError as err:
+                if "exceeds" in str(err):
+                    # Past herdr-core's 1 MiB cap every write fails; drop history so this one lands.
+                    prune(doc, hard=True)
+                    try:
+                        core.call("doc.set", {"name": DOC, "value": doc, "version": version})
+                        return out
+                    except RpcError as again:
+                        err = again
+                if (err.error.get("data") or {}).get("kind") != "conflict":
+                    fail(f"hc refused the write: {err}")
+                time.sleep(0.05 * (attempt + 1))
+        fail("the cards document kept changing; try again")
+    finally:
+        core.close()
+
+
+def read_doc():
+    core = Core()
+    try:
+        return load(core)[0]
+    finally:
+        core.close()
+
+
+def age_days(stamp):
+    if not stamp:
+        return 0
+    return (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(stamp)).total_seconds() / 86400
+
+
+def prune(doc, hard=False):
+    """Keeps the document well under herdr-core's 1 MiB: old cards, answered
+    questions and read answers go. `hard` (after a write hit the cap) keeps
+    only what is still in play."""
+    done_days, dismissed_days, stale_days = (0, 0, 7) if hard else (KEEP_DONE_DAYS, 7, 30)
+    resolved_kept, decisions_kept, read_kept = (5, 20, 0) if hard else (20, MAX_DECISIONS, 5)
+    for key in list(doc["cards"]):
+        card = doc["cards"][key]
+        if card.get("done") and age_days(card.get("done_at")) >= done_days:
+            del doc["cards"][key]
+        elif card.get("dismissed") and age_days(card.get("updated_at")) >= dismissed_days:
+            del doc["cards"][key]
+        elif not card.get("done") and age_days(card.get("updated_at")) >= stale_days:
+            del doc["cards"][key]
+        else:
+            questions = card.get("questions", [])
+            resolved = [q for q in questions if not live(q)]
+            keep = {id(q) for q in resolved[-resolved_kept:]} if resolved_kept else set()
+            card["questions"] = [q for q in questions if live(q) or id(q) in keep]
+            card["decisions"] = card.get("decisions", [])[-decisions_kept:]
+    for terminal in list(doc["inbox"]):
+        entries = [a for a in doc["inbox"][terminal] if age_days(a.get("at")) < KEEP_DONE_DAYS]
+        unread = [a for a in entries if not a.get("read")]
+        read = [a for a in entries if a.get("read")][-read_kept:] if read_kept else []
+        entries = sorted(read + unread, key=lambda a: a["at"])[-MAX_INBOX:]
+        if entries:
+            doc["inbox"][terminal] = entries
+        else:
+            del doc["inbox"][terminal]
+
+
+def live(question):
+    return question.get("state") in ("open", "staged", "sending")
+
+
+# A terminal id (t7) can come back for a new program after a core restart; its
+# start time tells the two apart, so a new agent never inherits old cards.
+_born = {}
+
+
+def born_of(terminal):
+    if terminal not in _born:
+        try:
+            got = subprocess.run([hc_binary(), "get", terminal, "--json"], capture_output=True, text=True, timeout=10)
+            _born[terminal] = json.loads(got.stdout).get("created_ms") if got.returncode == 0 else None
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+            _born[terminal] = None
+    return _born[terminal]
+
+
+def forget_previous(doc, terminal, born):
+    """Drops cards and answers a previous program in this terminal left behind."""
+    if born is None:
+        return
+    for key in list(doc["cards"]):
+        card = doc["cards"][key]
+        if card["terminal"] == terminal and card.get("born") not in (None, born):
+            del doc["cards"][key]
+    if terminal in doc["inbox"]:
+        doc["inbox"][terminal] = [a for a in doc["inbox"][terminal] if a.get("born") in (None, born)]
+
+
+def my_terminal(args):
+    terminal = getattr(args, "terminal", None) or os.environ.get("HC_TERMINAL_ID")
+    if not terminal:
+        fail("not inside a herdr-core terminal (no HC_TERMINAL_ID); pass --terminal")
+    return terminal
+
+
+def card_key(terminal, card_id):
+    return f"{terminal}/{card_id}"
+
+
+def get_card(doc, terminal, card_id, create=False):
+    """`create` is the agents' path: it also drops what an earlier program in this terminal left."""
+    if create:
+        forget_previous(doc, terminal, born_of(terminal))
+    key = card_key(terminal, card_id)
+    card = doc["cards"].get(key)
+    if card is None:
+        if not create:
+            fail(f"no card {card_id} for {terminal}")
+        card = {
+            "born": born_of(terminal),
+            "id": card_id,
+            "terminal": terminal,
+            "title": None,
+            "status": None,
+            "summary": None,
+            "link": None,
+            "questions": [],
+            "decisions": [],
+            "done": False,
+            "done_at": None,
+            "dismissed": False,
+            "writeback": None,
+            "created_at": now(),
+            "updated_at": now(),
+        }
+        doc["cards"][key] = card
+    return card
+
+
+def touch(card):
+    card["updated_at"] = now()
+    card["dismissed"] = False
+
+
+def clip(text, limit):
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# ---- agent commands -------------------------------------------------------
+
+
+def cmd_update(args):
+    terminal = my_terminal(args)
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id, create=True)
+        for field, limit in (("title", 120), ("status", 30), ("summary", 600), ("link", 500)):
+            value = getattr(args, field)
+            if value is not None:
+                card[field] = clip(value, limit)
+        if card["done"] and args.status and args.status not in ("done",):
+            card["done"] = False
+        touch(card)
+
+    change(mutate)
+    print(f"{args.id} updated")
+
+
+def cmd_ask(args):
+    terminal = my_terminal(args)
+    options = [clip(o, 80) for o in args.option or []]
+    if args.recommend is not None and not 1 <= args.recommend <= len(options):
+        fail("--recommend must name one of the options, from 1")
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id, create=True)
+        number = 1 + max((q["n"] for q in card["questions"]), default=0)
+        card["questions"].append(
+            {
+                "n": number,
+                "text": clip(args.question, 300),
+                "options": options,
+                "recommend": args.recommend,
+                "state": "open",
+                "answer": None,
+                "asked_at": now(),
+            }
+        )
+        touch(card)
+        return number
+
+    number = change(mutate)
+    print(f"{args.id} Q{number} asked; the answer arrives typed into your terminal")
+
+
+def cmd_decide(args):
+    terminal = my_terminal(args)
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id, create=True)
+        card["decisions"].append({"text": clip(args.decision, 200), "at": now()})
+        touch(card)
+
+    change(mutate)
+    print(f"{args.id} decision recorded")
+
+
+def cmd_done(args):
+    terminal = my_terminal(args)
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id, create=True)
+        if args.summary is not None:
+            card["summary"] = clip(args.summary, 600)
+        card["done"] = True
+        card["status"] = "done"
+        card["done_at"] = now()
+        touch(card)
+        return json.loads(json.dumps(card))
+
+    card = change(mutate)
+    outcome = writeback(card)
+    if outcome is not None:
+
+        def record(doc):
+            stored = doc["cards"].get(card_key(terminal, args.id))
+            if stored:
+                stored["writeback"] = outcome
+
+        change(record)
+    note = f" ({'✓' if outcome['ok'] else '!'} {outcome['message']})" if outcome else ""
+    print(f"{args.id} done{note}")
+
+
+def cmd_answers(args):
+    terminal = my_terminal(args)
+
+    def mutate(doc):
+        forget_previous(doc, terminal, born_of(terminal))
+        unread = [a for a in doc["inbox"].get(terminal, []) if not a.get("read")]
+        if not args.peek:
+            for a in unread:
+                a["read"] = True
+        return unread
+
+    unread = mutate(read_doc()) if args.peek else change(mutate)
+    if not unread:
+        print("no new answers")
+    for a in unread:
+        print(a["line"])
+
+
+def cmd_list(args):
+    terminal = my_terminal(args)
+    doc = read_doc()
+    mine = [c for c in doc["cards"].values() if c["terminal"] == terminal]
+    if args.json:
+        print(json.dumps(mine, indent=2))
+        return
+    if not mine:
+        print("no cards")
+    for c in sorted(mine, key=lambda c: c["updated_at"], reverse=True):
+        print(f"{c['id']}  [{c.get('status') or '-'}]  {c.get('title') or ''}")
+        if c.get("summary"):
+            print(f"    {c['summary']}")
+        for q in c["questions"]:
+            if live(q):
+                print(f"    Q{q['n']} ({q['state']}): {q['text']}")
+
+
+# ---- app commands ---------------------------------------------------------
+
+
+def cmd_json(_args):
+    print(json.dumps(read_doc()))
+
+
+def cmd_stage(args):
+    def mutate(doc):
+        card = get_card(doc, args.terminal, args.id)
+        for q in card["questions"]:
+            if q["n"] == args.n:
+                if q["state"] == "sent":
+                    fail(f"{args.id} Q{args.n} was already sent")
+                if q["state"] == "sending" and not stale_claim(q):
+                    fail(f"{args.id} Q{args.n} is being sent")
+                q["answer"] = clip(args.answer, 300)
+                q["state"] = "staged"
+                card["updated_at"] = now()
+                return
+        fail(f"{args.id} has no Q{args.n}")
+
+    change(mutate)
+    print(f"{args.id} Q{args.n} staged")
+
+
+def cmd_dismiss(args):
+    def mutate(doc):
+        card = get_card(doc, args.terminal, args.id)
+        if args.question is None:
+            card["dismissed"] = True
+            for q in card["questions"]:
+                if q["state"] in ("open", "staged"):
+                    q["state"] = "dismissed"
+        else:
+            for q in card["questions"]:
+                if q["n"] == args.question:
+                    q["state"] = "dismissed"
+        card["updated_at"] = now()
+
+    change(mutate)
+    print("dismissed")
+
+
+def answer_text(answer):
+    return answer if re.fullmatch(r"[\w .,:/#@+-]{1,80}", answer) else json.dumps(answer, ensure_ascii=False)
+
+
+# A claim older than this belongs to a send that died midway; its answers can be staged again.
+CLAIM_TIMEOUT_S = 120
+
+
+def stale_claim(q):
+    at = q.get("claimed_at")
+    return not at or (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(at)).total_seconds() > CLAIM_TIMEOUT_S
+
+
+def cmd_send(args):
+    """Claims the staged answers (staged → sending), types exactly those into
+    the agent, then marks exactly those sent. An answer staged or changed
+    during the send stays staged for the next one; a second Send finds nothing."""
+    token = f"{os.getpid()}-{time.time()}"
+
+    def claim(doc):
+        parts, claimed = [], []
+        for key, card in sorted(doc["cards"].items(), key=lambda kv: kv[1]["id"]):
+            if card["terminal"] != args.terminal:
+                continue
+            staged = [q for q in card["questions"] if q["state"] == "staged" or (q["state"] == "sending" and stale_claim(q))]
+            if not staged:
+                continue
+            bits = []
+            for i, q in enumerate(staged):
+                label = f"Q{q['n']} ({clip(q['text'], 60)})" if i == 0 else f"Q{q['n']}"
+                bits.append(f"{label} → {answer_text(q['answer'])}")
+                q.update(state="sending", claim=token, claimed_at=now())
+                claimed.append((key, q["n"], q["answer"]))
+            parts.append(f"{card['id']} " + " · ".join(bits))
+        return " | ".join(parts), claimed
+
+    line, claimed = change(claim)
+    if not claimed:
+        fail("nothing staged for that terminal")
+    # Under the claim timeout, so a slow send can't be claimed again and typed twice.
+    try:
+        sent = subprocess.run([hc_binary(), "send", "--", args.terminal, line], capture_output=True, text=True,
+                              timeout=CLAIM_TIMEOUT_S - 20)
+    except subprocess.TimeoutExpired:
+        sent = subprocess.CompletedProcess([], 1, "", "the agent never paused long enough to type into it")
+    ok = sent.returncode == 0
+    born = born_of(args.terminal)
+
+    def settle(doc):
+        for key, n, answer in claimed:
+            card = doc["cards"].get(key)
+            for q in card["questions"] if card else []:
+                if q["n"] == n and q.get("claim") == token and q["state"] == "sending":
+                    q["state"] = "sent" if ok else "staged"
+                    q["answer"] = answer
+                    q.pop("claim", None)
+                    q.pop("claimed_at", None)
+            if card:
+                card["updated_at"] = now()
+        if ok:
+            doc["inbox"].setdefault(args.terminal, []).append({"line": line, "at": now(), "read": False, "born": born})
+
+    change(settle)
+    if not ok:
+        fail(f"hc send refused: {(sent.stderr or sent.stdout).strip()}")
+    print(line)
+
+
+# ---- sidebar layout (sheprd-view) ------------------------------------------
+
+VIEW_KEYS = ("projects", "hidden", "filter", "active_only", "other_collapsed", "marks", "density", "machine_tags", "other_muted")
+
+
+def sidebar_import():
+    """sheprd's sidebar.toml as a sheprd-view document, or None."""
+    path = os.path.expanduser("~/.config/herdr/sidebar.toml")
+    if not os.path.exists(path):
+        return None
+    import tomllib
+
+    with open(path, "rb") as f:
+        old = tomllib.load(f)
+    fields = ("name", "short", "pinned", "collapsed", "members", "match", "note")
+    projects = [{k: g.get(k) for k in fields if g.get(k) is not None} for g in old.get("group", [])]
+    return {
+        "v": VERSION,
+        "projects": projects,
+        "hidden": old.get("hidden", []),
+        "filter": "all",
+        "active_only": bool(old.get("active_only", False)),
+        "other_collapsed": bool(old.get("other_collapsed", False)),
+        "density": "detailed",
+        "machine_tags": {},
+        # sheprd's marks name its own pane ids, which mean nothing to herdr-core.
+        "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []},
+    }
+
+
+def cmd_view(_args):
+    core = Core()
+    try:
+        result = core.call("doc.get", {"name": VIEW_DOC})
+        value = result.get("value")
+        if value is None:
+            value = sidebar_import() or {"v": VERSION, "projects": [], "hidden": [], "filter": "all",
+                                         "active_only": False, "other_collapsed": False,
+                                         "density": "detailed", "machine_tags": {},
+                                         "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []}}
+            try:
+                core.call("doc.set", {"name": VIEW_DOC, "value": value, "version": result.get("version", 0)})
+            except RpcError:
+                value = core.call("doc.get", {"name": VIEW_DOC}).get("value") or value
+        print(json.dumps(value))
+    finally:
+        core.close()
+
+
+def cmd_view_set(args):
+    try:
+        patch = json.loads(args.patch)
+    except json.JSONDecodeError as err:
+        fail(f"not JSON: {err}")
+    if not isinstance(patch, dict) or set(patch) - set(VIEW_KEYS):
+        fail(f"view-set takes an object with keys from {', '.join(VIEW_KEYS)}")
+    core = Core()
+    try:
+        for attempt in range(8):
+            result = core.call("doc.get", {"name": VIEW_DOC})
+            value = result.get("value") or {"v": VERSION}
+            value.update(patch)
+            try:
+                core.call("doc.set", {"name": VIEW_DOC, "value": value, "version": result.get("version", 0)})
+                print("ok")
+                return
+            except RpcError as err:
+                if (err.error.get("data") or {}).get("kind") != "conflict":
+                    fail(f"hc refused the write: {err}")
+                time.sleep(0.05 * (attempt + 1))
+        fail("the view document kept changing; try again")
+    finally:
+        core.close()
+
+
+# ---- write-back (same [ledger.writeback] config as sheprd) ----------------
+
+
+def writeback_config():
+    path = os.path.expanduser("~/.config/herdr/config.toml")
+    if not os.path.exists(path):
+        return None
+    import tomllib
+
+    with open(path, "rb") as f:
+        config = tomllib.load(f)
+    return config.get("ledger", {}).get("writeback")
+
+
+def writeback(card):
+    """Set the task file's status and add decisions + summary under ## Decisions."""
+    try:
+        config = writeback_config()
+    except Exception as err:  # a broken config must not lose the done
+        return {"ok": False, "message": f"config unreadable: {err}"}
+    if not config or not config.get("markdown_path"):
+        return None
+    prefix = card["id"].split("-", 1)[0]
+    project = (config.get("projects") or {}).get(prefix)
+    if not project:
+        return {"ok": False, "message": f"no project for prefix {prefix}"}
+    path = config["markdown_path"].format(root=config.get("root", ""), project=project, id=card["id"])
+    if not os.path.exists(path):
+        return {"ok": False, "message": f"file missing: {path}"}
+    with open(path, encoding="utf-8", newline="") as f:
+        original = f.read()
+    # Edit as LF without a BOM, then put the file's own line endings and BOM back.
+    bom = "\ufeff" if original.startswith("\ufeff") else ""
+    newline = "\r\n" if "\r\n" in original else "\n"
+    text = original[len(bom):].replace("\r\n", "\n")
+    new = set_status(text, config.get("done_status", "done"))
+    entries = [d["text"] for d in card.get("decisions", [])]
+    if card.get("summary"):
+        entries.append(f"Done {card['done_at'][:10]}: {card['summary']}")
+    new = add_decisions(new, entries)
+    name = os.path.basename(path)
+    if new == text:
+        return {"ok": True, "message": f"{name} already up to date"}
+    new = bom + new.replace("\n", newline)
+    directory = os.path.dirname(path)
+    fd, temp = tempfile.mkstemp(prefix=f".{name}.cards-", dir=directory)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(new)
+    os.chmod(temp, os.stat(path).st_mode & 0o7777)
+    os.replace(temp, path)
+    return {"ok": True, "message": f"wrote {name}"}
+
+
+def set_status(text, status):
+    """The front matter's status, set or added; a file without front matter is left alone."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+    close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if close is None:
+        return text
+    for i in range(1, close):
+        if re.match(r"status\s*:", lines[i]):
+            lines[i] = f"status: {status}"
+            return "\n".join(lines)
+    return "\n".join(lines[:close] + [f"status: {status}"] + lines[close:])
+
+
+def outside_fences(lines):
+    """For each line, whether it is outside a ``` or ~~~ code block."""
+    out, fence = [], None
+    for line in lines:
+        mark = re.match(r"\s*(```|~~~)", line)
+        if fence is None:
+            out.append(not mark)
+            if mark:
+                fence = mark.group(1)
+        else:
+            out.append(False)
+            if mark and mark.group(1) == fence:
+                fence = None
+    return out
+
+
+def add_decisions(text, entries):
+    lines = text.split("\n")
+    real = outside_fences(lines)
+    start = next((i for i, l in enumerate(lines) if real[i] and re.fullmatch(r"##\s+Decisions\s*", l.strip())), None)
+    if start is None:
+        new = [f"- {e}" for e in entries]
+        if not new:
+            return text
+        body = text.rstrip("\n")
+        return body + "\n\n## Decisions\n\n" + "\n".join(new) + "\n"
+    end = next((i for i in range(start + 1, len(lines)) if real[i] and re.match(r"#{1,2}\s", lines[i])), len(lines))
+    section = lines[start + 1 : end]
+    existing = {l.strip()[2:].strip() for l in section if l.strip().startswith(("- ", "* "))}
+    new = [f"- {e}" for e in entries if e.strip() not in existing]
+    if not new:
+        return text
+    insert = end
+    while insert > start + 1 and not lines[insert - 1].strip():
+        insert -= 1
+    return "\n".join(lines[:insert] + new + lines[insert:])
+
+
+# ---- CLI --------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="cards", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    def agent(name, **kw):
+        p = sub.add_parser(name, **kw)
+        p.add_argument("--terminal", help="default: $HC_TERMINAL_ID")
+        return p
+
+    p = agent("update", help="set a card's title, status, summary or link")
+    p.add_argument("id")
+    for field in ("title", "status", "summary", "link"):
+        p.add_argument(f"--{field}")
+    p.set_defaults(func=cmd_update)
+
+    p = agent("ask", help="ask the user a question about a card")
+    p.add_argument("id")
+    p.add_argument("question")
+    p.add_argument("--option", action="append", help="a suggested answer (repeat)")
+    p.add_argument("--recommend", type=int, help="the recommended option, from 1")
+    p.set_defaults(func=cmd_ask)
+
+    p = agent("decide", help="record a decision")
+    p.add_argument("id")
+    p.add_argument("decision")
+    p.set_defaults(func=cmd_decide)
+
+    p = agent("done", help="finish a card (and write it back to its task file)")
+    p.add_argument("id")
+    p.add_argument("--summary")
+    p.set_defaults(func=cmd_done)
+
+    p = agent("answers", help="answers the user sent you")
+    p.add_argument("--peek", action="store_true", help="don't mark them read")
+    p.set_defaults(func=cmd_answers)
+
+    p = agent("list", help="your cards")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("json", help="the whole document (for apps)")
+    p.set_defaults(func=cmd_json)
+
+    p = sub.add_parser("stage", help="stage an answer (for apps)")
+    p.add_argument("terminal")
+    p.add_argument("id")
+    p.add_argument("n", type=int)
+    p.add_argument("answer")
+    p.set_defaults(func=cmd_stage)
+
+    p = sub.add_parser("dismiss", help="dismiss a card or one question (for apps)")
+    p.add_argument("terminal")
+    p.add_argument("id")
+    p.add_argument("--question", type=int)
+    p.set_defaults(func=cmd_dismiss)
+
+    p = sub.add_parser("send", help="send a terminal's staged answers (for apps)")
+    p.add_argument("terminal")
+    p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser("view", help="the sidebar layout (for apps)")
+    p.set_defaults(func=cmd_view)
+
+    p = sub.add_parser("view-set", help="merge keys into the sidebar layout (for apps)")
+    p.add_argument("patch")
+    p.set_defaults(func=cmd_view_set)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
