@@ -74,10 +74,13 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
   "filter": "needs-you",
   "active_only": true,
   "other_collapsed": true,
+  "density": "detailed",
+  "machine_tags": { "development-central": "dev" },
   "marks": {
     "unread": ["dev/t7"],
     "kept": ["omarchy/t3"],
-    "dismissed": ["dev/t9@42"]
+    "dismissed": ["dev/t9@42"],
+    "marked": ["dev/t4"]
   }
 }
 ```
@@ -87,9 +90,15 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
   `match` are case-insensitive substrings of a space's name or folder.
   Members win over rules; the first matching project takes the space; the
   rest go to Other. `short` is the two-letter rail tag.
-- `filter`: `needs-you` | `working` | `all`.
+- `filter`: `needs-you` | `working` | `marked` | `all`.
+- `density`: `detailed` (two lines per agent: its work, then `space · machine`)
+  | `compact` (one line, the space name). Missing means `detailed`.
+- `machine_tags`: a short tag per machine name, shown instead of the host name.
+  A machine without one gets its name's first part, cut to 3 letters when
+  longer than 5 (`development-central` → `dev`); this machine gets none.
 - Marks follow sheprd's: `unread` clears on focus; `dismissed` is
   `<address>@<seq>` and lapses when the agent's `seq` moves on; `kept` stays in
-  the active view.
+  the active view; `marked` is the user's own flag on an agent (★), shown by the
+  `marked` filter. Older documents may lack `marked`: read it as empty.
 - An agent "needs you" when blocked, done, or unread; a working agent with a
   staged-but-unsent answer also counts.

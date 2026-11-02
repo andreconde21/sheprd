@@ -507,7 +507,7 @@ def cmd_send(args):
 
 # ---- sidebar layout (sheprd-view) ------------------------------------------
 
-VIEW_KEYS = ("projects", "hidden", "filter", "active_only", "other_collapsed", "marks")
+VIEW_KEYS = ("projects", "hidden", "filter", "active_only", "other_collapsed", "marks", "density", "machine_tags")
 
 
 def sidebar_import():
@@ -528,8 +528,10 @@ def sidebar_import():
         "filter": "all",
         "active_only": bool(old.get("active_only", False)),
         "other_collapsed": bool(old.get("other_collapsed", False)),
+        "density": "detailed",
+        "machine_tags": {},
         # sheprd's marks name its own pane ids, which mean nothing to herdr-core.
-        "marks": {"unread": [], "kept": [], "dismissed": []},
+        "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []},
     }
 
 
@@ -541,7 +543,8 @@ def cmd_view(_args):
         if value is None:
             value = sidebar_import() or {"v": VERSION, "projects": [], "hidden": [], "filter": "all",
                                          "active_only": False, "other_collapsed": False,
-                                         "marks": {"unread": [], "kept": [], "dismissed": []}}
+                                         "density": "detailed", "machine_tags": {},
+                                         "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []}}
             try:
                 core.call("doc.set", {"name": VIEW_DOC, "value": value, "version": result.get("version", 0)})
             except RpcError:

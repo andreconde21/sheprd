@@ -19,15 +19,22 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const FILTERS = [
   ["needs-you", "Needs you"],
   ["working", "Working"],
+  ["marked", "Marked"],
   ["all", "All"],
 ];
 // Active only: idle agents drop out this long after their last change, unless kept.
 const RECENT_MS = 8 * 3600000;
 const CARDS_EVERY_MS = 5000;
 
-const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, marks: { unread: [], kept: [], dismissed: [] } };
+const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [] } };
 const view = () => ({ ...EMPTY_VIEW, .../** @type {object} */ (shared("sheprd.view") ?? {}) });
-const marks = () => ({ unread: [], kept: [], dismissed: [], ...(view().marks ?? {}) });
+const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], ...(view().marks ?? {}) });
+
+// Marked: the user's own flag on an agent, for the Marked filter. Separate
+// from `kept`, which only keeps an agent in the active view.
+function toggleMarked(address) {
+  saveMarks((x) => ({ ...x, marked: x.marked.includes(address) ? x.marked.filter((k) => k !== address) : [...x.marked, address] }));
+}
 
 // Changes show at once; the hub's document follows, one write at a time so a
 // quick second click can't land before the first. A failed write leaves the
@@ -118,6 +125,16 @@ function projectTag(name, short) {
   if (capitals.length === 2) return capitals.join("");
   const [first = "", second = ""] = [...name];
   return first.toUpperCase() + second;
+}
+
+// A machine's short tag: its `machine_tags` entry, else the name's first part,
+// cut to 3 letters when longer than 5 ("development-central" -> "dev").
+function machineTag(name) {
+  if (!name) return "";
+  const tag = view().machine_tags?.[name];
+  if (tag) return tag;
+  const first = name.split(/[-_.\s]/)[0] || name;
+  return first.length > 5 ? first.slice(0, 3) : first;
 }
 
 function duration(ms) {
@@ -219,6 +236,7 @@ export default class SheprdSidebar extends View {
     const { address, seq, key } = p.menu;
     const m = marks();
     const kept = m.kept.includes(address);
+    const marked = m.marked.includes(address);
     const projects = view().projects;
     const item = (id, label, action, dim = false) => h_flex().id(id).h(28).px(8).rounded(6).items_center()
       .text_color(dim ? t.muted : t.foreground).hover((el) => el.bg(t.hover)).cursor_pointer()
@@ -231,6 +249,7 @@ export default class SheprdSidebar extends View {
       saveView({ projects: list });
     };
     return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+      .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
       .child(item("m-keep", kept ? "Stop keeping in view" : "Keep in view", () => saveMarks((x) => ({ ...x, kept: kept ? x.kept.filter((k) => k !== address) : [...x.kept, address] }))))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
@@ -261,7 +280,7 @@ export default class SheprdSidebar extends View {
     const colour = (s) => ({ blocked: t.blocked, done: t.done, working: t.working })[s] ?? t.idle ?? t.dim;
     const dot = (r) => {
       const a = r.a;
-      const machine = a.address.includes("/") ? `${a.address.split("/")[0]} · ` : "";
+      const machine = a.address.includes("/") ? `${machineTag(a.address.split("/")[0])} · ` : "";
       const name = a.space_name || a.title || a.program?.name || a.address;
       return div().id(`rd-${a.address}`).size(14).flex_none().flex().items_center().justify_center().rounded(4)
         .when(a.focused, (el) => el.bg(t.selected))
@@ -320,18 +339,20 @@ export default class SheprdSidebar extends View {
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
-        return { a, space, key: spaceKey(space), questions, needs, summary, rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        return { a, space, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       })
       .filter((r) => !hidden.has(r.key));
 
     const counts = {
       "needs-you": rows.filter((r) => r.needs).length,
       working: rows.filter((r) => r.a.status === "working").length,
+      marked: rows.filter((r) => r.marked).length,
       all: rows.length,
     };
     const shown = rows.filter((r) => {
       if (v.filter === "needs-you" && !r.needs) return false;
       if (v.filter === "working" && r.a.status !== "working") return false;
+      if (v.filter === "marked" && !r.marked) return false;
       if (v.active_only && !r.needs && r.a.status === "idle" && !r.a.focused && !r.a.pinned && !m.kept.includes(r.a.address)) {
         return now - (this.changed[r.a.address]?.at ?? 0) < RECENT_MS;
       }
@@ -372,29 +393,57 @@ export default class SheprdSidebar extends View {
         .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.a?.status ?? "done", top.questions ?? 0)));
     };
 
+    const detailed = v.density !== "compact";
     const row = (r) => {
       const a = r.a;
-      const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+      const machine = a.address.includes("/") ? machineTag(a.address.split("/")[0]) : "";
       const when = this.changed[a.address]?.at;
       const quiet = a.status === "idle" && !a.focused && !r.needs;
-      const detail = a.tab_name && !/^\d+$/.test(a.tab_name) ? a.tab_name : a.title || a.program?.name || "";
-      return h_flex().id(`ag-${a.address}`).px(8).h(30).flex_none().rounded(8).items_center().gap(8)
+      const space = a.space_name || a.tab_name || a.program?.name || a.address;
+      // Its work: the card summary, else the terminal's title, else a named tab.
+      const work = r.summary || a.title || (a.tab_name && !/^\d+$/.test(a.tab_name) ? a.tab_name : "") || space;
+      const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer().hover((s) => s.bg(t.hover))
+        .tooltip(`${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}`)
+        .on_hover((on, cx) => {
+          if (on) this.hovered = a.address;
+          else if (this.hovered === a.address) this.hovered = null;
+          cx.notify();
+        })
         .on_click(() => {
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 360, props: { menu: { address: a.address, seq: a.seq, key: r.key } } });
-        })
-        .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-          .child(div().min_w(0).max_w(130).truncate().text_color(quiet ? t.muted : t.foreground).child(a.space_name || detail))
-          .when(Boolean(detail) && detail !== a.space_name, (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${detail}`))))
-        .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
-        .when(Boolean(when), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a.status, r.questions));
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 390, props: { menu: { address: a.address, seq: a.seq, key: r.key } } });
+        });
+      // Hovered or marked: the mark toggle (★) in place of the age.
+      const age = r.marked || this.hovered === a.address
+        ? div().id(`mk-${a.address}`).flex_none().px(2).rounded(4).text_size(12)
+          .text_color(r.marked ? t.accent ?? t.foreground : t.dim).hover((el) => el.bg(t.hover).text_color(t.foreground))
+          .tooltip(r.marked ? "Unmark" : "Mark (shows under Marked)")
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            toggleMarked(a.address);
+          })
+          .child(r.marked ? "★" : "☆")
+        : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
+      if (!detailed) {
+        return base.h(28)
+          .child(this.status(t, a.status, r.questions))
+          .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(space))
+          .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
+          .child(age);
+      }
+      return base.py(4).items_start()
+        .child(div().pt(3).flex_none().child(this.status(t, a.status, r.questions)))
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(h_flex().gap(6).items_center()
+            .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(work))
+            .child(age))
+          .child(div().truncate().text_size(11).text_color(t.dim).child(machine ? `${space} · ${machine}` : space)));
     };
 
     const chip = ([id, label]) => {
@@ -408,9 +457,15 @@ export default class SheprdSidebar extends View {
     };
 
     return v_flex().size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
-      .child(h_flex().px(10).pt(10).pb(6).gap(4).flex_none().items_center()
-        .children(FILTERS.map(chip))
+      .child(h_flex().px(10).pt(10).pb(2).gap(4).flex_none().items_center()
+        .children(FILTERS.map(chip)))
+      .child(h_flex().px(10).pb(6).gap(4).flex_none().items_center()
         .child(div().flex_1())
+        .child(div().id("f-density").h(22).px(7).rounded(6).flex().items_center().text_size(11)
+          .text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .tooltip(detailed ? "Detailed: two lines per agent. Click for compact" : "Compact: one line per agent. Click for detailed")
+          .on_click(() => saveView({ density: detailed ? "compact" : "detailed" }))
+          .child(detailed ? "detailed" : "compact"))
         .child(div().id("f-active").h(22).px(7).rounded(6).flex().items_center().text_size(11)
           .bg(v.active_only ? t.selected : t.chrome).text_color(v.active_only ? t.foreground : t.dim)
           .cursor_pointer().tooltip("Active only: hide agents idle for 8 hours, unless kept")
