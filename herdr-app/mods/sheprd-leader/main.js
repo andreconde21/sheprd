@@ -4,7 +4,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, theme, props, closeOverlay, layout, shared, setShared, window } from "herdr";
+import { run, theme, props, closeOverlay, layout, shared, setShared, window, focused, agents, exec } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -25,6 +25,39 @@ function toggleSidebar() {
   if (!narrow) setShared("sidebar.width", sidebar.size?.px);
   setShared("sidebar.collapsed", !narrow);
   run("layout.resize", { id: "sidebar", px: narrow ? (shared("sidebar.width") ?? 300) : window()?.platform === "macos" ? 76 : 44 });
+}
+
+// ★ on the focused agent, through the same shared view and `cards view-set`
+// the sidebar uses (marks.marked, CONTRACT.md).
+function toggleMark() {
+  const address = focused()?.agent;
+  if (!address) return;
+  const view = /** @type {any} */ (shared("sheprd.view") ?? {});
+  const m = { unread: [], kept: [], dismissed: [], marked: [], ...(view.marks ?? {}) };
+  const marked = m.marked.includes(address) ? m.marked.filter((a) => a !== address) : [...m.marked, address];
+  const marks = { ...m, marked };
+  setShared("sheprd.view", { ...view, marks });
+  exec("cards", ["view-set", JSON.stringify({ marks })]).catch(() => {});
+}
+
+// The Work panel (sheprd-panel) open, or closed when it's what shows.
+function toggleWork() {
+  const root = layout();
+  const panel = /** @type {any} */ (find(root, "panel")), body = /** @type {any} */ (find(root, "panel-body"));
+  if (!panel) return;
+  if (!panel.hidden && body?.active === "sheprd-panel") return run("layout.hide", { id: "panel" });
+  run("layout.select", { stack: "panel-body", child: "sheprd-panel" });
+  run("layout.show", { id: "panel" });
+}
+
+// The next agent that needs you (blocked or done), after the focused one.
+function nextNeedingYou() {
+  const list = agents();
+  const waiting = list.filter((a) => a.status === "blocked" || a.status === "done");
+  if (!waiting.length) return;
+  const at = list.findIndex((a) => a.focused);
+  const next = waiting.find((a) => list.indexOf(a) > at) ?? waiting[0];
+  run("pane.focus", { pane: next.pane });
 }
 
 // key (shifted letters in capitals) -> [label, action], grouped as shown.
@@ -52,6 +85,9 @@ const GROUPS = [
     ["z", "zoom pane", () => run("pane.zoom")],
   ]],
   ["Agents and app", [
+    ["u", "next needing you", nextNeedingYou],
+    ["m", "mark / unmark ★", toggleMark],
+    ["w", "Work panel", toggleWork],
     ["a", "next agent", () => run("agent.next")],
     ["A", "previous agent", () => run("agent.prev")],
     ["g", "go to (picker)", () => run("mod.open", { name: "picker" })],

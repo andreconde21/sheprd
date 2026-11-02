@@ -37,6 +37,17 @@ $link && ! $cards_only && echo "note: --link leaves image() assets (the header's
 echo "Installing:"
 chmod +x "$here/bin/cards"
 place "$here/bin/cards" "$HOME/.local/bin/cards"
+# Agents learn the ledger (and that `cards` is the command in the app) from these skills.
+if [ -d "$HOME/.claude" ]; then
+  mkdir -p "$HOME/.claude/skills/sheprd-card" "$HOME/.claude/skills/sheprd-msg"
+  cp "$here/../skills/sheprd-card/SKILL.md" "$HOME/.claude/skills/sheprd-card/SKILL.md"
+  python3 - "$here/../scripts/sheprd-msg" "$HOME/.claude/skills/sheprd-msg/SKILL.md" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+open(sys.argv[2], "w").write(re.search(r'^SKILL = """(.*?)"""', src, re.S | re.M).group(1))
+PY
+  echo "  $HOME/.claude/skills/sheprd-card, sheprd-msg"
+fi
 if ! $cards_only; then
   place "$here/mods/sheprd-sidebar" "$app/mods/sheprd-sidebar"
   place "$here/mods/sheprd-panel" "$app/mods/sheprd-panel"

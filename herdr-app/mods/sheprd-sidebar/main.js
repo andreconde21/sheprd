@@ -13,7 +13,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window } from "herdr";
+import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Each filter's label, and the shorter one for a narrow sidebar.
@@ -220,6 +220,31 @@ export default class SheprdSidebar extends View {
     return fresh;
   }
 
+  // An agent that turns blocked or done: the attention sound and, when the app
+  // isn't in front, a desktop notification. Per project: a muted project
+  // (right-click its header) stays quiet. The first look at each agent only
+  // records its state.
+  attend(list, spaceById) {
+    this.seen ??= new Map();
+    const v = view();
+    for (const a of list) {
+      const before = this.seen.get(a.address);
+      this.seen.set(a.address, a.status);
+      if (before === undefined || before === a.status) continue;
+      if (a.status !== "blocked" && a.status !== "done") continue;
+      const active = window()?.active;
+      if (active && a.focused) continue;
+      if (v.hidden.includes(spaceKey(spaceById.get(a.space)))) continue; // hidden: quiet too
+      const project = projectOf(spaceById.get(a.space), v.projects);
+      if (project ? project.muted : v.other_muted) continue;
+      playSound(a.status === "done" ? "done" : "blocked");
+      if (!active) {
+        const machine = a.address.includes("/") ? ` · ${machineTag(a.address.split("/")[0])}` : "";
+        exec("notify-send", ["-a", "sheprd", `${a.space_name || a.address}${machine}: ${a.status === "done" ? "finished" : "needs you"}`, a.title || ""]).catch(() => {});
+      }
+    }
+  }
+
   // ---- popups -------------------------------------------------------------
 
   initPrompt(_cx) {
@@ -268,6 +293,16 @@ export default class SheprdSidebar extends View {
       });
       saveView({ projects: list });
     };
+    if (p.menu.project !== undefined) {
+      const name = p.menu.project;
+      const other = name === null;
+      const muted = other ? Boolean(view().other_muted) : Boolean(projects.find((x) => x.name === name)?.muted);
+      const setMuted = (on) => other
+        ? saveView({ other_muted: on })
+        : saveView({ projects: view().projects.map((x) => (x.name === name ? { ...x, muted: on } : x)) });
+      return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+        .child(item("m-mute", muted ? "Unmute: sound and notify again" : "Mute: no sound or notification", () => setMuted(!muted)));
+    }
     if (unhideOnly) {
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
         .child(item("m-unhide", "Unhide this space", () => saveView({ hidden: view().hidden.filter((h) => h !== key) })));
@@ -398,6 +433,7 @@ export default class SheprdSidebar extends View {
     }
     const m = marks();
     const spaceById = new Map(spaces().map((s) => [s.id, s]));
+    this.attend(all, spaceById);
     const cards = cardsByAddress();
     const hidden = new Set(v.hidden);
     const dismissed = new Set(m.dismissed);
@@ -452,9 +488,14 @@ export default class SheprdSidebar extends View {
       return h_flex().id(`pj-${g.project.name}`).px(8).pt(8).h(30).flex_none().gap(6).items_center()
         .text_size(11).font_medium().cursor_pointer().hover((s) => s.text_color(t.foreground))
         .on_click(() => fold(g))
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 50, props: { menu: { project: g.other ? null : g.project.name } } });
+        })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim))
         .child(div().truncate().text_color(waiting ? t.blocked : t.muted).child(g.project.name))
         .child(div().text_color(t.dim).child(String(g.rows.length)))
+        .when(g.other ? Boolean(v.other_muted) : Boolean(g.project.muted), (el) => el.child(div().text_color(t.dim).child("muted")))
         .when(Boolean(g.project.note), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${g.project.note}`)))
         .child(div().flex_1())
         .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.a?.status ?? "done", top.questions ?? 0)));

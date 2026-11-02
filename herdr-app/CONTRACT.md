@@ -93,6 +93,9 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 - `filter`: `needs-you` | `working` | `marked` | `all`.
 - `active_only` and `marks.kept`: sheprd's Active view. The app's sidebar no
   longer offers it (Marked covers it) and leaves them as they are.
+- `muted` on a project, `other_muted` for Other: no attention sound or desktop
+  notification for its agents (the sidebar plays them, per project, instead of
+  Herdr's global sounds).
 - `density`: `detailed` (two lines per agent: its work, then `space · machine`)
   | `compact` (one line, the space name). Missing means `detailed`.
 - `machine_tags`: a short tag per machine name, shown instead of the host name.

@@ -507,7 +507,7 @@ def cmd_send(args):
 
 # ---- sidebar layout (sheprd-view) ------------------------------------------
 
-VIEW_KEYS = ("projects", "hidden", "filter", "active_only", "other_collapsed", "marks", "density", "machine_tags")
+VIEW_KEYS = ("projects", "hidden", "filter", "active_only", "other_collapsed", "marks", "density", "machine_tags", "other_muted")
 
 
 def sidebar_import():
