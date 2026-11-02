@@ -75,7 +75,7 @@ export default class SheprdLeader extends View {
     const entry = ([k, label, _act]) => h_flex().h(22).gap(10).items_center()
       .child(div().w(34).flex_none().px(5).h(18).rounded(4).bg(t.raised).text_size(11).font_semibold().text_color(t.foreground).flex().items_center().justify_center().child(k))
       .child(div().text_size(12).text_color(t.muted).child(label));
-    return v_flex().id("sheprd-leader").size_full().p(12).gap(2).bg(t.popover).text_color(t.foreground)
+    return v_flex().id("sheprd-leader").size_full().min_h(0).p(12).gap(2).bg(t.popover).text_color(t.foreground)
       .track_focus(this.handle)
       .on_key_down((e) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
@@ -85,10 +85,14 @@ export default class SheprdLeader extends View {
         if (/^[1-9]$/.test(key)) return run("tab.select", { index: Number(key) });
         ACTIONS.get(key)?.();
       })
-      .child(div().pb(4).text_size(11.5).text_color(t.dim).child("ctrl+space, then a key (Esc closes)"))
-      .children(GROUPS.flatMap(([title, keys]) => [
-        div().pt(6).text_size(10.5).font_medium().text_color(t.dim).child(title),
-        ...keys.filter(([k], i, all) => !(k === "f" && all.some(([x]) => x === "g"))).map(entry),
-      ]));
+      .child(div().pb(4).flex_none().text_size(11.5).text_color(t.dim).child("ctrl+space, then a key (Esc closes)"))
+      // Two columns (tabs and spaces | panes, agents and app) so it fits without
+      // scrolling; it still scrolls if the window is too short.
+      .child(h_flex().id("leader-keys").flex_1().min_h(0).gap(18).items_start().overflow_y_scrollbar()
+        .children([GROUPS.slice(0, 2), GROUPS.slice(2)].map((col) => v_flex().flex_1().min_w(0).gap(2)
+          .children(col.flatMap(([title, keys]) => [
+            div().pt(6).text_size(10.5).font_medium().text_color(t.dim).child(title),
+            ...keys.filter(([k], i, all) => !(k === "f" && all.some(([x]) => x === "g"))).map(entry),
+          ])))));
   }
 }
