@@ -151,8 +151,10 @@ export default class SheprdSidebar extends View {
     if (p.newProject) return this.initPrompt(cx);
     if (p.menu) return;
     this.folded = new Set();
-    // Each agent's last state and when it changed (ms), kept across restarts.
-    this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
+    // Each agent's last state and when it changed (ms; 0 = unknown), kept
+    // across restarts. v2: "changed" stamped every first sighting as now.
+    this.changed = JSON.parse(localStorage.getItem("changed.v2") ?? "{}");
+    localStorage.removeItem("changed");
     cx.spawn(async (cx) => {
       try {
         const r = await exec("cards", ["view"]);
@@ -185,19 +187,29 @@ export default class SheprdSidebar extends View {
     });
   }
 
-  // Stamps agents whose state changed; done and idle count as one.
+  // Stamps agents whose state changed; done and idle count as one. A first
+  // sighting isn't a change: a working agent counts from now, anything else
+  // from its tab's last change if the app saw one, else unknown (0), so the
+  // Active filter doesn't keep every agent it just met for 8 hours.
   track(list, now) {
     let dirty = false;
+    let tabById = null;
     for (const a of list) {
       const s = a.status === "done" ? "idle" : a.status;
-      if (this.changed[a.address]?.s === s) continue;
-      this.changed[a.address] = { s, at: now };
+      const prev = this.changed[a.address];
+      if (prev?.s === s) continue;
+      let at = now;
+      if (!prev && s !== "working") {
+        tabById ??= new Map(spaces().flatMap((sp) => sp.tabs ?? []).map((x) => [x.id, x]));
+        at = tabById.get(a.tab)?.changed_at ?? 0;
+      }
+      this.changed[a.address] = { s, at };
       dirty = true;
     }
     if (!dirty) return;
     const listed = new Set(list.map((a) => a.address));
     for (const [k, c] of Object.entries(this.changed)) if (!listed.has(k) && now - c.at > 30 * 86400000) delete this.changed[k];
-    localStorage.setItem("changed", JSON.stringify(this.changed));
+    localStorage.setItem("changed.v2", JSON.stringify(this.changed));
   }
 
   // ---- popups -------------------------------------------------------------
