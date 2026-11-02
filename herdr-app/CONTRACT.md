@@ -80,7 +80,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
     "unread": ["dev/t7"],
     "kept": ["omarchy/t3"],
     "dismissed": ["dev/t9@42"],
-    "marked": ["dev/t4"]
+    "marked": ["dev/t4"],
+    "inactive": ["dev/t11@17"]
   }
 }
 ```
@@ -99,6 +100,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 - Marks follow sheprd's: `unread` clears on focus; `dismissed` is
   `<address>@<seq>` and lapses when the agent's `seq` moves on; `kept` stays in
   the active view; `marked` is the user's own flag on an agent (★), shown by the
-  `marked` filter. Older documents may lack `marked`: read it as empty.
+  `marked` filter. `inactive` is the opposite of `kept`: `<address>@<seq>`,
+  out of the active view (even when it needs you) until its `seq` moves.
+  Older documents may lack `marked` and `inactive`: read them as empty.
 - An agent "needs you" when blocked, done, or unread; a working agent with a
   staged-but-unsent answer also counts.

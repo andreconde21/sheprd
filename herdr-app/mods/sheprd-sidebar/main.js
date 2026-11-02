@@ -26,9 +26,15 @@ const FILTERS = [
 const RECENT_MS = 8 * 3600000;
 const CARDS_EVERY_MS = 5000;
 
-const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [] } };
+const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [], inactive: [] } };
 const view = () => ({ ...EMPTY_VIEW, .../** @type {object} */ (shared("sheprd.view") ?? {}) });
-const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], ...(view().marks ?? {}) });
+const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], inactive: [], ...(view().marks ?? {}) });
+
+// Out of the Active view by hand until the agent's seq moves (it works, gets
+// blocked or done); the opposite of kept, so it also drops a keep.
+function removeFromActive(address, seq) {
+  saveMarks((x) => ({ ...x, kept: x.kept.filter((k) => k !== address), inactive: [...x.inactive.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }));
+}
 
 // Marked: the user's own flag on an agent, for the Marked filter. Separate
 // from `kept`, which only keeps an agent in the active view.
@@ -263,7 +269,8 @@ export default class SheprdSidebar extends View {
     return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
-      .child(item("m-keep", kept ? "Stop keeping in view" : "Keep in view", () => saveMarks((x) => ({ ...x, kept: kept ? x.kept.filter((k) => k !== address) : [...x.kept, address] }))))
+      .child(item("m-keep", kept ? "Stop keeping in view" : "Keep in view", () => saveMarks((x) => ({ ...x, kept: kept ? x.kept.filter((k) => k !== address) : [...x.kept, address], inactive: x.inactive.filter((d) => !d.startsWith(`${address}@`)) }))))
+      .child(item("m-inactive", "Remove from active", () => removeFromActive(address, seq)))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).child(`Move ${key} to`))
       .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
@@ -343,6 +350,7 @@ export default class SheprdSidebar extends View {
     const cards = cardsByAddress();
     const hidden = new Set(v.hidden);
     const dismissed = new Set(m.dismissed);
+    const inactive = new Set(m.inactive);
 
     const rows = all
       .map((a) => {
@@ -365,6 +373,7 @@ export default class SheprdSidebar extends View {
       if (v.filter === "needs-you" && !r.needs) return false;
       if (v.filter === "working" && r.a.status !== "working") return false;
       if (v.filter === "marked" && !r.marked) return false;
+      if (v.active_only && inactive.has(`${r.a.address}@${r.a.seq}`)) return false;
       if (v.active_only && !r.needs && r.a.status === "idle" && !r.a.focused && !r.a.pinned && !m.kept.includes(r.a.address)) {
         return now - (this.changed[r.a.address]?.at ?? 0) < RECENT_MS;
       }
@@ -429,10 +438,20 @@ export default class SheprdSidebar extends View {
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 390, props: { menu: { address: a.address, seq: a.seq, key: r.key } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 420, props: { menu: { address: a.address, seq: a.seq, key: r.key } } });
         });
-      // Hovered or marked: the mark toggle (★) in place of the age.
-      const age = r.marked || this.hovered === a.address
+      // Hovered or marked: the mark toggle (★) in place of the age; hovered with
+      // Active on, also "remove from active".
+      const hovered = this.hovered === a.address;
+      const remove = div().id(`rm-${a.address}`).flex_none().p(2).rounded(4).text_color(t.dim)
+        .hover((el) => el.bg(t.hover).text_color(t.foreground))
+        .tooltip("Remove from active until it changes")
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          removeFromActive(a.address, a.seq);
+        })
+        .child(svg("mods/workspace-chrome/minus.svg").size(12));
+      const star = r.marked || hovered
         ? div().id(`mk-${a.address}`).flex_none().px(2).rounded(4).text_size(12)
           .text_color(r.marked ? t.accent ?? t.foreground : t.dim).hover((el) => el.bg(t.hover).text_color(t.foreground))
           .tooltip(r.marked ? "Unmark" : "Mark (shows under Marked)")
@@ -442,6 +461,9 @@ export default class SheprdSidebar extends View {
           })
           .child(r.marked ? "★" : "☆")
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
+      const age = h_flex().flex_none().gap(2).items_center()
+        .when(hovered && v.active_only, (el) => el.child(remove))
+        .child(star);
       if (!detailed) {
         return base.h(28)
           .child(this.status(t, a.status, r.questions))

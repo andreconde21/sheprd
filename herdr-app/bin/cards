@@ -531,7 +531,7 @@ def sidebar_import():
         "density": "detailed",
         "machine_tags": {},
         # sheprd's marks name its own pane ids, which mean nothing to herdr-core.
-        "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []},
+        "marks": {"unread": [], "kept": [], "dismissed": [], "marked": [], "inactive": []},
     }
 
 
@@ -544,7 +544,7 @@ def cmd_view(_args):
             value = sidebar_import() or {"v": VERSION, "projects": [], "hidden": [], "filter": "all",
                                          "active_only": False, "other_collapsed": False,
                                          "density": "detailed", "machine_tags": {},
-                                         "marks": {"unread": [], "kept": [], "dismissed": [], "marked": []}}
+                                         "marks": {"unread": [], "kept": [], "dismissed": [], "marked": [], "inactive": []}}
             try:
                 core.call("doc.set", {"name": VIEW_DOC, "value": value, "version": result.get("version", 0)})
             except RpcError:
