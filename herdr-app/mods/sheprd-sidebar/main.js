@@ -150,6 +150,7 @@ export default class SheprdSidebar extends View {
     if (p.newProject) return this.initPrompt(cx);
     if (p.menu) return;
     this.folded = new Set();
+    this.showHidden = localStorage.getItem("showHidden") === "1";
     // Each agent's last state and when it changed (ms; 0 = unknown), kept
     // across restarts. v2: "changed" stamped every first sighting as now.
     this.changed = JSON.parse(localStorage.getItem("changed.v2") ?? "{}");
@@ -252,7 +253,8 @@ export default class SheprdSidebar extends View {
 
   menuView(t) {
     const p = props();
-    const { address, seq, key } = p.menu;
+    const { address, seq, key, unhideOnly } = p.menu;
+    const isHidden = view().hidden.includes(key);
     const m = marks();
     const marked = m.marked.includes(address);
     const projects = view().projects;
@@ -266,6 +268,10 @@ export default class SheprdSidebar extends View {
       });
       saveView({ projects: list });
     };
+    if (unhideOnly) {
+      return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+        .child(item("m-unhide", "Unhide this space", () => saveView({ hidden: view().hidden.filter((h) => h !== key) })));
+    }
     return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
@@ -275,7 +281,9 @@ export default class SheprdSidebar extends View {
       .child(item("m-other", "Other", () => moveTo(null), true))
       .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key } } })))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
-      .child(item("m-hide", "Hide this space", () => saveView({ hidden: [...view().hidden, key] }), true));
+      .child(isHidden
+        ? item("m-unhide", "Unhide this space", () => saveView({ hidden: view().hidden.filter((h) => h !== key) }))
+        : item("m-hide", "Hide this space", () => saveView({ hidden: [...view().hidden, key] }), true));
   }
 
   // ---- the list -----------------------------------------------------------
@@ -333,6 +341,47 @@ export default class SheprdSidebar extends View {
           .hover((el) => el.text_color(t.foreground)).tooltip("Expand the sidebar").on_click(toggleSidebar).child("»")));
   }
 
+  // Hidden spaces, folded at the bottom: one line each (its agents count, a
+  // click focuses the first one) with Unhide.
+  hiddenSection(t, v, everyRow) {
+    const open = this.showHidden;
+    const head = h_flex().id("pj-hidden").px(8).pt(8).h(30).flex_none().gap(6).items_center()
+      .text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => {
+        this.showHidden = !open;
+        localStorage.setItem("showHidden", this.showHidden ? "1" : "0");
+        cx.notify();
+      })
+      .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
+      .child(div().child("Hidden"))
+      .child(div().child(String(v.hidden.length)));
+    if (!open) return [head];
+    const line = (key) => {
+      const agentsThere = everyRow.filter((r) => r.key === key);
+      const [machine, ...rest] = key.split("/");
+      const name = rest.join("/") || key;
+      const first = agentsThere[0]?.a;
+      return h_flex().id(`hd-${key}`).px(8).h(28).flex_none().rounded(8).items_center().gap(8)
+        .cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click(() => first && run("pane.focus", { pane: first.pane }))
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 200, height: 60, props: { menu: { key, unhideOnly: true } } });
+        })
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
+        .when(machine !== "local", (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machineTag(machine))))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(agentsThere.length ? String(agentsThere.length) : "–"))
+        .child(div().id(`uh-${key}`).flex_none().px(6).h(20).rounded(5).flex().items_center().text_size(11)
+          .bg(t.raised).text_color(t.foreground).hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            saveView({ hidden: view().hidden.filter((h) => h !== key) });
+          })
+          .child("Unhide"));
+    };
+    return [head, ...v.hidden.map(line)];
+  }
+
   render(cx) {
     const t = theme();
     const p = props() ?? {};
@@ -353,7 +402,7 @@ export default class SheprdSidebar extends View {
     const hidden = new Set(v.hidden);
     const dismissed = new Set(m.dismissed);
 
-    const rows = all
+    const everyRow = all
       .map((a) => {
         const space = spaceById.get(a.space);
         const questions = openQuestions(cards.get(a.address)).length;
@@ -361,8 +410,8 @@ export default class SheprdSidebar extends View {
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
         return { a, space, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
-      })
-      .filter((r) => !hidden.has(r.key));
+      });
+    const rows = everyRow.filter((r) => !hidden.has(r.key));
 
     const counts = {
       "needs-you": rows.filter((r) => r.needs).length,
@@ -487,6 +536,7 @@ export default class SheprdSidebar extends View {
       .when(list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
         .child(rows.length === 0 ? "No agents yet. They show up here when they report their status." : "Nothing here with this filter.")))
       .child(v_flex().id("sp-list").flex_1().min_h(0).px(8).overflow_y_scrollbar()
-        .children(list.flatMap((g) => [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))])));
+        .children(list.flatMap((g) => [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))]))
+        .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow))));
   }
 }
