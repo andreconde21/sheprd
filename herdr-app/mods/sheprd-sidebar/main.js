@@ -83,7 +83,8 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const menuHeight = (projects) => Math.min(6 * 28 + 9 + 22 + 10 + 28 * projects, 560);
+const MENU_FIXED = 3 * 28 + 9 + 22 + 10; // mark, read, hide, divider, label, padding
+const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
 function cardsByAddress() {
@@ -348,7 +349,8 @@ export default class SheprdSidebar extends View {
         : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).truncate().child(`Move ${key} to`))
-      .child(v_flex().id("m-projects").flex_1().min_h(0).overflow_y_scrollbar()
+      // An explicit height: a flex_1 list inside the popup collapsed to nothing.
+      .child(v_flex().id("m-projects").h(menuHeight(projects.length) - MENU_FIXED).flex_none().overflow_y_scrollbar()
         .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
         .child(item("m-other", "Other", () => moveTo(null), true))
         .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
