@@ -80,6 +80,11 @@ function projectOf(space, projects) {
   return projects.find((p) => (p.match ?? []).some((m) => m && hay.includes(m.toLowerCase()))) ?? null;
 }
 
+// The agent menu's height: room for every project (28 px a line, plus mark,
+// read, hide, the divider, the label, Other and New project), capped so a long
+// list scrolls instead of leaving the window.
+const menuHeight = (projects) => Math.min(6 * 28 + 9 + 22 + 10 + 28 * projects, 560);
+
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
 function cardsByAddress() {
   const out = new Map();
@@ -333,18 +338,20 @@ export default class SheprdSidebar extends View {
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
         .child(item("m-unhide", "Unhide this space", unhide));
     }
-    return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+    // Mark, read and hide first, so they never scroll away; the projects
+    // scroll when the window is too short for all of them.
+    return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
-      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
-      .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).child(`Move ${key} to`))
-      .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
-      .child(item("m-other", "Other", () => moveTo(null), true))
-      .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } })))
-      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(isHidden
         ? item("m-unhide", "Unhide this space", unhide)
-        : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true));
+        : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true))
+      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
+      .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).truncate().child(`Move ${key} to`))
+      .child(v_flex().id("m-projects").flex_1().min_h(0).overflow_y_scrollbar()
+        .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
+        .child(item("m-other", "Other", () => moveTo(null), true))
+        .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
   }
 
   // ---- the list -----------------------------------------------------------
@@ -550,7 +557,7 @@ export default class SheprdSidebar extends View {
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 390, props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id } } });
         });
       // Hovered or marked: the mark toggle (★) in place of the age.
       const age = r.marked || this.hovered === a.address
