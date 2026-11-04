@@ -388,10 +388,10 @@ export default class SheprdSidebar extends View {
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
         })
-        .child(div().size(7).rounded(4).bg(colour(a.status)));
+        .child(div().size(7).rounded(4).bg(colour(r.dot)));
     };
     const block = (g) => {
-      const top = g.rows.reduce((best, r) => ((RANK[r.a.status] ?? 0) > (RANK[best] ?? 0) ? r.a.status : best), "idle");
+      const top = g.rows.reduce((best, r) => ((RANK[r.dot] ?? 0) > (RANK[best] ?? 0) ? r.dot : best), "idle");
       const waiting = g.rows.filter((r) => r.needs).length;
       const tag = g.other ? "··" : projectTag(g.project.name, g.project.short);
       const dots = [];
@@ -482,7 +482,10 @@ export default class SheprdSidebar extends View {
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
-        return { a, space, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        // The circle follows read state: a finished agent marked read shows
+        // idle, an idle one marked unread shows finished.
+        const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
@@ -552,7 +555,7 @@ export default class SheprdSidebar extends View {
         .when(g.other ? Boolean(v.other_muted) : Boolean(g.project.muted), (el) => el.child(div().text_color(t.dim).child("muted")))
         .when(Boolean(g.project.note), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${g.project.note}`)))
         .child(div().flex_1())
-        .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.a?.status ?? "done", top.questions ?? 0)));
+        .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.dot ?? "done", top.questions ?? 0)));
     };
 
     const detailed = v.density !== "compact";
@@ -595,13 +598,13 @@ export default class SheprdSidebar extends View {
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
       if (!detailed) {
         return base.h(28)
-          .child(this.status(t, a.status, r.questions))
+          .child(this.status(t, r.dot, r.questions))
           .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(space))
           .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
           .child(age);
       }
       return base.py(4).items_start()
-        .child(div().pt(3).flex_none().child(this.status(t, a.status, r.questions)))
+        .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(h_flex().gap(6).items_center()
             .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(work))
