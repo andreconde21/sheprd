@@ -104,7 +104,9 @@ function placesFor(name) {
   return out;
 }
 
-const NEW_HEIGHT = (places) => Math.min(226 + 28 * places, 560);
+// Room for every place (up to 8 before it scrolls), the folder, three lines of
+// agents, the first message and the buttons.
+const NEW_HEIGHT = (places) => 360 + 28 * Math.min(places, 8);
 
 function openNew(project, space = null) {
   openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height: NEW_HEIGHT(placesFor(project).length), props: { newIn: { project, space } } });
@@ -387,7 +389,7 @@ export default class SheprdSidebar extends View {
   initNew(cx) {
     const p = props().newIn;
     this.places = placesFor(p.project);
-    this.pick = Math.max(0, this.places.findIndex((x) => x.space === p.space));
+    this.pick = p.space ? Math.max(0, this.places.findIndex((x) => x.space === p.space)) : 0;
     this.what = localStorage.getItem("new.what") ?? "shell";
     this.agentsOn = new Map(); // machine (null: this one) -> agents installed there
     this.folder = InputState.new({ value: this.places[this.pick]?.folder ?? "", placeholder: "Folder (empty: home)" });
@@ -451,7 +453,7 @@ export default class SheprdSidebar extends View {
     return v_flex().size_full().p(14).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.8)
       .child(div().text_size(14).font_semibold().child(`New in ${name}`))
       .child(div().text_size(11).text_color(t.dim).child("Where"))
-      .child(v_flex().id("ni-places").flex_1().min_h(0).overflow_y_scrollbar().children(this.places.map(line)))
+      .child(v_flex().id("ni-places").h(28 * Math.min(this.places.length, 8)).flex_none().overflow_y_scrollbar().children(this.places.map(line)))
       .when(place && !place.space, (el) => el.child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
       .child(div().text_size(11).text_color(t.dim).child("What"))
       .child(h_flex().gap(6).flex_wrap()
