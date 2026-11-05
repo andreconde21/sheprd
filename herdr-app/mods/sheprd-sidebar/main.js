@@ -128,16 +128,17 @@ function chipLines(list) {
   return lines;
 }
 
-// A dialog can't fit its content, so its height is worked out: places (8
-// before it scrolls), the widest machine's chip lines (from the agents the
-// sidebar keeps in "sheprd.startable"), and the fixed rows.
+// A dialog can't fit its content, so it opens frameless at the most it can
+// need (places, 8 before they scroll; the widest machine's chip lines, from
+// the agents the sidebar keeps in "sheprd.startable"; the fixed rows) and
+// draws its own panel, as tall as what it shows, centred in that space.
 function openNew(project, space = null) {
   const places = placesFor(project);
   const known = /** @type {Record<string, any[]>} */ (shared("sheprd.startable") ?? {});
   const agentsOn = Object.fromEntries([...new Set(places.map((x) => x.machine ?? ""))].filter((m) => known[m]).map((m) => [m, known[m]]));
   const lines = Math.max(1, ...Object.values(agentsOn).map(chipLines));
   const height = 236 + 28 * Math.min(places.length, 8) + 26 * lines + 6 * (lines - 1);
-  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height, props: { newIn: { project, space, agents: agentsOn } } });
+  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", frame: "none", width: 380, height, props: { newIn: { project, space, agents: agentsOn } } });
 }
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
@@ -485,7 +486,8 @@ export default class SheprdSidebar extends View {
       .when(Boolean(x.machine && x.space), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
     const name = p.newIn.project ?? "Other";
     const picked = (agents ?? []).some((a) => a.key === this.what);
-    return v_flex().size_full().p(14).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.8)
+    const panel = v_flex().w_full().p(14).gap(8).rounded(10).border_1().border_color(t.border).shadow_lg()
+      .bg(t.popover).text_color(t.foreground).text_size(12.8)
       .child(div().text_size(14).font_semibold().child(`New in ${name}`))
       .child(div().text_size(11).text_color(t.dim).child("Where"))
       .child(v_flex().id("ni-places").h(28 * Math.min(this.places.length, 8)).flex_none().overflow_y_scrollbar().children(this.places.map(line)))
@@ -495,10 +497,11 @@ export default class SheprdSidebar extends View {
         .child(pill("nw-shell", "Terminal", !picked, () => { this.what = "shell"; }))
         .children((agents ?? []).map((a) => pill(`nw-${a.key}`, a.name, a.key === this.what, () => { this.what = a.key; })))
         .when(agents === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("finding agents…"))))
-      .child(Input.new(this.task).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background))
+      .when(picked, (el) => el.child(Input.new(this.task).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
       .child(h_flex().gap(8).justify_end()
         .child(div().id("ni-cancel").px(12).h(30).flex().items_center().rounded(7).bg(t.raised).cursor_pointer().on_click(() => closeOverlay(p.overlay)).child("Cancel"))
         .child(div().id("ni-go").px(12).h(30).flex().items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().on_click(() => this.createNew()).child("Create")));
+    return v_flex().size_full().justify_center().child(panel);
   }
 
   promptView(t) {
