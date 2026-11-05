@@ -8,12 +8,13 @@
 // one tag per project with its most urgent status, a needs-you count and a dot
 // per agent, like sheprd's collapsed sidebar.
 //
-// Opened as a popup with props { menu } (a row's right-click menu) or
-// { newProject } (name a new project).
+// Opened as a popup with props { menu } (a row's right-click menu),
+// { newProject } (name a new project) or { newIn } (a new tab or space for a
+// project, from its header's or an agent's right-click).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound } from "herdr";
+import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Each filter's label, and the shorter one for a narrow sidebar.
@@ -83,8 +84,28 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const MENU_FIXED = 3 * 28 + 9 + 22 + 10; // mark, read, hide, divider, label, padding
+const MENU_FIXED = 4 * 28 + 9 + 22 + 10; // new, mark, read, hide, divider, label, padding
 const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
+
+// Where a new tab or space can go for a project (null: Other): a tab in each of
+// its spaces, then a new space on each machine, starting in the folder the
+// project already uses there.
+function placesFor(name) {
+  const v = view();
+  const mine = spaces().filter((s) => !isHiddenSpace(s, v.hidden) && (projectOf(s, v.projects)?.name ?? null) === name);
+  const out = mine.map((s) => ({ space: s.id, machine: s.machine ?? null, label: s.name, folder: s.folder }));
+  for (const m of machines().filter((x) => x.layout === "ready")) {
+    const there = mine.find((s) => (s.machine ?? null) === (m.name ?? null));
+    out.push({ space: null, machine: m.name ?? null, label: "New space", folder: there?.folder ?? "" });
+  }
+  return out;
+}
+
+const NEW_HEIGHT = (places) => Math.min(226 + 28 * places, 560);
+
+function openNew(project, space = null) {
+  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height: NEW_HEIGHT(placesFor(project).length), props: { newIn: { project, space } } });
+}
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
 function cardsByAddress() {
@@ -174,6 +195,7 @@ export default class SheprdSidebar extends View {
   init(_props, cx) {
     const p = props() ?? {};
     if (p.newProject) return this.initPrompt(cx);
+    if (p.newIn) return this.initNew(cx);
     if (p.menu) return;
     this.folded = new Set();
     this.showHidden = localStorage.getItem("showHidden") === "1";
@@ -293,6 +315,88 @@ export default class SheprdSidebar extends View {
     saveView({ projects });
   }
 
+  // ---- new tab or space ---------------------------------------------------
+
+  initNew(cx) {
+    const p = props().newIn;
+    this.places = placesFor(p.project);
+    this.pick = Math.max(0, this.places.findIndex((x) => x.space === p.space));
+    this.what = localStorage.getItem("new.what") ?? "shell";
+    this.agentsOn = new Map(); // machine (null: this one) -> agents installed there
+    this.folder = InputState.new({ value: this.places[this.pick]?.folder ?? "", placeholder: "Folder (empty: home)" });
+    this.task = InputState.new({ value: "", placeholder: "First message (optional)" });
+    this.task.on("submit", () => this.createNew());
+    this.loadAgents(cx);
+  }
+
+  loadAgents(cx) {
+    const machine = this.places[this.pick]?.machine ?? null;
+    if (this.agentsOn.has(machine)) return;
+    this.agentsOn.set(machine, null);
+    cx.spawn(async (cx) => {
+      try {
+        this.agentsOn.set(machine, (await knownAgents({ on: machine })).filter((a) => a.agent && a.installed));
+      } catch {
+        this.agentsOn.set(machine, []);
+      }
+      cx.notify();
+    });
+  }
+
+  createNew() {
+    const p = props();
+    const place = this.places[this.pick];
+    closeOverlay(p.overlay);
+    if (!place) return;
+    const agent = (this.agentsOn.get(place.machine) ?? []).find((a) => a.key === this.what);
+    const task = agent ? this.task.value().trim() : "";
+    const start = { ...(agent ? { argv: agent.run } : {}), ...(task ? { task } : {}) };
+    localStorage.setItem("new.what", agent ? agent.key : "shell");
+    if (place.space) return run("tab.new", { space: place.space, ...start });
+    // The new space joins the project once it shows up (render picks it up).
+    const folder = this.folder.value().trim();
+    if (p.newIn.project !== null) setShared("sheprd.joining", { project: p.newIn.project, machine: place.machine, before: spaces().map((s) => s.id), at: Date.now() });
+    run("space.new", { ...(folder ? { folder } : {}), ...(place.machine ? { machine: place.machine } : {}), ...start });
+  }
+
+  newView(t) {
+    const p = props();
+    const place = this.places[this.pick];
+    const agents = place ? this.agentsOn.get(place.machine) : [];
+    const pill = (id, label, on, action) => h_flex().id(id).h(26).px(10).rounded(6).items_center().text_size(12)
+      .bg(on ? t.selected : t.raised).text_color(on ? t.foreground : t.muted)
+      .cursor_pointer().hover((el) => el.text_color(t.foreground))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const line = (x, i) => h_flex().id(`ni-${i}`).h(28).px(8).gap(8).flex_none().rounded(6).items_center()
+      .when(i === this.pick, (el) => el.bg(t.selected))
+      .cursor_pointer().hover((el) => el.bg(t.hover))
+      .on_click((_e, cx) => {
+        this.pick = i;
+        if (!x.space) this.folder.set_value(x.folder);
+        this.loadAgents(cx);
+        cx.notify();
+      })
+      .child(div().flex_none().text_color(t.dim).child(x.space ? "Tab in" : "+"))
+      .child(div().flex_1().min_w(0).truncate().text_color(x.space ? t.foreground : t.muted).child(x.label))
+      .when(Boolean(x.machine), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
+    const name = p.newIn.project ?? "Other";
+    const picked = (agents ?? []).some((a) => a.key === this.what);
+    return v_flex().size_full().p(14).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.8)
+      .child(div().text_size(14).font_semibold().child(`New in ${name}`))
+      .child(div().text_size(11).text_color(t.dim).child("Where"))
+      .child(v_flex().id("ni-places").flex_1().min_h(0).overflow_y_scrollbar().children(this.places.map(line)))
+      .when(place && !place.space, (el) => el.child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
+      .child(div().text_size(11).text_color(t.dim).child("What"))
+      .child(h_flex().gap(6).flex_wrap()
+        .child(pill("nw-shell", "Terminal", !picked, () => { this.what = "shell"; }))
+        .children((agents ?? []).map((a) => pill(`nw-${a.key}`, a.name, a.key === this.what, () => { this.what = a.key; })))
+        .when(agents === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("finding agents…"))))
+      .when(picked, (el) => el.child(Input.new(this.task).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
+      .child(h_flex().gap(8).justify_end()
+        .child(div().id("ni-cancel").px(12).h(30).flex().items_center().rounded(7).bg(t.raised).cursor_pointer().on_click(() => closeOverlay(p.overlay)).child("Cancel"))
+        .child(div().id("ni-go").px(12).h(30).flex().items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().on_click(() => this.createNew()).child("Create")));
+  }
+
   promptView(t) {
     const p = props();
     return v_flex().w_full().p(16).gap(10).bg(t.popover).text_color(t.foreground)
@@ -333,6 +437,7 @@ export default class SheprdSidebar extends View {
         ? saveView({ other_muted: on })
         : saveView({ projects: view().projects.map((x) => (x.name === name ? { ...x, muted: on } : x)) });
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+        .child(item("m-new", "New tab or space…", () => openNew(name)))
         .child(item("m-mute", muted ? "Unmute: sound and notify again" : "Mute: no sound or notification", () => setMuted(!muted)));
     }
     if (unhideOnly) {
@@ -342,6 +447,7 @@ export default class SheprdSidebar extends View {
     // Mark, read and hide first, so they never scroll away; the projects
     // scroll when the window is too short for all of them.
     return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
+      .child(item("m-new", "New tab or space here…", () => openNew(space ? projectOf(space, projects)?.name ?? null : null, space?.id ?? null)))
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       // Read: out of Needs you until its next change. Unread: in it until opened.
       .child(p.menu.needs
@@ -455,14 +561,27 @@ export default class SheprdSidebar extends View {
     return [head, ...v.hidden.map(line)];
   }
 
+  // A space made from "New tab or space" joins its project when it shows up
+  // (space.new doesn't return its id); given up after 30 s.
+  join(now) {
+    const joining = shared("sheprd.joining");
+    if (!joining) return;
+    const added = spaces().find((s) => !joining.before.includes(s.id) && (s.machine ?? null) === joining.machine);
+    if (!added && now - joining.at < 30000) return;
+    setShared("sheprd.joining", null);
+    if (added) saveView({ projects: view().projects.map((x) => ({ ...x, members: x.name === joining.project ? [...untie(x.members ?? [], added), spaceRef(added)] : untie(x.members ?? [], added) })) });
+  }
+
   render(cx) {
     const t = theme();
     const p = props() ?? {};
     if (p.newProject) return this.promptView(t);
+    if (p.newIn) return this.newView(t);
     if (p.menu) return this.menuView(t);
 
-    const v = view();
     const now = Date.now();
+    this.join(now);
+    const v = view();
     const all = agents();
     const fresh = this.track(all, now);
     // A new agent started while showing Marked is marked, so it stays in view.
@@ -547,7 +666,7 @@ export default class SheprdSidebar extends View {
         .on_click(() => fold(g))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 50, props: { menu: { project: g.other ? null : g.project.name } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 78, props: { menu: { project: g.other ? null : g.project.name } } });
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim))
         .child(div().truncate().text_color(waiting ? t.blocked : t.muted).child(g.project.name))
