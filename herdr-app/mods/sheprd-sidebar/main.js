@@ -94,9 +94,12 @@ function placesFor(name) {
   const v = view();
   const mine = spaces().filter((s) => !isHiddenSpace(s, v.hidden) && (projectOf(s, v.projects)?.name ?? null) === name);
   const out = mine.map((s) => ({ space: s.id, machine: s.machine ?? null, label: s.name, folder: s.folder }));
-  for (const m of machines().filter((x) => x.layout === "ready")) {
-    const there = mine.find((s) => (s.machine ?? null) === (m.name ?? null));
-    out.push({ space: null, machine: m.name ?? null, label: "New space", folder: there?.folder ?? "" });
+  // Every machine the app reaches, and any a space already lives on.
+  const names = new Set(machines().filter((x) => x.layout !== "unavailable").map((x) => x.name ?? null));
+  for (const s of spaces()) names.add(s.machine ?? null);
+  for (const m of [null, ...[...names].filter(Boolean).sort()]) {
+    const there = mine.find((s) => (s.machine ?? null) === m);
+    out.push({ space: null, machine: m, label: `New space on ${m ?? shared("sheprd.hostname") ?? "this machine"}`, folder: there?.folder ?? "" });
   }
   return out;
 }
@@ -442,7 +445,7 @@ export default class SheprdSidebar extends View {
       })
       .child(div().flex_none().text_color(t.dim).child(x.space ? "Tab in" : "+"))
       .child(div().flex_1().min_w(0).truncate().text_color(x.space ? t.foreground : t.muted).child(x.label))
-      .when(Boolean(x.machine), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
+      .when(Boolean(x.machine && x.space), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
     const name = p.newIn.project ?? "Other";
     const picked = (agents ?? []).some((a) => a.key === this.what);
     return v_flex().size_full().p(14).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.8)
