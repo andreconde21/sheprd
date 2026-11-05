@@ -183,6 +183,10 @@ function machineTag(name) {
   return first.length > 5 ? first.slice(0, 3) : first;
 }
 
+// An agent's work: its card summary, else the terminal's title, else a named
+// tab, else [fallback].
+const workOf = (r, fallback) => r.summary || r.a.title || (r.a.tab_name && !/^\d+$/.test(r.a.tab_name) ? r.a.tab_name : "") || fallback;
+
 function duration(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
@@ -520,8 +524,9 @@ export default class SheprdSidebar extends View {
           .hover((el) => el.text_color(t.foreground)).tooltip("Expand the sidebar").on_click(toggleSidebar).child("»")));
   }
 
-  // Hidden spaces, folded at the bottom: one line each (its agents count, a
-  // click focuses the first one) with Unhide.
+  // Hidden spaces, folded at the bottom: one entry each with what its agents
+  // work on (so two spaces with one name tell apart), its agents count and
+  // Unhide. A click focuses the first agent.
   hiddenSection(t, v, everyRow) {
     const open = this.showHidden;
     const head = h_flex().id("pj-hidden").px(8).pt(8).h(30).flex_none().gap(6).items_center()
@@ -540,14 +545,19 @@ export default class SheprdSidebar extends View {
       const [machine, ...rest] = key.split("/");
       const name = (rest.join("/") || key).replace(/#[^#]*$/, "");
       const first = agentsThere[0]?.a;
-      return h_flex().id(`hd-${key}`).px(8).h(28).flex_none().rounded(8).items_center().gap(8)
+      const works = [...new Set(agentsThere.map((r) => workOf(r, "")).filter(Boolean))];
+      return h_flex().id(`hd-${key}`).px(8).py(4).flex_none().rounded(8).items_center().gap(8)
         .cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click(() => first && run("pane.focus", { pane: first.pane }))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 200, height: 60, props: { menu: { key, space: agentsThere[0]?.space?.id, unhideOnly: true } } });
         })
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
+        .tooltip(works.length ? `${name} — ${works.join(" · ")}` : name)
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(div().truncate().text_color(t.muted).child(works[0] ?? name))
+          .when(works.length > 0, (el) => el.child(div().truncate().text_size(11).text_color(t.dim)
+            .child([works.length > 1 ? `+${works.length - 1} more` : "", name].filter(Boolean).join(" · ")))))
         .when(machine !== "local", (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machineTag(machine))))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(agentsThere.length ? String(agentsThere.length) : "–"))
         .child(div().id(`uh-${key}`).flex_none().px(6).h(20).rounded(5).flex().items_center().text_size(11)
@@ -684,8 +694,7 @@ export default class SheprdSidebar extends View {
       const when = this.changed[a.address]?.at;
       const quiet = (a.status === "idle" && !a.focused && !r.needs) || r.held;
       const space = a.space_name || a.tab_name || a.program?.name || a.address;
-      // Its work: the card summary, else the terminal's title, else a named tab.
-      const work = r.summary || a.title || (a.tab_name && !/^\d+$/.test(a.tab_name) ? a.tab_name : "") || space;
+      const work = workOf(r, space);
       const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer().hover((s) => s.bg(t.hover))
