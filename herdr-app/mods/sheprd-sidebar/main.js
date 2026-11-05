@@ -343,7 +343,10 @@ export default class SheprdSidebar extends View {
     // scroll when the window is too short for all of them.
     return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
-      .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
+      // Read: out of Needs you until its next change. Unread: in it until opened.
+      .child(p.menu.needs
+        ? item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== address), dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) })))
+        : item("m-read", "Mark unread", () => saveMarks((x) => ({ ...x, unread: [...x.unread.filter((u) => u !== address), address], dismissed: x.dismissed.filter((d) => !d.startsWith(`${address}@`)) }))))
       .child(isHidden
         ? item("m-unhide", "Unhide this space", unhide)
         : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true))
@@ -385,10 +388,10 @@ export default class SheprdSidebar extends View {
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
         })
-        .child(div().size(7).rounded(4).bg(colour(a.status)));
+        .child(div().size(7).rounded(4).bg(colour(r.dot)));
     };
     const block = (g) => {
-      const top = g.rows.reduce((best, r) => ((RANK[r.a.status] ?? 0) > (RANK[best] ?? 0) ? r.a.status : best), "idle");
+      const top = g.rows.reduce((best, r) => ((RANK[r.dot] ?? 0) > (RANK[best] ?? 0) ? r.dot : best), "idle");
       const waiting = g.rows.filter((r) => r.needs).length;
       const tag = g.other ? "··" : projectTag(g.project.name, g.project.short);
       const dots = [];
@@ -479,7 +482,10 @@ export default class SheprdSidebar extends View {
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
-        return { a, space, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        // The circle follows read state: a finished agent marked read shows
+        // idle, an idle one marked unread shows finished.
+        const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
@@ -489,8 +495,12 @@ export default class SheprdSidebar extends View {
       marked: rows.filter((r) => r.marked).length,
       all: rows.length,
     };
+    // Needs you: the agent opened last stays in its place, greyed, until the
+    // next one is opened, so working down the queue never jumps.
+    const held = v.filter === "needs-you" ? this.held : null;
+    for (const r of rows) r.held = held?.address === r.a.address && !r.needs;
     const shown = rows.filter((r) => {
-      if (v.filter === "needs-you" && !r.needs) return false;
+      if (v.filter === "needs-you" && !r.needs && !r.held) return false;
       if (v.filter === "working" && r.a.status !== "working") return false;
       if (v.filter === "marked" && !r.marked) return false;
       return true;
@@ -498,17 +508,30 @@ export default class SheprdSidebar extends View {
 
     // Projects in their saved order, pinned first; Other last.
     const order = [...v.projects.filter((x) => x.pinned), ...v.projects.filter((x) => !x.pinned)];
-    const grouped = (source) => {
+    // Inside a project: Needs you by urgency, then latest change (a held row
+    // keeps the place it had when opened). Every other view, and the rail, in
+    // the spaces' own order, so reading or a state change never moves a row.
+    const spaceAt = new Map(spaces().map((s, i) => [s.id, i]));
+    const tabAt = new Map(spaces().flatMap((s) => (s.tabs ?? []).map((x, i) => [x.id, i])));
+    const fixed = (x, y) => (spaceAt.get(x.a.space) ?? 1e9) - (spaceAt.get(y.a.space) ?? 1e9)
+      || (tabAt.get(x.a.tab) ?? 1e9) - (tabAt.get(y.a.tab) ?? 1e9)
+      || x.a.address.localeCompare(y.a.address, undefined, { numeric: true });
+    const placed = (r) => (r.held ? held : { rank: r.rank, at: this.changed[r.a.address]?.at ?? 0, seq: r.a.seq });
+    const urgent = (x, y) => {
+      const a = placed(x), b = placed(y);
+      return b.rank - a.rank || b.at - a.at || b.seq - a.seq;
+    };
+    const grouped = (source, sort) => {
       const groups = new Map(order.map((x) => [x.name, { project: x, rows: [] }]));
       const other = { project: { name: "Other", collapsed: v.other_collapsed }, rows: [], other: true };
       for (const r of source) (groups.get(projectOf(r.space, v.projects)?.name)?.rows ?? other.rows).push(r);
       const out = [...groups.values(), other].filter((g) => g.rows.length > 0);
-      for (const g of out) g.rows.sort((x, y) => y.rank - x.rank || (this.changed[y.a.address]?.at ?? 0) - (this.changed[x.a.address]?.at ?? 0) || y.a.seq - x.a.seq);
+      for (const g of out) g.rows.sort(sort);
       return out;
     };
     // The rail has no filter chips, so it shows every agent that isn't hidden.
-    if (narrow()) return this.rail(t, grouped(rows), m);
-    const list = grouped(shown);
+    if (narrow()) return this.rail(t, grouped(rows, fixed), m);
+    const list = grouped(shown, v.filter === "needs-you" ? urgent : fixed);
 
     const fold = (g) => {
       if (g.other) return saveView({ other_collapsed: !v.other_collapsed });
@@ -532,7 +555,7 @@ export default class SheprdSidebar extends View {
         .when(g.other ? Boolean(v.other_muted) : Boolean(g.project.muted), (el) => el.child(div().text_color(t.dim).child("muted")))
         .when(Boolean(g.project.note), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${g.project.note}`)))
         .child(div().flex_1())
-        .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.a?.status ?? "done", top.questions ?? 0)));
+        .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.dot ?? "done", top.questions ?? 0)));
     };
 
     const detailed = v.density !== "compact";
@@ -540,7 +563,7 @@ export default class SheprdSidebar extends View {
       const a = r.a;
       const machine = a.address.includes("/") ? machineTag(a.address.split("/")[0]) : "";
       const when = this.changed[a.address]?.at;
-      const quiet = a.status === "idle" && !a.focused && !r.needs;
+      const quiet = (a.status === "idle" && !a.focused && !r.needs) || r.held;
       const space = a.space_name || a.tab_name || a.program?.name || a.address;
       // Its work: the card summary, else the terminal's title, else a named tab.
       const work = r.summary || a.title || (a.tab_name && !/^\d+$/.test(a.tab_name) ? a.tab_name : "") || space;
@@ -554,12 +577,13 @@ export default class SheprdSidebar extends View {
           cx.notify();
         })
         .on_click(() => {
+          if (v.filter === "needs-you" && !r.held) this.held = { address: a.address, ...placed(r) };
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id, needs: r.needs } } });
         });
       // Hovered or marked: the mark toggle (★) in place of the age.
       const age = r.marked || this.hovered === a.address
@@ -574,13 +598,13 @@ export default class SheprdSidebar extends View {
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
       if (!detailed) {
         return base.h(28)
-          .child(this.status(t, a.status, r.questions))
+          .child(this.status(t, r.dot, r.questions))
           .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(space))
           .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
           .child(age);
       }
       return base.py(4).items_start()
-        .child(div().pt(3).flex_none().child(this.status(t, a.status, r.questions)))
+        .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(h_flex().gap(6).items_center()
             .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(work))
@@ -597,7 +621,10 @@ export default class SheprdSidebar extends View {
       return h_flex().id(`f-${id}`).h(22).px(short ? 6 : 8).gap(4).rounded(6).items_center().text_size(11).min_w(0)
         .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.dim)
         .cursor_pointer().hover((s) => s.text_color(t.foreground))
-        .on_click(() => saveView({ filter: id }))
+        .on_click(() => {
+          this.held = null;
+          saveView({ filter: id });
+        })
         .child(div().min_w(0).truncate().child(label))
         .child(div().flex_none().text_color(id === "needs-you" && counts[id] ? t.blocked : t.dim).child(String(counts[id])));
     };
