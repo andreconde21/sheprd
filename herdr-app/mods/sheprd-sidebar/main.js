@@ -48,17 +48,43 @@ function saveMarks(change) {
   saveView({ marks: change(marks()) });
 }
 
-// A space's key in projects' `members`: its machine (`local` for this one) and its name.
+// A space's name key: its machine (`local` for this one) and its name. Two
+// spaces can share it, so the sidebar writes `spaceRef` (name key + `#` + the
+// space's id) and still reads plain name keys from older views.
 const spaceKey = (s) => `${s?.machine ?? "local"}/${s?.name ?? ""}`;
+const spaceRef = (s) => `${spaceKey(s)}#${s?.id ?? ""}`;
+const isRef = (key, s) => Boolean(s) && key === spaceRef(s);
+const isNameKey = (key, s) => Boolean(s) && key.toLowerCase() === spaceKey(s).toLowerCase();
+const names = (key, s) => isRef(key, s) || isNameKey(key, s);
+const isHiddenSpace = (s, hidden) => hidden.some((key) => names(key, s));
+
+// [keys] without those naming [space]. A name key it shared with other spaces
+// becomes their refs, so they stay where they were.
+function untie(keys, space) {
+  const out = keys.filter((key) => !names(key, space));
+  for (const key of keys) {
+    if (!isNameKey(key, space)) continue;
+    for (const twin of spaces()) {
+      if (twin.id !== space.id && isNameKey(key, twin) && !out.includes(spaceRef(twin))) out.push(spaceRef(twin));
+    }
+  }
+  return out;
+}
 
 function projectOf(space, projects) {
   if (!space) return null;
-  const key = spaceKey(space).toLowerCase();
-  const byMember = projects.find((p) => (p.members ?? []).some((m) => m.toLowerCase() === key));
+  const byMember = projects.find((p) => (p.members ?? []).some((m) => isRef(m, space)))
+    ?? projects.find((p) => (p.members ?? []).some((m) => isNameKey(m, space)));
   if (byMember) return byMember;
   const hay = `${space.name} ${space.folder ?? ""}`.toLowerCase();
   return projects.find((p) => (p.match ?? []).some((m) => m && hay.includes(m.toLowerCase()))) ?? null;
 }
+
+// The agent menu's height: room for every project (28 px a line, plus mark,
+// read, hide, the divider, the label, Other and New project), capped so a long
+// list scrolls instead of leaving the window.
+const MENU_FIXED = 3 * 28 + 9 + 22 + 10; // mark, read, hide, divider, label, padding
+const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
 function cardsByAddress() {
@@ -234,7 +260,7 @@ export default class SheprdSidebar extends View {
       if (a.status !== "blocked" && a.status !== "done") continue;
       const active = window()?.active;
       if (active && a.focused) continue;
-      if (v.hidden.includes(spaceKey(spaceById.get(a.space)))) continue; // hidden: quiet too
+      if (isHiddenSpace(spaceById.get(a.space), v.hidden)) continue; // hidden: quiet too
       const project = projectOf(spaceById.get(a.space), v.projects);
       if (project ? project.muted : v.other_muted) continue;
       playSound(a.status === "done" ? "done" : "blocked");
@@ -260,8 +286,10 @@ export default class SheprdSidebar extends View {
     const name = this.text.trim();
     closeOverlay(p.overlay);
     if (!name) return;
-    const projects = view().projects.map((x) => ({ ...x, members: (x.members ?? []).filter((m) => m !== p.newProject.key) }));
-    projects.push({ name, members: [p.newProject.key], match: [] });
+    const space = spaces().find((s) => s.id === p.newProject.space);
+    if (!space) return;
+    const projects = view().projects.map((x) => ({ ...x, members: untie(x.members ?? [], space) }));
+    projects.push({ name, members: [spaceRef(space)], match: [] });
     saveView({ projects });
   }
 
@@ -279,7 +307,10 @@ export default class SheprdSidebar extends View {
   menuView(t) {
     const p = props();
     const { address, seq, key, unhideOnly } = p.menu;
-    const isHidden = view().hidden.includes(key);
+    const space = spaces().find((s) => s.id === p.menu.space);
+    const isHidden = space ? isHiddenSpace(space, view().hidden) : view().hidden.includes(key);
+    // Unhide: this space only (its twins stay hidden); a key with no live space goes.
+    const unhide = () => saveView({ hidden: space ? untie(view().hidden, space) : view().hidden.filter((h) => h !== key) });
     const m = marks();
     const marked = m.marked.includes(address);
     const projects = view().projects;
@@ -287,9 +318,10 @@ export default class SheprdSidebar extends View {
       .text_color(dim ? t.muted : t.foreground).hover((el) => el.bg(t.hover)).cursor_pointer()
       .on_click(() => { closeOverlay(p.overlay); action(); }).child(label);
     const moveTo = (name) => {
+      if (!space) return;
       const list = projects.map((x) => {
-        const members = (x.members ?? []).filter((mm) => mm !== key);
-        return x.name === name ? { ...x, members: [...members, key] } : { ...x, members };
+        const members = untie(x.members ?? [], space);
+        return x.name === name ? { ...x, members: [...members, spaceRef(space)] } : { ...x, members };
       });
       saveView({ projects: list });
     };
@@ -305,20 +337,23 @@ export default class SheprdSidebar extends View {
     }
     if (unhideOnly) {
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
-        .child(item("m-unhide", "Unhide this space", () => saveView({ hidden: view().hidden.filter((h) => h !== key) })));
+        .child(item("m-unhide", "Unhide this space", unhide));
     }
-    return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+    // Mark, read and hide first, so they never scroll away; the projects
+    // scroll when the window is too short for all of them.
+    return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       .child(item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) }))))
-      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
-      .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).child(`Move ${key} to`))
-      .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
-      .child(item("m-other", "Other", () => moveTo(null), true))
-      .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key } } })))
-      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(isHidden
-        ? item("m-unhide", "Unhide this space", () => saveView({ hidden: view().hidden.filter((h) => h !== key) }))
-        : item("m-hide", "Hide this space", () => saveView({ hidden: [...view().hidden, key] }), true));
+        ? item("m-unhide", "Unhide this space", unhide)
+        : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true))
+      .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
+      .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).truncate().child(`Move ${key} to`))
+      // An explicit height: a flex_1 list inside the popup collapsed to nothing.
+      .child(v_flex().id("m-projects").h(menuHeight(projects.length) - MENU_FIXED).flex_none().overflow_y_scrollbar()
+        .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
+        .child(item("m-other", "Other", () => moveTo(null), true))
+        .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
   }
 
   // ---- the list -----------------------------------------------------------
@@ -392,16 +427,16 @@ export default class SheprdSidebar extends View {
       .child(div().child(String(v.hidden.length)));
     if (!open) return [head];
     const line = (key) => {
-      const agentsThere = everyRow.filter((r) => r.key === key);
+      const agentsThere = everyRow.filter((r) => names(key, r.space));
       const [machine, ...rest] = key.split("/");
-      const name = rest.join("/") || key;
+      const name = (rest.join("/") || key).replace(/#[^#]*$/, "");
       const first = agentsThere[0]?.a;
       return h_flex().id(`hd-${key}`).px(8).h(28).flex_none().rounded(8).items_center().gap(8)
         .cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click(() => first && run("pane.focus", { pane: first.pane }))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 200, height: 60, props: { menu: { key, unhideOnly: true } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 200, height: 60, props: { menu: { key, space: agentsThere[0]?.space?.id, unhideOnly: true } } });
         })
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
         .when(machine !== "local", (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machineTag(machine))))
@@ -410,7 +445,7 @@ export default class SheprdSidebar extends View {
           .bg(t.raised).text_color(t.foreground).hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => {
             cx.stop_propagation();
-            saveView({ hidden: view().hidden.filter((h) => h !== key) });
+            saveView({ hidden: view().hidden.filter((h) => h !== key) }); // the whole entry, as listed
           })
           .child("Unhide"));
     };
@@ -435,7 +470,6 @@ export default class SheprdSidebar extends View {
     const spaceById = new Map(spaces().map((s) => [s.id, s]));
     this.attend(all, spaceById);
     const cards = cardsByAddress();
-    const hidden = new Set(v.hidden);
     const dismissed = new Set(m.dismissed);
 
     const everyRow = all
@@ -447,7 +481,7 @@ export default class SheprdSidebar extends View {
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
         return { a, space, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
-    const rows = everyRow.filter((r) => !hidden.has(r.key));
+    const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
     const counts = {
       "needs-you": rows.filter((r) => r.needs).length,
@@ -525,7 +559,7 @@ export default class SheprdSidebar extends View {
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: 390, props: { menu: { address: a.address, seq: a.seq, key: r.key } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id } } });
         });
       // Hovered or marked: the mark toggle (★) in place of the age.
       const age = r.marked || this.hovered === a.address

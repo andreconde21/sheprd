@@ -60,6 +60,12 @@ function nextNeedingYou() {
   run("pane.focus", { pane: next.pane });
 }
 
+// A canned reply typed into the focused agent, as if sent from its prompt.
+function reply(text) {
+  const address = focused()?.agent;
+  if (address) exec("hc", ["send", address, "--", text]).catch(() => {});
+}
+
 // key (shifted letters in capitals) -> [label, action], grouped as shown.
 /** @type {[string, [string, string, (() => unknown) | null][]][]} */
 const GROUPS = [
@@ -95,6 +101,11 @@ const GROUPS = [
     ["b", "sidebar", toggleSidebar],
     ["s", "settings", () => run("app.settings")],
     ["?", "help", () => run("app.help")],
+  ]],
+  ["Quick replies", [
+    ["e", "\"continue\"", () => reply("continue")],
+    ["i", "\"status?\"", () => reply("status? three lines: done, running, waiting on me")],
+    ["o", "\"commit and push\"", () => reply("commit and push")],
   ]],
 ];
 const ACTIONS = new Map(GROUPS.flatMap(([, keys]) => keys.filter(([, , act]) => act).map(([k, , act]) => [k, act])));

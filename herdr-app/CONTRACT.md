@@ -86,7 +86,11 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 ```
 
 - Same shape as sheprd's `[[group]]` in `sidebar.toml` (imported from it on
-  first run). `members` are `machine/<space name>` (`local/` for the hub);
+  first run). `members` are `machine/<space name>` (`local/` for the hub),
+  optionally followed by `#<space id>`. With the id, a member names that one
+  space; without it, every space with that name. The sidebar writes the id
+  form, because two spaces can share a name. Readers that don't know ids
+  ignore the `#…` part;
   `match` are case-insensitive substrings of a space's name or folder.
   Members win over rules; the first matching project takes the space; the
   rest go to Other. `short` is the two-letter rail tag.
