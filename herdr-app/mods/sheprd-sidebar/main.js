@@ -14,7 +14,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents } from "herdr";
+import { agents, spaces, machines, panes, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents, notify } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Each filter's label, and the shorter one for a narrow sidebar.
@@ -84,7 +84,7 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const MENU_FIXED = 4 * 28 + 9 + 22 + 10; // new, mark, read, hide, divider, label, padding
+const MENU_FIXED = 5 * 28 + 9 + 22 + 10; // new, copy, mark, read, hide, divider, label, padding
 const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Where a new tab or space can go for a project (null: Other): a tab in each of
@@ -187,6 +187,19 @@ function machineTag(name) {
 // tab, else [fallback].
 const workOf = (r, fallback) => r.summary || r.a.title || (r.a.tab_name && !/^\d+$/.test(r.a.tab_name) ? r.a.tab_name : "") || fallback;
 
+// An agent's hc address as other machines write it: `dev/t7` stays, a local
+// `t7` gets this machine's name (once known).
+const pingAddress = (address) => (address.includes("/") || !shared("sheprd.hostname") ? address : `${shared("sheprd.hostname")}/${address}`);
+
+function copyAddress(address) {
+  const text = pingAddress(address);
+  exec("wl-copy", [text]).catch(() => exec("pbcopy", [])).then(
+    () => notify({ title: `Copied ${text}`, level: "success", timeout: 2000 }),
+    () => notify({ title: `Address: ${text}`, body: "No clipboard tool here (wl-copy)", level: "info" }));
+}
+
+const tokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
 function duration(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
@@ -219,8 +232,55 @@ export default class SheprdSidebar extends View {
       cx.notify();
     });
     this.loadCards(cx);
+    // The companion's view of each agent (context, permission mode, last
+    // tool), by address: asked of a machine on Shift-hover, at most every 10 s.
+    this.facts = new Map();
+    this.factsAt = new Map();
+    if (!shared("sheprd.hostname")) {
+      exec("hostname", []).then((r) => r.code === 0 && setShared("sheprd.hostname", r.stdout.trim()), () => {});
+    }
     cx.timer.every(CARDS_EVERY_MS, (cx) => this.loadCards(cx));
     cx.timer.every(30000, (cx) => cx.notify());
+  }
+
+  loadFacts(machine, cx) {
+    const key = machine ?? "local";
+    if (Date.now() - (this.factsAt.get(key) ?? 0) < 10000) return;
+    this.factsAt.set(key, Date.now());
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("sh", ["-lc", "conductore-hostd status --json"], { on: machine });
+        if (r.code !== 0) return;
+        for (const x of JSON.parse(r.stdout).agents ?? []) {
+          if (x.hc?.terminal) this.facts.set(machine ? `${machine}/${x.hc.terminal}` : x.hc.terminal, x);
+        }
+      } catch {
+        // no companion there: the details go without it
+      }
+      cx.notify();
+    });
+  }
+
+  // Shift-hover's tooltip: how to ping it, where it runs and what it's doing.
+  details(r, now) {
+    const a = r.a;
+    const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+    const pane = panes().find((x) => x.pane === a.pane);
+    const f = this.facts.get(a.address);
+    const since = this.changed[a.address]?.at;
+    const lines = [workOf(r, a.space_name || a.address)];
+    lines.push(`Ping: ${pingAddress(a.address)}${machine ? "" : `  (here: ${a.address})`}`);
+    lines.push(`${a.space_name || "?"} · tab ${a.tab_index}${machine ? ` · ${machine}` : ""}`);
+    if (pane?.cwd) lines.push(`${pane.cwd}${pane.branch ? ` (${pane.branch})` : ""}`);
+    lines.push(`${a.app || a.program?.name || "agent"} · ${a.status}${since ? ` for ${duration(now - since)}` : ""}`);
+    if (f?.usage?.contextUsedPct != null) lines.push(`Context ${f.usage.contextUsedPct}% of ${f.usage.windowLabel ?? "?"} (${tokens(f.usage.contextTokens ?? 0)} tokens)`);
+    if (f?.permissionMode) lines.push(`Permissions: ${f.permissionMode}`);
+    if (f?.lastToolName && a.status === "working") lines.push(`Last tool: ${f.lastToolName}`);
+    if (f?.startedAt) lines.push(`Session started ${duration(now - f.startedAt)} ago`);
+    if (r.questions) lines.push(`${r.questions} open question${r.questions > 1 ? "s" : ""}`);
+    if (!f) lines.push(this.factsAt.has(machine ?? "local") ? "No companion facts for it" : "Asking the companion…");
+    lines.push("Shift-click: copy the address");
+    return lines.join("\n");
   }
 
   // Every reachable machine's cards, into shared state for the panel too. One
@@ -452,6 +512,7 @@ export default class SheprdSidebar extends View {
     // scroll when the window is too short for all of them.
     return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-new", "New tab or space here…", () => openNew(space ? projectOf(space, projects)?.name ?? null : null, space?.id ?? null)))
+      .child(item("m-copy", `Copy address ${pingAddress(address)}`, () => copyAddress(address)))
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       // Read: out of Needs you until its next change. Unread: in it until opened.
       .child(p.menu.needs
@@ -698,13 +759,24 @@ export default class SheprdSidebar extends View {
       const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer().hover((s) => s.bg(t.hover))
-        .tooltip(`${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}`)
+        .tooltip(this.shift && this.hovered === a.address
+          ? this.details(r, now)
+          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift for details`)
         .on_hover((on, cx) => {
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
+          if (on && this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
           cx.notify();
         })
-        .on_click(() => {
+        // Shift while hovering: the details tooltip (and the companion asked).
+        .on_mouse_move((e, cx) => {
+          if (e.modifiers.shift === Boolean(this.shift)) return;
+          this.shift = e.modifiers.shift;
+          if (this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
+          cx.notify();
+        })
+        .on_click((e) => {
+          if (e.modifiers.shift) return copyAddress(a.address);
           if (v.filter === "needs-you" && !r.held) this.held = { address: a.address, ...placed(r) };
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
