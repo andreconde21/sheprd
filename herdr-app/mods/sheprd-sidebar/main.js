@@ -104,12 +104,40 @@ function placesFor(name) {
   return out;
 }
 
-// Room for every place (up to 8 before it scrolls), the folder, three lines of
-// agents, the first message and the buttons.
-const NEW_HEIGHT = (places) => 360 + 28 * Math.min(places, 8);
+// The agents a machine can start (installed ones).
+async function startable(machine) {
+  try {
+    return (await knownAgents({ on: machine })).filter((a) => a.agent && a.installed);
+  } catch {
+    return [];
+  }
+}
 
+// How many lines the What chips take in the dialog (Terminal first; about
+// 7 px a character plus 20 px padding, 6 px apart, 352 px a line).
+function chipLines(list) {
+  let lines = 1;
+  let x = 0;
+  for (const label of ["Terminal", ...list.map((a) => a.name)]) {
+    const w = 20 + 7 * label.length;
+    if (x && x + 6 + w > 352) {
+      lines++;
+      x = w;
+    } else x += (x ? 6 : 0) + w;
+  }
+  return lines;
+}
+
+// A dialog can't fit its content, so its height is worked out: places (8
+// before it scrolls), the widest machine's chip lines (from the agents the
+// sidebar keeps in "sheprd.startable"), and the fixed rows.
 function openNew(project, space = null) {
-  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height: NEW_HEIGHT(placesFor(project).length), props: { newIn: { project, space } } });
+  const places = placesFor(project);
+  const known = /** @type {Record<string, any[]>} */ (shared("sheprd.startable") ?? {});
+  const agentsOn = Object.fromEntries([...new Set(places.map((x) => x.machine ?? ""))].filter((m) => known[m]).map((m) => [m, known[m]]));
+  const lines = Math.max(1, ...Object.values(agentsOn).map(chipLines));
+  const height = 236 + 28 * Math.min(places.length, 8) + 26 * lines + 6 * (lines - 1);
+  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height, props: { newIn: { project, space, agents: agentsOn } } });
 }
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
@@ -245,6 +273,13 @@ export default class SheprdSidebar extends View {
       exec("hostname", []).then((r) => r.code === 0 && setShared("sheprd.hostname", r.stdout.trim()), () => {});
     }
     cx.timer.every(CARDS_EVERY_MS, (cx) => this.loadCards(cx));
+    // What each machine can start, for the New tab or space dialog.
+    const loadStartable = async () => {
+      const list = machines().filter((x) => x.layout !== "unavailable");
+      setShared("sheprd.startable", Object.fromEntries(await Promise.all(list.map(async (m) => [m.name ?? "", await startable(m.name ?? null)]))));
+    };
+    loadStartable();
+    cx.timer.every(60000, () => { loadStartable(); });
     cx.timer.every(30000, (cx) => cx.notify());
   }
 
@@ -391,9 +426,10 @@ export default class SheprdSidebar extends View {
     this.places = placesFor(p.project);
     this.pick = p.space ? Math.max(0, this.places.findIndex((x) => x.space === p.space)) : 0;
     this.what = localStorage.getItem("new.what") ?? "shell";
-    this.agentsOn = new Map(); // machine (null: this one) -> agents installed there
+    // machine (null: this one) -> agents installed there, as asked before opening
+    this.agentsOn = new Map(Object.entries(p.agents ?? {}).map(([m, list]) => [m || null, list]));
     this.folder = InputState.new({ value: this.places[this.pick]?.folder ?? "", placeholder: "Folder (empty: home)" });
-    this.task = InputState.new({ value: "", placeholder: "First message (optional)" });
+    this.task = InputState.new({ value: "", placeholder: "First message (agents only, optional)" });
     this.task.on("submit", () => this.createNew());
     this.loadAgents(cx);
   }
@@ -404,11 +440,10 @@ export default class SheprdSidebar extends View {
     this.agentsOn.set(machine, null);
     cx.spawn(async (cx) => {
       try {
-        this.agentsOn.set(machine, (await knownAgents({ on: machine })).filter((a) => a.agent && a.installed));
-      } catch {
-        this.agentsOn.set(machine, []);
+        this.agentsOn.set(machine, await startable(machine));
+      } finally {
+        cx.notify();
       }
-      cx.notify();
     });
   }
 
@@ -421,9 +456,9 @@ export default class SheprdSidebar extends View {
     const task = agent ? this.task.value().trim() : "";
     const start = { ...(agent ? { argv: agent.run } : {}), ...(task ? { task } : {}) };
     localStorage.setItem("new.what", agent ? agent.key : "shell");
-    if (place.space) return run("tab.new", { space: place.space, ...start });
-    // The new space joins the project once it shows up (render picks it up).
     const folder = this.folder.value().trim();
+    if (place.space) return run("tab.new", { space: place.space, ...(folder ? { folder } : {}), ...start });
+    // The new space joins the project once it shows up (render picks it up).
     if (p.newIn.project !== null) setShared("sheprd.joining", { project: p.newIn.project, machine: place.machine, before: spaces().map((s) => s.id), at: Date.now() });
     run("space.new", { ...(folder ? { folder } : {}), ...(place.machine ? { machine: place.machine } : {}), ...start });
   }
@@ -441,7 +476,7 @@ export default class SheprdSidebar extends View {
       .cursor_pointer().hover((el) => el.bg(t.hover))
       .on_click((_e, cx) => {
         this.pick = i;
-        if (!x.space) this.folder.set_value(x.folder);
+        this.folder.set_value(x.folder);
         this.loadAgents(cx);
         cx.notify();
       })
@@ -454,13 +489,13 @@ export default class SheprdSidebar extends View {
       .child(div().text_size(14).font_semibold().child(`New in ${name}`))
       .child(div().text_size(11).text_color(t.dim).child("Where"))
       .child(v_flex().id("ni-places").h(28 * Math.min(this.places.length, 8)).flex_none().overflow_y_scrollbar().children(this.places.map(line)))
-      .when(place && !place.space, (el) => el.child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
+      .child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background))
       .child(div().text_size(11).text_color(t.dim).child("What"))
       .child(h_flex().gap(6).flex_wrap()
         .child(pill("nw-shell", "Terminal", !picked, () => { this.what = "shell"; }))
         .children((agents ?? []).map((a) => pill(`nw-${a.key}`, a.name, a.key === this.what, () => { this.what = a.key; })))
         .when(agents === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("finding agents…"))))
-      .when(picked, (el) => el.child(Input.new(this.task).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
+      .child(Input.new(this.task).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background))
       .child(h_flex().gap(8).justify_end()
         .child(div().id("ni-cancel").px(12).h(30).flex().items_center().rounded(7).bg(t.raised).cursor_pointer().on_click(() => closeOverlay(p.overlay)).child("Cancel"))
         .child(div().id("ni-go").px(12).h(30).flex().items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().on_click(() => this.createNew()).child("Create")));
