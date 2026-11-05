@@ -14,7 +14,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents } from "herdr";
+import { agents, spaces, machines, panes, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents, notify } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Each filter's label, and the shorter one for a narrow sidebar.
@@ -84,7 +84,7 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const MENU_FIXED = 4 * 28 + 9 + 22 + 10; // new, mark, read, hide, divider, label, padding
+const MENU_FIXED = 5 * 28 + 9 + 22 + 10; // new, copy, mark, read, hide, divider, label, padding
 const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Where a new tab or space can go for a project (null: Other): a tab in each of
@@ -94,17 +94,51 @@ function placesFor(name) {
   const v = view();
   const mine = spaces().filter((s) => !isHiddenSpace(s, v.hidden) && (projectOf(s, v.projects)?.name ?? null) === name);
   const out = mine.map((s) => ({ space: s.id, machine: s.machine ?? null, label: s.name, folder: s.folder }));
-  for (const m of machines().filter((x) => x.layout === "ready")) {
-    const there = mine.find((s) => (s.machine ?? null) === (m.name ?? null));
-    out.push({ space: null, machine: m.name ?? null, label: "New space", folder: there?.folder ?? "" });
+  // Every machine the app reaches, and any a space already lives on.
+  const names = new Set(machines().filter((x) => x.layout !== "unavailable").map((x) => x.name ?? null));
+  for (const s of spaces()) names.add(s.machine ?? null);
+  for (const m of [null, ...[...names].filter(Boolean).sort()]) {
+    const there = mine.find((s) => (s.machine ?? null) === m);
+    out.push({ space: null, machine: m, label: `New space on ${m ?? shared("sheprd.hostname") ?? "this machine"}`, folder: there?.folder ?? "" });
   }
   return out;
 }
 
-const NEW_HEIGHT = (places) => Math.min(226 + 28 * places, 560);
+// The agents a machine can start (installed ones).
+async function startable(machine) {
+  try {
+    return (await knownAgents({ on: machine })).filter((a) => a.agent && a.installed);
+  } catch {
+    return [];
+  }
+}
 
+// How many lines the What chips take in the dialog (Terminal first; about
+// 7 px a character plus 20 px padding, 6 px apart, 352 px a line).
+function chipLines(list) {
+  let lines = 1;
+  let x = 0;
+  for (const label of ["Terminal", ...list.map((a) => a.name)]) {
+    const w = 20 + 7 * label.length;
+    if (x && x + 6 + w > 352) {
+      lines++;
+      x = w;
+    } else x += (x ? 6 : 0) + w;
+  }
+  return lines;
+}
+
+// A dialog can't fit its content, so it opens frameless at the most it can
+// need (places, 8 before they scroll; the widest machine's chip lines, from
+// the agents the sidebar keeps in "sheprd.startable"; the fixed rows) and
+// draws its own panel, as tall as what it shows, centred in that space.
 function openNew(project, space = null) {
-  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 380, height: NEW_HEIGHT(placesFor(project).length), props: { newIn: { project, space } } });
+  const places = placesFor(project);
+  const known = /** @type {Record<string, any[]>} */ (shared("sheprd.startable") ?? {});
+  const agentsOn = Object.fromEntries([...new Set(places.map((x) => x.machine ?? ""))].filter((m) => known[m]).map((m) => [m, known[m]]));
+  const lines = Math.max(1, ...Object.values(agentsOn).map(chipLines));
+  const height = 236 + 28 * Math.min(places.length, 8) + 26 * lines + 6 * (lines - 1);
+  openOverlay({ mod: "sheprd-sidebar", kind: "dialog", frame: "none", width: 380, height, props: { newIn: { project, space, agents: agentsOn } } });
 }
 
 // Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
@@ -187,6 +221,19 @@ function machineTag(name) {
 // tab, else [fallback].
 const workOf = (r, fallback) => r.summary || r.a.title || (r.a.tab_name && !/^\d+$/.test(r.a.tab_name) ? r.a.tab_name : "") || fallback;
 
+// An agent's hc address as other machines write it: `dev/t7` stays, a local
+// `t7` gets this machine's name (once known).
+const pingAddress = (address) => (address.includes("/") || !shared("sheprd.hostname") ? address : `${shared("sheprd.hostname")}/${address}`);
+
+function copyAddress(address) {
+  const text = pingAddress(address);
+  exec("wl-copy", [text]).catch(() => exec("pbcopy", [])).then(
+    () => notify({ title: `Copied ${text}`, level: "success", timeout: 2000 }),
+    () => notify({ title: `Address: ${text}`, body: "No clipboard tool here (wl-copy)", level: "info" }));
+}
+
+const tokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
 function duration(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
@@ -219,8 +266,62 @@ export default class SheprdSidebar extends View {
       cx.notify();
     });
     this.loadCards(cx);
+    // The companion's view of each agent (context, permission mode, last
+    // tool), by address: asked of a machine on Shift-hover, at most every 10 s.
+    this.facts = new Map();
+    this.factsAt = new Map();
+    if (!shared("sheprd.hostname")) {
+      exec("hostname", []).then((r) => r.code === 0 && setShared("sheprd.hostname", r.stdout.trim()), () => {});
+    }
     cx.timer.every(CARDS_EVERY_MS, (cx) => this.loadCards(cx));
+    // What each machine can start, for the New tab or space dialog.
+    const loadStartable = async () => {
+      const list = machines().filter((x) => x.layout !== "unavailable");
+      setShared("sheprd.startable", Object.fromEntries(await Promise.all(list.map(async (m) => [m.name ?? "", await startable(m.name ?? null)]))));
+    };
+    loadStartable();
+    cx.timer.every(60000, () => { loadStartable(); });
     cx.timer.every(30000, (cx) => cx.notify());
+  }
+
+  loadFacts(machine, cx) {
+    const key = machine ?? "local";
+    if (Date.now() - (this.factsAt.get(key) ?? 0) < 10000) return;
+    this.factsAt.set(key, Date.now());
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("sh", ["-lc", "conductore-hostd status --json"], { on: machine });
+        if (r.code !== 0) return;
+        for (const x of JSON.parse(r.stdout).agents ?? []) {
+          if (x.hc?.terminal) this.facts.set(machine ? `${machine}/${x.hc.terminal}` : x.hc.terminal, x);
+        }
+      } catch {
+        // no companion there: the details go without it
+      }
+      cx.notify();
+    });
+  }
+
+  // Shift-hover's tooltip: how to ping it, where it runs and what it's doing.
+  details(r, now) {
+    const a = r.a;
+    const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+    const pane = panes().find((x) => x.pane === a.pane);
+    const f = this.facts.get(a.address);
+    const since = this.changed[a.address]?.at;
+    const lines = [workOf(r, a.space_name || a.address)];
+    lines.push(`Ping: ${pingAddress(a.address)}${machine ? "" : `  (here: ${a.address})`}`);
+    lines.push(`${a.space_name || "?"} · tab ${a.tab_index}${machine ? ` · ${machine}` : ""}`);
+    if (pane?.cwd) lines.push(`${pane.cwd}${pane.branch ? ` (${pane.branch})` : ""}`);
+    lines.push(`${a.app || a.program?.name || "agent"} · ${a.status}${since ? ` for ${duration(now - since)}` : ""}`);
+    if (f?.usage?.contextUsedPct != null) lines.push(`Context ${f.usage.contextUsedPct}% of ${f.usage.windowLabel ?? "?"} (${tokens(f.usage.contextTokens ?? 0)} tokens)`);
+    if (f?.permissionMode) lines.push(`Permissions: ${f.permissionMode}`);
+    if (f?.lastToolName && a.status === "working") lines.push(`Last tool: ${f.lastToolName}`);
+    if (f?.startedAt) lines.push(`Session started ${duration(now - f.startedAt)} ago`);
+    if (r.questions) lines.push(`${r.questions} open question${r.questions > 1 ? "s" : ""}`);
+    if (!f) lines.push(this.factsAt.has(machine ?? "local") ? "No companion facts for it" : "Asking the companion…");
+    lines.push("Shift-click: copy the address");
+    return lines.join("\n");
   }
 
   // Every reachable machine's cards, into shared state for the panel too. One
@@ -324,11 +425,12 @@ export default class SheprdSidebar extends View {
   initNew(cx) {
     const p = props().newIn;
     this.places = placesFor(p.project);
-    this.pick = Math.max(0, this.places.findIndex((x) => x.space === p.space));
+    this.pick = p.space ? Math.max(0, this.places.findIndex((x) => x.space === p.space)) : 0;
     this.what = localStorage.getItem("new.what") ?? "shell";
-    this.agentsOn = new Map(); // machine (null: this one) -> agents installed there
+    // machine (null: this one) -> agents installed there, as asked before opening
+    this.agentsOn = new Map(Object.entries(p.agents ?? {}).map(([m, list]) => [m || null, list]));
     this.folder = InputState.new({ value: this.places[this.pick]?.folder ?? "", placeholder: "Folder (empty: home)" });
-    this.task = InputState.new({ value: "", placeholder: "First message (optional)" });
+    this.task = InputState.new({ value: "", placeholder: "First message (agents only, optional)" });
     this.task.on("submit", () => this.createNew());
     this.loadAgents(cx);
   }
@@ -339,11 +441,10 @@ export default class SheprdSidebar extends View {
     this.agentsOn.set(machine, null);
     cx.spawn(async (cx) => {
       try {
-        this.agentsOn.set(machine, (await knownAgents({ on: machine })).filter((a) => a.agent && a.installed));
-      } catch {
-        this.agentsOn.set(machine, []);
+        this.agentsOn.set(machine, await startable(machine));
+      } finally {
+        cx.notify();
       }
-      cx.notify();
     });
   }
 
@@ -356,9 +457,9 @@ export default class SheprdSidebar extends View {
     const task = agent ? this.task.value().trim() : "";
     const start = { ...(agent ? { argv: agent.run } : {}), ...(task ? { task } : {}) };
     localStorage.setItem("new.what", agent ? agent.key : "shell");
-    if (place.space) return run("tab.new", { space: place.space, ...start });
-    // The new space joins the project once it shows up (render picks it up).
     const folder = this.folder.value().trim();
+    if (place.space) return run("tab.new", { space: place.space, ...(folder ? { folder } : {}), ...start });
+    // The new space joins the project once it shows up (render picks it up).
     if (p.newIn.project !== null) setShared("sheprd.joining", { project: p.newIn.project, machine: place.machine, before: spaces().map((s) => s.id), at: Date.now() });
     run("space.new", { ...(folder ? { folder } : {}), ...(place.machine ? { machine: place.machine } : {}), ...start });
   }
@@ -376,20 +477,21 @@ export default class SheprdSidebar extends View {
       .cursor_pointer().hover((el) => el.bg(t.hover))
       .on_click((_e, cx) => {
         this.pick = i;
-        if (!x.space) this.folder.set_value(x.folder);
+        this.folder.set_value(x.folder);
         this.loadAgents(cx);
         cx.notify();
       })
       .child(div().flex_none().text_color(t.dim).child(x.space ? "Tab in" : "+"))
       .child(div().flex_1().min_w(0).truncate().text_color(x.space ? t.foreground : t.muted).child(x.label))
-      .when(Boolean(x.machine), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
+      .when(Boolean(x.machine && x.space), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(machineTag(x.machine))));
     const name = p.newIn.project ?? "Other";
     const picked = (agents ?? []).some((a) => a.key === this.what);
-    return v_flex().size_full().p(14).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.8)
+    const panel = v_flex().w_full().p(14).gap(8).rounded(10).border_1().border_color(t.border).shadow_lg()
+      .bg(t.popover).text_color(t.foreground).text_size(12.8)
       .child(div().text_size(14).font_semibold().child(`New in ${name}`))
       .child(div().text_size(11).text_color(t.dim).child("Where"))
-      .child(v_flex().id("ni-places").flex_1().min_h(0).overflow_y_scrollbar().children(this.places.map(line)))
-      .when(place && !place.space, (el) => el.child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background)))
+      .child(v_flex().id("ni-places").h(28 * Math.min(this.places.length, 8)).flex_none().overflow_y_scrollbar().children(this.places.map(line)))
+      .child(Input.new(this.folder).h(30).px(8).rounded(7).border_1().border_color(t.border).bg(t.background))
       .child(div().text_size(11).text_color(t.dim).child("What"))
       .child(h_flex().gap(6).flex_wrap()
         .child(pill("nw-shell", "Terminal", !picked, () => { this.what = "shell"; }))
@@ -399,6 +501,7 @@ export default class SheprdSidebar extends View {
       .child(h_flex().gap(8).justify_end()
         .child(div().id("ni-cancel").px(12).h(30).flex().items_center().rounded(7).bg(t.raised).cursor_pointer().on_click(() => closeOverlay(p.overlay)).child("Cancel"))
         .child(div().id("ni-go").px(12).h(30).flex().items_center().rounded(7).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().on_click(() => this.createNew()).child("Create")));
+    return v_flex().size_full().justify_center().child(panel);
   }
 
   promptView(t) {
@@ -452,6 +555,7 @@ export default class SheprdSidebar extends View {
     // scroll when the window is too short for all of them.
     return v_flex().size_full().p(5).bg(t.popover).text_size(12.8)
       .child(item("m-new", "New tab or space here…", () => openNew(space ? projectOf(space, projects)?.name ?? null : null, space?.id ?? null)))
+      .child(item("m-copy", `Copy address ${pingAddress(address)}`, () => copyAddress(address)))
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
       // Read: out of Needs you until its next change. Unread: in it until opened.
       .child(p.menu.needs
@@ -698,13 +802,24 @@ export default class SheprdSidebar extends View {
       const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer().hover((s) => s.bg(t.hover))
-        .tooltip(`${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}`)
+        .tooltip(this.shift && this.hovered === a.address
+          ? this.details(r, now)
+          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift for details`)
         .on_hover((on, cx) => {
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
+          if (on && this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
           cx.notify();
         })
-        .on_click(() => {
+        // Shift while hovering: the details tooltip (and the companion asked).
+        .on_mouse_move((e, cx) => {
+          if (e.modifiers.shift === Boolean(this.shift)) return;
+          this.shift = e.modifiers.shift;
+          if (this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
+          cx.notify();
+        })
+        .on_click((e) => {
+          if (e.modifiers.shift) return copyAddress(a.address);
           if (v.filter === "needs-you" && !r.held) this.held = { address: a.address, ...placed(r) };
           run("pane.focus", { pane: a.pane });
           if (m.unread.includes(a.address)) saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== a.address) }));
