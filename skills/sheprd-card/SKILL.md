@@ -9,7 +9,7 @@ The user triages your work from the CARDS panel (in the Herdr app: the Work pane
 your transcript. Write to it explicitly; anything you don't write there they will not see.
 Commands target your own terminal.
 
-Which command (check the variable, do not guess; verified on development-central 2026-11-06):
+Which command (check the variable, do not guess):
 
 | Where you run | Variable set there | Command |
 |---|---|---|
@@ -42,9 +42,8 @@ sheprd card list             # your cards as the user sees them
 - **Finished** (PR open and handed over, or merged): `done --summary`. Done writes the summary and
   decisions back to the tracker when the user configured it; don't edit the card file yourself.
   A decision or summary added after `done` is written back only when you run `done` again.
-- The ledger status (`--status`) is a label for the panel. It does not move the card on the
-  ProjectsTasks board; do that with the board MCP, inside its rules (an agent stops at `verify`
-  and cannot set `agent-ready`, `pr-approved`, `to-deploy`, `flag-off`, `done` or `cancelled`).
+- The ledger status (`--status`) is a label for the panel. It does not move the card in your
+  tracker; do that with the tracker's own tools, inside its rules.
 - Orchestrating subagents: you keep the ledger for the cards you hand out; subagents report to
   you, you write it.
 
