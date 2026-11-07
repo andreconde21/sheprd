@@ -12,6 +12,7 @@ writing at once never lose an update.
   cards update SHE-12 --title "Stripe checkout" --status dev --summary "..."
   cards ask SHE-12 "Which provider?" --option Stripe --option Multibanco --recommend 1
   cards decide SHE-12 "Use Checkout, not Elements"
+  cards answered SHE-12 --question 1 [--answer "Stripe"]    the user answered in the chat: close it
   cards done SHE-12 --summary "Merged as #41; live on dev"
   cards answers [--peek]     answers the user sent you (marks them read)
   cards list                 your cards
@@ -353,6 +354,34 @@ def cmd_ask(args):
 
     number = change(mutate)
     print(f"{args.id} Q{number} asked; the answer arrives typed into your terminal")
+
+
+def cmd_answered(args):
+    """The agent closes questions the user answered in the conversation instead of in the panel."""
+    terminal = my_terminal(args)
+    if args.question is None and not args.all:
+        fail("name the question (--question N) or use --all")
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id)
+        closed = []
+        for q in card["questions"]:
+            if not live(q) or not (args.all or q["n"] == args.question):
+                continue
+            if q["state"] == "sending" and not stale_claim(q):
+                fail(f"{args.id} Q{q['n']} is being sent")
+            q["state"] = "answered"
+            q["answered_at"] = now()
+            if args.answer is not None:
+                q["answer"] = clip(args.answer, 300)
+            closed.append(q["n"])
+        if not closed:
+            fail(f"{args.id} has no open question" + ("" if args.all else f" Q{args.question}"))
+        touch(card)
+        return closed
+
+    closed = change(mutate)
+    print(f"{args.id} " + ", ".join(f"Q{n}" for n in closed) + " answered")
 
 
 def cmd_decide(args):
@@ -751,6 +780,13 @@ def main():
     p.add_argument("--option", action="append", help="a suggested answer (repeat)")
     p.add_argument("--recommend", type=int, help="the recommended option, from 1")
     p.set_defaults(func=cmd_ask)
+
+    p = agent("answered", help="close a question the user answered in the chat")
+    p.add_argument("id")
+    p.add_argument("--question", type=int, help="the question number")
+    p.add_argument("--all", action="store_true", help="every open question of the card")
+    p.add_argument("--answer", help="what the user answered (optional)")
+    p.set_defaults(func=cmd_answered)
 
     p = agent("decide", help="record a decision")
     p.add_argument("id")

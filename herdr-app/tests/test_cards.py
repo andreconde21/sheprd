@@ -285,6 +285,52 @@ class LedgerTests(unittest.TestCase):
         quiet(cards.cmd_update, ns(id="SHE-1", inferred=True, clear_questions=True))
         self.assertEqual(len(self.doc()["cards"]["t7/SHE-1"]["questions"]), 1)
 
+    def test_the_agent_closes_a_question_the_user_answered_in_chat(self):
+        self.ask("SHE-1", "Provider?")
+        self.ask("SHE-1", "Currency?")
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=1, all=False, answer="Stripe"))
+        q1, q2 = self.doc()["cards"]["t7/SHE-1"]["questions"]
+        self.assertEqual((q1["state"], q1["answer"]), ("answered", "Stripe"))
+        self.assertIn("answered_at", q1)
+        self.assertEqual(q2["state"], "open")
+        self.assertFalse(cards.live(q1))
+
+    def test_answered_without_an_answer_text_keeps_none(self):
+        self.ask("SHE-1", "Provider?")
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=1, all=False, answer=None))
+        self.assertIsNone(self.doc()["cards"]["t7/SHE-1"]["questions"][0]["answer"])
+
+    def test_answered_all_closes_every_open_question_but_not_sent_ones(self):
+        self.ask("SHE-1", "Provider?")
+        self.ask("SHE-1", "Currency?")
+        self.stage(1, "A")
+        quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))  # Q1 is now sent
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=None, all=True, answer=None))
+        states = [q["state"] for q in self.doc()["cards"]["t7/SHE-1"]["questions"]]
+        self.assertEqual(states, ["sent", "answered"])
+
+    def test_answered_needs_a_live_question_and_a_target(self):
+        self.ask("SHE-1", "Provider?")
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=1, all=False, answer=None))
+        for args in (ns(id="SHE-1", question=1, all=False, answer=None),  # already closed
+                     ns(id="SHE-1", question=9, all=False, answer=None),
+                     ns(id="SHE-1", question=None, all=False, answer=None),  # no target
+                     ns(id="NOPE-1", question=1, all=False, answer=None)):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cards.cmd_answered(args)
+
+    def test_a_question_being_sent_is_not_closed_under_the_send(self):
+        self.ask("SHE-1", "Provider?")
+        self.stage(1, "A")
+
+        def meanwhile():
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cards.cmd_answered(ns(id="SHE-1", question=1, all=False, answer=None))
+
+        self.during_send = meanwhile
+        quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))
+        self.assertEqual(self.doc()["cards"]["t7/SHE-1"]["questions"][0]["state"], "sent")
+
     def test_write_over_the_cap_prunes_history_and_lands(self):
         for i in range(30):
             self.ask(f"SHE-{i}", "q")

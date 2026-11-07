@@ -34,6 +34,11 @@ On every server the app reaches over SSH (where agents run), only the CLI:
 ./install.sh --cards-only
 ```
 
+herdr-core started over SSH often has a minimal PATH without `~/.local/bin`. The installer
+therefore also links `cards` into `/usr/local/bin` when that is writable; where it is not, the
+panel and sidebar fall back to `~/.local/bin/cards`, and show "cards not available on <machine>"
+when neither works.
+
 Then switch layouts with ctrl-shift-l, or `herdr-app do layout.switch '{"name":"sheprd"}'`.
 
 `cards` needs python3 (3.11+) and `hc` on the same machine. The sidebar imports

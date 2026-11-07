@@ -55,6 +55,9 @@ sheprd card list             # your cards as the user sees them
 - Answers arrive typed into your pane as one line, e.g.
   `SHE-12 Q1 (Which provider?) → Stripe · Q2 (Webhook path?) → "use the old endpoint"`.
   Run `sheprd card answers` to read them reliably, act on them, then `decide` what follows.
+- When the user answers a question in the conversation instead of the panel, close it so it stops
+  showing as open: `cards answered SHE-12 --question 1 --answer "Stripe"` (or `--all` for the
+  card). This is a `cards` command (Herdr app); under sheprd answer it in the panel or dismiss it.
 
 ## Rules
 - One line per field, no control characters. Card IDs: `A-Z a-z 0-9 # . _ -`, max 32 chars.
