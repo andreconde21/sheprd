@@ -472,7 +472,10 @@ def cmd_list(args):
 
 EVIDENCE_KEEP = 12
 IMAGE_MAX = 2 * 1024 * 1024
-IMAGE_SIDE_MAX = 8000  # pixels, either side: a small file can still decode to gigabytes
+IMAGE_PIXELS_MAX = 16_000_000  # a small file can still decode to gigabytes: budget by area, not side
+IMAGE_SIDE_MAX = 16383  # the largest side webp can even express
+GIF_FRAMES_MAX = 500
+GIF_TOTAL_FACTOR = 4  # all frames together may hold this many budgets of pixels
 FILE_NAME = re.compile(r"^[A-Za-z0-9#_][A-Za-z0-9#._-]{0,99}$")  # no leading dot: not ".", ".." or a hidden temp
 IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png", "image/png"), (b"\xff\xd8\xff", "jpg", "image/jpeg"),
                (b"GIF87a", "gif", "image/gif"), (b"GIF89a", "gif", "image/gif"))
@@ -561,14 +564,51 @@ def image_size(data):
     return None
 
 
+def gif_frames(data):
+    """The (width, height) of every frame of a GIF, read from its image descriptors, or None when
+    the block structure cannot be followed."""
+    try:
+        i = 13
+        if data[10] & 0x80:
+            i += 3 * (2 << (data[10] & 7))
+        frames = []
+        while i < len(data):
+            block = data[i]
+            if block == 0x3B:
+                return frames
+            if block == 0x2C:
+                _, _, width, height = struct.unpack("<HHHH", data[i + 1:i + 9])
+                frames.append((width, height))
+                if len(frames) > GIF_FRAMES_MAX:
+                    return None
+                flags = data[i + 9]
+                i += 10 + (3 * (2 << (flags & 7)) if flags & 0x80 else 0) + 1  # + LZW minimum code size
+            elif block == 0x21:
+                i += 2
+            else:
+                return None
+            while data[i]:  # data sub-blocks
+                i += 1 + data[i]
+            i += 1
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
 def check_image(data):
     """(extension, mime) of an acceptable image, else fails: type by magic bytes, size from the header."""
     kind = image_type(data)
     if not kind:
         fail("only png, jpeg, gif and webp images are accepted")
     size = image_size(data)
-    if not size or not 0 < size[0] <= IMAGE_SIDE_MAX or not 0 < size[1] <= IMAGE_SIDE_MAX:
-        fail(f"the image must be at most {IMAGE_SIDE_MAX}x{IMAGE_SIDE_MAX} pixels (and its size readable)")
+    limit = f"the image must be at most {IMAGE_PIXELS_MAX // 1_000_000} megapixels (and its size readable)"
+    if not size or not 0 < size[0] <= IMAGE_SIDE_MAX or not 0 < size[1] <= IMAGE_SIDE_MAX or size[0] * size[1] > IMAGE_PIXELS_MAX:
+        fail(limit)
+    if kind[0] == "gif":
+        frames = gif_frames(data)
+        if (frames is None or any(not 0 < w * h <= IMAGE_PIXELS_MAX for w, h in frames)
+                or sum(w * h for w, h in frames) > GIF_TOTAL_FACTOR * IMAGE_PIXELS_MAX):
+            fail(limit + ", and so must every frame of a gif")
     return kind
 
 

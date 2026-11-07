@@ -58,8 +58,9 @@ by apps through `cards stage / dismiss / send`.
   the bytes. `kind: "test"` (`--test "suite: P/F"`) keeps `text`, and `passed`/`failed` when the
   text ends in `P/F` (else `null`). `kind: "link"` (`--link URL`, http or https only) has `url` and
   `label` (default: the host). `--clear` removes them all. Images that fall off the list (or are
-  cleared) are deleted from the folder. Images may be at most 8000x8000 pixels (read from the header).
-  Clients open a link only when it is a plain http(s) URL (at most 2048 characters, no leading `-`):
+  cleared) are deleted from the folder. Images may hold at most 16 megapixels (read from the header; a gif checks every frame, all frames together at most 4 budgets).
+  Clients open a link only when it is a plain http(s) URL (at most 2048 characters, no leading `-`, not
+  localhost or a loopback, private, link-local or shared-range address) and open the parsed form:
   the ledger can be written by any process, so a stored URL is never trusted. Images are fetched at most
   a few per redraw. Apps fetch an image over the same `cards` channel as
   `cards json`: `cards evidence-image <id> <N> --terminal T` prints it as base64 (N counts from 1

@@ -361,8 +361,10 @@ def png(width=1, height=1):
     return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + b"\x08\x02\0\0\0" + b"\0" * 8
 
 
-def gif(width=1, height=1):
-    return b"GIF89a" + struct.pack("<HH", width, height) + b"\0" * 8
+def gif(width=1, height=1, frames=None):
+    """A gif with a screen of width x height and the given frames (default: one filling it)."""
+    body = b"".join(b"\x2c" + struct.pack("<HHHH", 0, 0, w, h) + b"\0\x02\x01\0\0" for w, h in (frames or [(width, height)]))
+    return b"GIF89a" + struct.pack("<HH", width, height) + b"\0\0\0" + body + b"\x3b"
 
 
 def jpeg(width=1, height=1):
@@ -449,12 +451,23 @@ class EvidenceTests(unittest.TestCase):
     def test_image_sizes_are_read_from_every_format_and_capped(self):
         for make in (png, gif, jpeg, webp_x, webp_l, webp_lossy):
             self.assertEqual(cards.image_size(make(640, 480)), (640, 480), make.__name__)
-            self.assertEqual(cards.image_size(make(8000, 8000)), (8000, 8000), make.__name__)
-            self.add(image=self.file(f"ok-{make.__name__}", make(8000, 8000)))
-            for wide, tall in ((8001, 10), (10, 8001), (60000, 60000)):
-                if make is webp_lossy and max(wide, tall) > 16383:
-                    continue
+            self.assertEqual(cards.image_size(make(4000, 4000)), (4000, 4000), make.__name__)
+            self.add(image=self.file(f"ok-{make.__name__}", make(4000, 4000)))  # exactly 16 Mpx
+            self.add(image=self.file(f"wide-{make.__name__}", make(16000, 1000)))  # long, but within the budget
+            for wide, tall in ((4001, 4000), (8000, 8000), (16383, 16383)):
                 self.refuses(cards.cmd_evidence, evidence_args(image=self.file("big", make(wide, tall))))
+
+    def test_a_gif_is_checked_frame_by_frame(self):
+        self.add(image=self.file("ok.gif", gif(100, 100, [(100, 100)] * 50)))
+        # a small screen whose frames claim a huge area
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f1.gif", gif(10, 10, [(10, 10), (8000, 8000)]))))
+        # every frame within the budget, together far beyond it
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f2.gif", gif(4000, 4000, [(4000, 4000)] * 5))))
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f3.gif", gif(10, 10, [(10, 10)] * 501))))
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f4.gif", gif(10, 10, [(0, 5)]))))
+        # a gif whose blocks cannot be followed
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f5.gif", gif(10, 10)[:-3])))
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("f6.gif", b"GIF89a" + struct.pack("<HH", 1, 1) + b"\0\0\0\x99")))
 
     def test_an_image_whose_size_cannot_be_read_is_refused(self):
         for data in (b"\x89PNG\r\n\x1a\n" + b"\0" * 4, b"\xff\xd8\xff\xe0\x00\x02", b"RIFF\0\0\0\0WEBPVP8Z" + b"\0" * 20):
@@ -463,7 +476,7 @@ class EvidenceTests(unittest.TestCase):
     def test_a_stored_file_swapped_for_an_oversized_image_is_not_served(self):
         self.add(image=self.file("shot.png", PNG))
         with open(os.path.join(self.store, self.items()[0]["file"]), "wb") as handle:
-            handle.write(png(20000, 20000))
+            handle.write(png(5000, 5000))
         self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=1))
 
     def test_a_loose_evidence_folder_is_tightened_and_a_foreign_one_refused(self):
@@ -577,6 +590,18 @@ class EvidenceTests(unittest.TestCase):
 
 PANEL = os.path.join(HERE, "..", "mods", "sheprd-panel", "main.js")
 
+# Hosts that point inside the machine or its network, in the forms a URL parser also accepts.
+INTERNAL = [
+    "http://localhost/", "http://LOCALHOST:8080/", "http://localhost./", "http://app.localhost/", "http://a.b.localhost./",
+    "http://127.0.0.1/", "http://127.255.255.254/", "http://0x7f.1/", "http://0177.0.0.1/", "http://2130706433/",
+    "http://127.1/", "http://0.0.0.0/", "http://0/",
+    "http://[::1]/", "http://[::]/", "http://[0:0:0:0:0:0:0:1]/", "http://[::ffff:127.0.0.1]/", "http://[::ffff:7f00:1]/",
+    "http://[::ffff:10.1.2.3]/", "http://[::127.0.0.1]/",
+    "http://10.0.0.1/", "http://10.255.255.255/", "http://172.16.0.1/", "http://172.31.255.255/", "http://192.168.1.1/",
+    "http://169.254.169.254/", "http://100.64.0.1/", "http://100.127.255.255/",
+    "http://[fc00::1]/", "http://[fd12:3456::1]/", "http://[fe80::1]/", "http://[febf::1]/", "http://[fe80::1%25eth0]/",
+]
+
 
 @unittest.skipUnless(shutil.which("node"), "node is needed to run the panel's filter block")
 class PanelFilterTests(unittest.TestCase):
@@ -638,17 +663,24 @@ class PanelFilterTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_only_plain_http_urls_reach_xdg_open(self):
-        good = ["https://example.test/a?b=1", "http://example.test:8080/x"]
+        good = ["https://example.test/a?b=1", "http://example.test:8080/x", "https://8.8.8.8/x", "https://[2606:4700::1111]/",
+                "https://172.32.0.1/", "https://172.15.255.255/", "https://100.63.0.1/", "https://192.169.0.1/", "https://notlocalhost.test/"]
         bad = ["file:///home/me/x.desktop", "ssh://host/", "javascript:alert(1)", "data:text/html,x", "ftp://x.test/",
                "custom-handler://run?x", "-https://x.test", "--help", "//x.test", "https://", "https://a b.test",
-               "https://x.test/\nsecond", "", "x" * 10, "https://example.test/" + "a" * 2100, "mailto:a@b.test", "vscode://file/etc"]
+               "https://x.test/\nsecond", "", "x" * 10, "https://example.test/" + "a" * 2100, "mailto:a@b.test", "vscode://file/etc"] + INTERNAL
         for url, out in zip(good + bad, self.run_url(good + bad)):
             if url in good:
-                self.assertEqual(out["href"], url)
+                self.assertTrue(out["href"].startswith(url.split("://")[0] + "://"))
             else:
                 self.assertIsNone(out, url)
         self.assertEqual(self.run_url(good)[0]["host"], "example.test")
         self.assertEqual(self.run_url(good)[1]["host"], "example.test:8080")
+
+    def test_the_opened_url_is_the_parsed_one_not_the_raw_string(self):
+        out = self.run_url(["HTTPS://Example.TEST:443/a b".replace(" ", "%20"), "https://example.test/x\\y", "http://user:pw@example.test/?q=\u00e9"])
+        self.assertEqual(out[0]["href"], "https://example.test/a%20b")
+        self.assertEqual(out[1]["href"], "https://example.test/x/y")
+        self.assertEqual(out[2]["href"], "http://user:pw@example.test/?q=%C3%A9")
 
     def test_every_xdg_open_in_the_panel_goes_through_the_check(self):
         with open(PANEL) as handle:

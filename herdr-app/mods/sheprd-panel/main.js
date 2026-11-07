@@ -71,11 +71,58 @@ const live = (q) => q.state === "open" || q.state === "staged" || q.state === "s
 // Only an http(s) URL is ever handed to xdg-open: the ledger can be written by any process, and an
 // agent on another machine could plant file:, ssh: or a custom handler under a friendly label.
 const MAX_URL = 2048;
+
+// The IPv4 address (as four numbers) behind an already WHATWG-normalised host, else null.
+function ipv4(host) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+// Loopback, private, link-local and shared (CGNAT, e.g. a tailnet) IPv4 ranges.
+function privateV4([a, b]) {
+  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+// `[::1]`-style host (as the URL parser prints it) to its 8 numbers, or null.
+function ipv6(host) {
+  if (!host.startsWith("[") || !host.endsWith("]")) return null;
+  const text = host.slice(1, -1);
+  const [head, tail, extra] = text.split("::");
+  if (extra !== undefined) return null;
+  const parts = (x) => (x ? x.split(":").map((h) => parseInt(h, 16)) : []);
+  const a = parts(head);
+  const b = parts(tail);
+  const fill = tail === undefined ? 0 : 8 - a.length - b.length;
+  const all = tail === undefined ? a : [...a, ...Array(fill).fill(0), ...b];
+  return all.length === 8 && all.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? all : null;
+}
+
+// A host that points inside the machine or its network: opening it from a ledger entry would
+// make xdg-open (and the browser) hit local services for whoever wrote the entry.
+function internalHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const v4 = ipv4(host);
+  if (v4) return privateV4(v4);
+  const v6 = ipv6(host);
+  if (v6) {
+    if (v6.every((n) => n === 0) || (v6.slice(0, 7).every((n) => n === 0) && v6[7] === 1)) return true; // :: and ::1
+    if ((v6[0] & 0xfe00) === 0xfc00 || (v6[0] & 0xffc0) === 0xfe80) return true; // fc00::/7, fe80::/10
+    if (v6.slice(0, 5).every((n) => n === 0) && (v6[5] === 0 || v6[5] === 0xffff)) { // embedded IPv4
+      return privateV4([v6[6] >> 8, v6[6] & 255]);
+    }
+  }
+  return false;
+}
+
 function safeUrl(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL || value.startsWith("-") || /[\s\u0000-\u001f]/.test(value)) return null;
   try {
     const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && url.host ? { href: value, host: url.host } : null;
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.host || internalHost(url.hostname)) return null;
+    // The parsed form is what gets opened, never the raw string.
+    return { href: url.href, host: url.host };
   } catch {
     return null;
   }
