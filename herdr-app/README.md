@@ -59,6 +59,11 @@ card back to its task file with the same `[ledger.writeback]` section of
 - The sidebar has no per-project notification setting.
 - Cards refresh every 5 s (herdr-core has no doc events through `exec`).
 
+The panel's chips (Needs me, Working, Review, Blocked, Done, All) filter by the card's status; the
+mapping is one table at the top of `mods/sheprd-panel/main.js`, Done is hidden under All, and the
+choice is remembered. Evidence images are shown as thumbnails drawn from a `data:` URI; where the
+app's `image()` does not accept one, the label shows instead.
+
 Answers typed in the chat: when you send a message while a terminal has open questions, the hook
 reminds the agent of them (and the `cards answered` command), and at the end of its turn the
 questions still open are marked "replied in chat" and shown dim. The hook cannot tell whether your

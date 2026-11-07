@@ -5,7 +5,7 @@
 // sheprd repo). Answers are staged per question, then sent as one line with
 // `cards send`, which types them into the agent with `hc send`.
 
-import { View, div } from "gpui-kit";
+import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, machines, focused, run, theme, shared, setShared, exec, hc } from "herdr";
 
@@ -67,9 +67,114 @@ function machineTag(name) {
 
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
 
+// url:begin (a test runs this block in node)
+// Only an http(s) URL is ever handed to xdg-open: the ledger can be written by any process, and an
+// agent on another machine could plant file:, ssh: or a custom handler under a friendly label.
+const MAX_URL = 2048;
+
+// The IPv4 address (as four numbers) behind an already WHATWG-normalised host, else null.
+function ipv4(host) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+// Loopback, private, link-local and shared (CGNAT, e.g. a tailnet) IPv4 ranges.
+function privateV4([a, b]) {
+  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+// `[::1]`-style host (as the URL parser prints it) to its 8 numbers, or null.
+function ipv6(host) {
+  if (!host.startsWith("[") || !host.endsWith("]")) return null;
+  const text = host.slice(1, -1);
+  const [head, tail, extra] = text.split("::");
+  if (extra !== undefined) return null;
+  const parts = (x) => (x ? x.split(":").map((h) => parseInt(h, 16)) : []);
+  const a = parts(head);
+  const b = parts(tail);
+  const fill = tail === undefined ? 0 : 8 - a.length - b.length;
+  const all = tail === undefined ? a : [...a, ...Array(fill).fill(0), ...b];
+  return all.length === 8 && all.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? all : null;
+}
+
+// A host that points inside the machine or its network: opening it from a ledger entry would
+// make xdg-open (and the browser) hit local services for whoever wrote the entry.
+function internalHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const v4 = ipv4(host);
+  if (v4) return privateV4(v4);
+  const v6 = ipv6(host);
+  if (v6) {
+    if (v6.every((n) => n === 0) || (v6.slice(0, 7).every((n) => n === 0) && v6[7] === 1)) return true; // :: and ::1
+    if ((v6[0] & 0xfe00) === 0xfc00 || (v6[0] & 0xffc0) === 0xfe80) return true; // fc00::/7, fe80::/10
+    if (v6.slice(0, 5).every((n) => n === 0) && (v6[5] === 0 || v6[5] === 0xffff)) { // embedded IPv4
+      return privateV4([v6[6] >> 8, v6[6] & 255]);
+    }
+  }
+  return false;
+}
+
+function safeUrl(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL || value.startsWith("-") || /[\s\u0000-\u001f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.host || internalHost(url.hostname)) return null;
+    // The parsed form is what gets opened, never the raw string.
+    return { href: url.href, host: url.host };
+  } catch {
+    return null;
+  }
+}
+// url:end
+
+// filter:begin (a test runs this block in node)
+// One table from a card's status to its filter chip. A status not listed shows under "All" only.
+const STATUS_BUCKET = {
+  "in-progress": "working", working: "working", running: "working",
+  review: "review", "pr-open": "review", verify: "review",
+  blocked: "blocked", stopped: "blocked",
+  done: "done", "to-deploy": "done",
+};
+const FILTERS = [["needs", "Needs me"], ["working", "Working"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done"], ["all", "All"]];
+
+function bucketOf(card) {
+  if (card.done) return "done";
+  return STATUS_BUCKET[String(card.status ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-")] ?? null;
+}
+
+// "needs": any open question. "all": everything not done (a done card with an open question stays,
+// since that needs the person). The others: that bucket.
+function cardMatches(card, filter) {
+  const needs = card.questions.some(live);
+  const bucket = bucketOf(card);
+  if (filter === "needs") return needs;
+  if (filter === "all") return bucket !== "done" || needs;
+  return bucket === filter;
+}
+
+const filterCounts = (cards) => Object.fromEntries(FILTERS.map(([key]) => [key, cards.filter((c) => cardMatches(c, key)).length]));
+// filter:end
+
+const EVIDENCE_PER_ROW = 3;
+const THUMB = 80;
+const FULL = 240;
+const THUMBS_KEPT = 40;
+const FETCHES_PER_RENDER = 4;
+const IMAGES_SHOWN = 12;
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+const stored = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
+const store = (key, value) => { try { localStorage.setItem(key, value); } catch { /* private mode: not remembered */ } };
+
 export default class SheprdPanel extends View {
   init(_props, cx) {
     this.mode = localStorage.getItem("mode") ?? "agent";
+    const saved = stored("filter", "all");
+    this.filter = FILTERS.some(([key]) => key === saved) ? saved : "all";
+    this.thumbs = new Map(); // evidence image -> data URI, "" (could not load) or null (loading)
+    this.fullImage = null;
     this.output = "";
     this.outputFor = null;
     this.openDecisions = new Set();
@@ -257,6 +362,7 @@ export default class SheprdPanel extends View {
         .when(Boolean(card.status), (el) => el.child(div().flex_none().px(6).h(18).rounded(5).bg(t.raised).text_size(10.5).text_color(t.muted).flex().items_center().child(card.status))))
       .when(Boolean(card.title), (el) => el.child(div().text_size(13).font_semibold().child(card.title)))
       .when(Boolean(card.summary), (el) => el.child(div().text_size(12.5).text_color(t.foreground).child(card.summary)))
+      .when((card.evidence ?? []).length > 0, (el) => el.child(this.evidence(t, address, card)))
       .when(decisions.length > 0, (el) => el
         .child(label("Decisions"))
         .children(shownDecisions.map((d, i) => h_flex().id(`d-${key}-${i}`).gap(6).items_start().text_size(11.5).text_color(t.muted)
@@ -268,9 +374,77 @@ export default class SheprdPanel extends View {
       .when(qs.length > 0, (el) => el.child(label(qs.length === 1 ? "Question" : `${qs.length} questions`)))
       .children(qs.map((q) => this.question(t, address, card, q)))
       .children(replied.map((q) => this.replied(t, address, card, q)))
-      .when(Boolean(card.link), (el) => el.child(div().id(`ln-${key}`).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
-        .on_click(() => exec("xdg-open", [card.link]).catch(() => {})).child(card.link)))
+      .when(Boolean(card.link), (el) => el.child(this.linkRow(t, `ln-${key}`, card.link, "")))
       .when(Boolean(card.writeback), (el) => el.child(div().text_size(10.5).text_color(card.writeback.ok ? t.dim : t.blocked).child(`${card.writeback.ok ? "✓" : "!"} ${card.writeback.message}`)));
+  }
+
+  // A link: clickable only when it is a plain http(s) URL, with its host next to the label so a
+  // misleading label shows; anything else is dim text that does nothing.
+  linkRow(t, id, url, label) {
+    const safe = safeUrl(url);
+    const text = label ? `${label} · ${safe ? safe.host : String(url).slice(0, 60)}` : String(url).slice(0, 200);
+    if (!safe) return div().id(id).text_size(11.5).text_color(t.dim).truncate().child(`${text} (not opened: not an http(s) link)`);
+    return div().id(id).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
+      .on_click(() => exec("xdg-open", [safe.href]).catch(() => {})).child(text);
+  }
+
+  // An evidence image's data URI, fetched once over the same `cards` channel as the cards
+  // (`cards evidence-image`, base64): "" when it is gone or unreadable, null while loading.
+  thumb(cx, address, card, item, n) {
+    const key = `${address}/${card.id}/${item.file}`;
+    if (this.thumbs.has(key)) return this.thumbs.get(key);
+    // At most FETCHES_PER_RENDER new fetches per render, and a failed one is remembered (""), so a
+    // ledger full of images cannot keep running big execs on every redraw.
+    if (this.fetchesLeft <= 0) return null;
+    this.fetchesLeft -= 1;
+    this.thumbs.set(key, null);
+    while (this.thumbs.size > THUMBS_KEPT) this.thumbs.delete(this.thumbs.keys().next().value);
+    cx.spawn(async (cx) => {
+      let uri = "";
+      try {
+        const r = await runCards(["evidence-image", card.id, String(n), "--terminal", split(address).terminal], split(address).on);
+        const b64 = r && r.code === 0 ? r.stdout.trim() : "";
+        if (b64 && b64.length <= 3 * 1024 * 1024 && BASE64.test(b64) && /^image\/[a-z]+$/.test(item.mime ?? "")) uri = `data:${item.mime};base64,${b64}`;
+      } catch {
+        uri = "";
+      }
+      if (this.thumbs.has(key)) this.thumbs.set(key, uri);
+      cx.notify();
+    });
+    return null;
+  }
+
+  // What the agent verified: screenshots as thumbnails (click: full width of the panel, click again
+  // to fold), test runs as green or red chips, links as short labels.
+  // `this.cx` is the context of the render in progress (a thumbnail loads in the background).
+  evidence(t, address, card) {
+    const cx = this.cx;
+    const items = (card.evidence ?? []).map((item, i) => ({ item, n: i + 1 }));
+    const images = items.filter(({ item }) => item.kind === "image").slice(-IMAGES_SHOWN);
+    const rows = [];
+    for (let i = 0; i < images.length; i += EVIDENCE_PER_ROW) rows.push(images.slice(i, i + EVIDENCE_PER_ROW));
+    const frame = (el) => el.rounded(6).border_1().border_color(t.border).bg(t.raised).flex().items_center().justify_center();
+    return v_flex().gap(4)
+      .children(rows.map((row, r) => h_flex().gap(6).items_start().children(row.map(({ item, n }) => {
+        const key = `${address}/${card.id}/${item.file}`;
+        const uri = this.thumb(cx, address, card, item, n);
+        const big = this.fullImage === key;
+        const size = big ? FULL : THUMB;
+        return div().id(`ev-${key}`).flex_none().cursor_pointer()
+          .on_click((_e, cx) => { this.fullImage = big ? null : key; cx.notify(); })
+          .child(uri
+            ? image(uri).size(size).rounded(6)
+            : frame(div().size(size).p(4)).child(div().text_size(10.5).text_color(t.dim).truncate().child(item.label || "image")));
+      }))))
+      .children(items.filter(({ item }) => item.kind === "test").map(({ item, n }) => {
+        const ok = item.failed === 0;
+        const bad = item.failed > 0;
+        const color = ok ? t.done : bad ? t.blocked : t.muted;
+        return h_flex().id(`et-${address}/${card.id}/${n}`).px(6).h(20).rounded(5).items_center().text_size(11)
+          .bg(color + "1f").text_color(color).border_1().border_color(color + "55").child(item.text);
+      }))
+      .children(items.filter(({ item }) => item.kind === "link").map(({ item, n }) =>
+        this.linkRow(t, `el-${address}/${card.id}/${n}`, item.url, item.label)));
   }
 
   // One agent's cards, with its Send button when answers are staged.
@@ -289,6 +463,8 @@ export default class SheprdPanel extends View {
   }
 
   render(cx) {
+    this.cx = cx;
+    this.fetchesLeft = FETCHES_PER_RENDER;
     const t = theme();
     const byAddress = cardsByAddress();
     const visible = (cards) => cards.filter((c) => !c.dismissed).sort((x, y) => (x.done - y.done) || y.updated_at.localeCompare(x.updated_at));
@@ -299,26 +475,37 @@ export default class SheprdPanel extends View {
       .child(this.button(t, "mode-agent", "This agent", (cx) => { this.mode = "agent"; localStorage.setItem("mode", "agent"); this.readOutput(cx); cx.notify(); }, { active: this.mode === "agent" }))
       .child(this.button(t, "mode-all", "All cards", (cx) => { this.mode = "all"; localStorage.setItem("mode", "all"); cx.notify(); }, { active: this.mode === "all" }));
 
+    // The chips count the cards of the current view (this agent's, or everyone's).
+    const scope = this.mode === "all" ? [...byAddress.values()].flatMap(visible) : (address ? visible(byAddress.get(address) ?? []) : []);
+    const counts = filterCounts(scope);
+    const chip = ([key, name]) => this.button(t, `f-${key}`, `${name} ${counts[key]}`,
+      (cx) => { this.filter = key; store("filter", key); cx.notify(); }, { active: this.filter === key });
+    const chips = v_flex().px(10).pb(6).gap(4).flex_none()
+      .child(h_flex().gap(4).children(FILTERS.slice(0, 3).map(chip)))
+      .child(h_flex().gap(4).children(FILTERS.slice(3).map(chip)));
+    const none = (text) => div().text_size(12).text_color(t.dim).child(text);
+
     let body;
     if (this.mode === "all") {
       const entries = [...byAddress.entries()]
-        .map(([addr, cards]) => [addr, visible(cards).filter((c) => !c.done || c.questions.some(live))])
+        .map(([addr, cards]) => [addr, visible(cards).filter((c) => cardMatches(c, this.filter))])
         .filter(([, cards]) => cards.length > 0)
         .sort(([, x], [, y]) => y.flatMap((c) => c.questions.filter(live)).length - x.flatMap((c) => c.questions.filter(live)).length);
       body = entries.length === 0
-        ? div().text_size(12).text_color(t.dim).child(`No open cards. Agents add them with \`cards update\`.${this.failures()}`)
+        ? none(scope.length ? "No cards match this filter." : `No open cards. Agents add them with \`cards update\`.${this.failures()}`)
         : v_flex().gap(14).children(entries.map(([addr, cards]) => this.agentBlock(t, addr, cards, true)))
           .when(this.failures() !== "", (el) => el.child(div().text_size(11).text_color(t.dim).child(this.failures().trim())));
     } else if (!address) {
       body = div().text_size(12).text_color(t.dim).child("Focus an agent to see its cards and output.");
     } else {
-      const cards = visible(byAddress.get(address) ?? []);
+      const all = visible(byAddress.get(address) ?? []);
+      const cards = all.filter((c) => cardMatches(c, this.filter));
       const lines = this.outputFor === address && this.output ? this.output.split("\n") : [];
       body = v_flex().gap(10)
         .child(h_flex().gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(agent?.space_name || address))
           .child(div().flex_none().text_size(10.5).text_color(t.dim).child(split(address).on ? machineTag(split(address).on) : "here")))
-        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child(this.noCards(address)))
+        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child(all.length ? "No cards match this filter." : this.noCards(address)))
         .child(div().id("out-toggle").pt(6).text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => {
             this.showOutput = !this.showOutput;
@@ -333,6 +520,7 @@ export default class SheprdPanel extends View {
 
     return v_flex().size_full().min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
       .child(tabs)
+      .child(chips)
       .when(Boolean(this.note), (el) => el.child(div().id("note").mx(10).mb(4).p(6).rounded(6).bg(t.blocked + "1f").text_size(11.5).text_color(t.blocked)
         .cursor_pointer().on_click((_e, cx) => { this.note = null; cx.notify(); }).child(this.note)))
       .child(v_flex().id("panel-body").flex_1().min_h(0).px(10).pb(10).overflow_y_scrollbar().child(body));

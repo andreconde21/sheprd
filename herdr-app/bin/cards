@@ -17,6 +17,8 @@ writing at once never lose an update.
   cards done SHE-12 --summary "Merged as #41; live on dev"
   cards answers [--peek]     answers the user sent you (marks them read)
   cards list                 your cards
+  cards evidence SHE-12 --image shot.png [--label L] | --test "suite: 37/0" | --link URL [--label L] | --clear
+  cards evidence-image <ID> <N>    an image's bytes as base64 (for the app)
 
 For the app and Conductore (not agents):
   cards json                         the whole document
@@ -31,12 +33,17 @@ import argparse
 import datetime as dt
 import json
 import os
+import base64
+import hashlib
 import re
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlparse
 
 DOC = os.environ.get("CARDS_DOC", "sheprd-cards")
 VIEW_DOC = os.environ.get("CARDS_VIEW_DOC", "sheprd-view")
@@ -503,6 +510,238 @@ def cmd_list(args):
                 print(f"    Q{q['n']} ({q['state']}): {q['text']}")
 
 
+# ---- evidence ---------------------------------------------------------------
+# What an agent verified, shown on its card: screenshots (copied into a private folder: the
+# document has a 1 MiB cap), test runs ("suite: passed/failed") and links.
+
+EVIDENCE_KEEP = 12
+IMAGE_MAX = 2 * 1024 * 1024
+IMAGE_PIXELS_MAX = 16_000_000  # a small file can still decode to gigabytes: budget by area, not side
+IMAGE_SIDE_MAX = 16383  # the largest side webp can even express
+GIF_FRAMES_MAX = 500
+GIF_TOTAL_FACTOR = 4  # all frames together may hold this many budgets of pixels
+FILE_NAME = re.compile(r"^[A-Za-z0-9#_][A-Za-z0-9#._-]{0,99}$")  # no leading dot: not ".", ".." or a hidden temp
+IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png", "image/png"), (b"\xff\xd8\xff", "jpg", "image/jpeg"),
+               (b"GIF87a", "gif", "image/gif"), (b"GIF89a", "gif", "image/gif"))
+
+
+def evidence_dir():
+    base = os.environ.get("SHEPRD_EVIDENCE_DIR")
+    if base:
+        return base
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "sheprd", "evidence")
+
+
+def read_regular(path, limit):
+    """A regular file's bytes, at most `limit`. A FIFO, device or directory (or a link to one) is
+    refused without blocking (O_NONBLOCK, then fstat), an oversized file is refused unread."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0))
+    except OSError as err:
+        fail(f"cannot read {os.path.basename(path)}: {err.strerror}")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{os.path.basename(path)} is not a regular file")
+        if info.st_size > limit:
+            fail(f"{os.path.basename(path)} is larger than {limit // 1024 // 1024} MB")
+        data = b""
+        while len(data) <= limit:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > limit:
+            fail(f"{os.path.basename(path)} is larger than {limit // 1024 // 1024} MB")
+        return data
+    except OSError as err:
+        fail(f"cannot read {os.path.basename(path)}: {err.strerror}")
+    finally:
+        os.close(fd)
+
+
+def image_type(data):
+    """(extension, mime) from the first bytes: png, jpeg, gif or webp; None for anything else."""
+    for magic, ext, mime in IMAGE_TYPES:
+        if data.startswith(magic):
+            return ext, mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp", "image/webp"
+    return None
+
+
+def image_size(data):
+    """(width, height) from the image header (png, gif, jpeg, webp), or None when it cannot be read."""
+    try:
+        if data.startswith(b"\x89PNG") and data[12:16] == b"IHDR":
+            return struct.unpack(">II", data[16:24])
+        if data[:3] == b"GIF":
+            return struct.unpack("<HH", data[6:10])
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            kind = data[12:16]
+            if kind == b"VP8X":
+                return (1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little"))
+            if kind == b"VP8L" and data[20] == 0x2F:
+                bits = int.from_bytes(data[21:25], "little")
+                return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+            if kind == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
+                return (struct.unpack("<H", data[26:28])[0] & 0x3FFF, struct.unpack("<H", data[28:30])[0] & 0x3FFF)
+            return None
+        if data[:3] == b"\xff\xd8\xff":
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker == 0xFF:
+                    i += 1
+                elif marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    height, width = struct.unpack(">HH", data[i + 5:i + 9])
+                    return (width, height)
+                else:
+                    i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    except (struct.error, IndexError):
+        pass
+    return None
+
+
+def gif_frames(data):
+    """The (width, height) of every frame of a GIF, read from its image descriptors, or None when
+    the block structure cannot be followed."""
+    try:
+        i = 13
+        if data[10] & 0x80:
+            i += 3 * (2 << (data[10] & 7))
+        frames = []
+        while i < len(data):
+            block = data[i]
+            if block == 0x3B:
+                return frames
+            if block == 0x2C:
+                _, _, width, height = struct.unpack("<HHHH", data[i + 1:i + 9])
+                frames.append((width, height))
+                if len(frames) > GIF_FRAMES_MAX:
+                    return None
+                flags = data[i + 9]
+                i += 10 + (3 * (2 << (flags & 7)) if flags & 0x80 else 0) + 1  # + LZW minimum code size
+            elif block == 0x21:
+                i += 2
+            else:
+                return None
+            while data[i]:  # data sub-blocks
+                i += 1 + data[i]
+            i += 1
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
+def check_image(data):
+    """(extension, mime) of an acceptable image, else fails: type by magic bytes, size from the header."""
+    kind = image_type(data)
+    if not kind:
+        fail("only png, jpeg, gif and webp images are accepted")
+    size = image_size(data)
+    limit = f"the image must be at most {IMAGE_PIXELS_MAX // 1_000_000} megapixels (and its size readable)"
+    if not size or not 0 < size[0] <= IMAGE_SIDE_MAX or not 0 < size[1] <= IMAGE_SIDE_MAX or size[0] * size[1] > IMAGE_PIXELS_MAX:
+        fail(limit)
+    if kind[0] == "gif":
+        frames = gif_frames(data)
+        if (frames is None or any(not 0 < w * h <= IMAGE_PIXELS_MAX for w, h in frames)
+                or sum(w * h for w, h in frames) > GIF_TOTAL_FACTOR * IMAGE_PIXELS_MAX):
+            fail(limit + ", and so must every frame of a gif")
+    return kind
+
+
+def private_dir(folder):
+    """The evidence folder: created 0700, or an existing one of ours tightened to 0700. A symlink,
+    a non-directory or someone else's folder is refused."""
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    info = os.lstat(folder)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        fail("the evidence folder is not a directory of yours")
+    if info.st_mode & 0o077:
+        os.chmod(folder, 0o700)
+
+
+def cmd_evidence(args):
+    terminal = my_terminal(args)
+    given = [x for x in (args.image, args.test, args.link) if x is not None]
+    if len(given) + bool(args.clear) != 1:
+        fail("give exactly one of --image, --test, --link or --clear")
+    label = clip(args.label, 40) if args.label else ""
+    item = None
+    if args.image is not None:
+        data = read_regular(args.image, IMAGE_MAX)
+        kind = check_image(data)
+        name = f"{terminal}-{args.id}-{hashlib.sha256(data).hexdigest()[:16]}.{kind[0]}"
+        if not FILE_NAME.match(name):
+            fail("this card id cannot name a file")
+        folder = evidence_dir()
+        private_dir(folder)
+        tmp = os.path.join(folder, f".{name}.{os.getpid()}.tmp")
+        try:
+            os.unlink(tmp)  # a stale one of ours, or a planted link: never written through
+        except OSError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, os.path.join(folder, name))
+        item = {"kind": "image", "file": name, "mime": kind[1], "label": label}
+    elif args.test is not None:
+        text = clip(args.test, 120)
+        if not text:
+            fail("--test needs a text like \"suite: 37/0\" (passed/failed)")
+        match = re.search(r"(\d+)\s*/\s*(\d+)\s*$", text)
+        item = {"kind": "test", "text": text, "label": label,
+                "passed": int(match.group(1)) if match else None, "failed": int(match.group(2)) if match else None}
+    elif args.link is not None:
+        url = args.link.strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or len(url) > 500 or any(c.isspace() or not c.isprintable() for c in url):
+            fail("--link needs one http(s) URL")
+        item = {"kind": "link", "url": url, "label": label or parsed.netloc[:40]}
+
+    def mutate(doc):
+        card = get_card(doc, terminal, args.id, create=True)
+        evidence = card.setdefault("evidence", [])
+        old = list(evidence)
+        if item is None:
+            evidence.clear()
+        else:
+            evidence.append({**item, "at": now()})
+            del evidence[:-EVIDENCE_KEEP]
+        card["updated_at"] = now()
+        kept = {e.get("file") for e in evidence}
+        return [e["file"] for e in old if e.get("file") and e["file"] not in kept]
+
+    for name in change(mutate):
+        if FILE_NAME.match(name):
+            try:
+                os.unlink(os.path.join(evidence_dir(), name))
+            except OSError:
+                pass
+    print(f"{args.id} evidence " + ("cleared" if item is None else f"added ({item['kind']})"))
+
+
+def cmd_evidence_image(args):
+    terminal = my_terminal(args)
+    card = read_doc()["cards"].get(card_key(terminal, args.id))
+    evidence = (card or {}).get("evidence") or []
+    if not card or not 1 <= args.n <= len(evidence) or evidence[args.n - 1].get("kind") != "image":
+        fail(f"{args.id} has no image evidence #{args.n}")
+    name = str(evidence[args.n - 1].get("file") or "")
+    if not FILE_NAME.match(name):
+        fail("bad evidence file name")
+    data = read_regular(os.path.join(evidence_dir(), name), IMAGE_MAX)
+    check_image(data)
+    print(base64.b64encode(data).decode())
+
+
 # ---- app commands ---------------------------------------------------------
 
 
@@ -853,6 +1092,20 @@ def main():
     p = agent("list", help="your cards")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_list)
+
+    p = agent("evidence", help="attach what you verified to a card: a screenshot, a test run or a link")
+    p.add_argument("id")
+    p.add_argument("--image", help="a png, jpeg, gif or webp file (max 2 MB)")
+    p.add_argument("--test", help='a test run ending in passed/failed, e.g. "unit: 37/0"')
+    p.add_argument("--link", help="an http(s) URL")
+    p.add_argument("--label", help="a short name for the image or link")
+    p.add_argument("--clear", action="store_true", help="remove all of the card's evidence")
+    p.set_defaults(func=cmd_evidence)
+
+    p = agent("evidence-image", help="an evidence image as base64 (for apps)")
+    p.add_argument("id")
+    p.add_argument("n", type=int, help="its number on the card, from 1")
+    p.set_defaults(func=cmd_evidence_image)
 
     p = sub.add_parser("json", help="the whole document (for apps)")
     p.set_defaults(func=cmd_json)
