@@ -58,6 +58,8 @@ sheprd card list             # your cards as the user sees them
 - When the user answers a question in the conversation instead of the panel, close it so it stops
   showing as open: `cards answered SHE-12 --question 1 --answer "Stripe"` (or `--all` for the
   card). This is a `cards` command (Herdr app); under sheprd answer it in the panel or dismiss it.
+  The app's hook reminds you of the open questions when the user writes; one you leave open is
+  shown as "replied in chat" after your turn, which is a fallback: close it yourself.
 
 ## Rules
 - One line per field, no control characters. Card IDs: `A-Z a-z 0-9 # . _ -`, max 32 chars.

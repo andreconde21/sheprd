@@ -58,3 +58,10 @@ card back to its task file with the same `[ledger.writeback]` section of
   `on_card_done` hook is not ported.
 - The sidebar has no per-project notification setting.
 - Cards refresh every 5 s (herdr-core has no doc events through `exec`).
+
+Answers typed in the chat: when you send a message while a terminal has open questions, the hook
+reminds the agent of them (and the `cards answered` command), and at the end of its turn the
+questions still open are marked "replied in chat" and shown dim. The hook cannot tell whether your
+message was about them, so an unrelated message dims them too; use Reopen on the question to bring
+it back, or Dismiss to drop it. The hook gives `cards` 1.5 seconds and, after a timeout, skips it
+for 5 minutes.
