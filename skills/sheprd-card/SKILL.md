@@ -9,12 +9,18 @@ The user triages your work from the CARDS panel (in the Herdr app: the Work pane
 your transcript. Write to it explicitly; anything you don't write there they will not see.
 Commands target your own terminal.
 
-Which command:
-- **Herdr app** (`$HC_TERMINAL_ID` is set): `cards …`, same arguments as below
-  (`cards update SHE-12 --status dev`, `cards ask …`, `cards answers`).
-- **sheprd** (`$HERDR_PANE_ID` is set): `sheprd card …` (or `herdr card …`, or
-  `"$HERDR_BIN_PATH" card …` when `sheprd` is not on PATH).
-- Neither set: no ledger; skip it.
+Which command (check the variable, do not guess):
+
+| Where you run | Variable set there | Command |
+|---|---|---|
+| Herdr app (herdr-core terminal) | `$HC_TERMINAL_ID` | `cards …` (it targets `$HC_TERMINAL_ID` by default; `--terminal` overrides) |
+| old sheprd | `$HERDR_PANE_ID` | `sheprd card …` (or `herdr card …`, or `"$HERDR_BIN_PATH" card …` when `sheprd` is not on PATH) |
+| neither | none | no ledger; skip it |
+
+If both are set, prefer `cards`. The examples below use `sheprd card`; under the Herdr app
+replace `sheprd card` with `cards`: same subcommands and arguments (`update`, `ask`, `decide`,
+`done`, `answers`, `list`). `cards` also has app-only subcommands (`stage`, `send`, `dismiss`, `view`,
+`view-set`, `json`) that an agent does not use; `sheprd card` has `remove`.
 
 ```bash
 sheprd card update SHE-12 --title "Stripe checkout" --status dev --summary "Checkout wired, webhooks next"
@@ -36,6 +42,8 @@ sheprd card list             # your cards as the user sees them
 - **Finished** (PR open and handed over, or merged): `done --summary`. Done writes the summary and
   decisions back to the tracker when the user configured it; don't edit the card file yourself.
   A decision or summary added after `done` is written back only when you run `done` again.
+- The ledger status (`--status`) is a label for the panel. It does not move the card in your
+  tracker; do that with the tracker's own tools, inside its rules.
 - Orchestrating subagents: you keep the ledger for the cards you hand out; subagents report to
   you, you write it.
 
@@ -51,4 +59,4 @@ sheprd card list             # your cards as the user sees them
 ## Rules
 - One line per field, no control characters. Card IDs: `A-Z a-z 0-9 # . _ -`, max 32 chars.
 - Never put secrets in the ledger.
-- If `sheprd` is missing or the server has no card ledger, carry on and say so once in the chat.
+- If `cards`/`sheprd` is missing or the server has no card ledger, carry on and say so once in the chat.
