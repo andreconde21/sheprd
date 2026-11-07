@@ -43,7 +43,10 @@ class CardLedgerTests(unittest.TestCase):
 
     def fake_herdr(self, body):
         script = self.root / "herdr"
-        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n{body}\n')
+        # Strict like herdr's own parser: it knows no `--name=value` form.
+        strict = ('for a in "$@"; do case "$a" in --title=*|--status=*|--inferred-question=*) '
+                  'echo "unknown option for `card update`: $a" >&2; exit 2;; esac; done')
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n{strict}\n{body}\n')
         script.chmod(0o755)
         os.environ["HERDR_BIN_PATH"] = str(script)
 
@@ -206,6 +209,20 @@ class HerdrAppLedgerTests(unittest.TestCase):
         os.environ["HERDR_BIN_PATH"] = str(script)
         hook.send_ledger("s1", "w1:p1", {"SHE-1": ["--title", "one"]}, None)
         self.assertEqual(self.calls(), ["card update SHE-1 --inferred --pane w1:p1 --title one"])
+
+    def test_the_pane_command_uses_separate_arguments_even_for_dashed_text(self):
+        script = self.root / "herdr"
+        script.write_text('#!/bin/sh\nfor a in "$@"; do case "$a" in --title=*|--status=*|--inferred-question=*) '
+                          'echo "unknown option for `card update`: $a" >&2; exit 2;; esac; done\n'
+                          f'printf "%s|" "$@" >> "{self.log}"; echo >> "{self.log}"\n')
+        script.chmod(0o755)
+        os.environ["HERDR_BIN_PATH"] = str(script)
+        updates = hook.task_updates([{"key": "SHE-1", "label": "--help me", "stages": [{"state": "r"}]}])
+        hook.send_ledger("s1", "w1:p1", updates, ["--force it?"])
+        self.assertEqual(self.calls()[0], "card|update|SHE-1|--inferred|--pane|w1:p1|--title|--help me|--status|running|")
+        self.assertIn("--inferred-question|--force it?|", self.calls()[1])
+        self.assertIn("SHE-1", hook.load_ledger_state("s1")["sent"])  # accepted, so not retried every turn
+        self.assertNotIn("unsupported", hook.load_ledger_state("s1"))
 
     def test_texts_starting_with_dashes_are_sent_in_the_equals_form(self):
         updates = hook.task_updates([{"key": "SHE-1", "label": "--help me", "stages": [{"state": "r"}]}])

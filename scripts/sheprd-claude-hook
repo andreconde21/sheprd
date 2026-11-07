@@ -508,17 +508,34 @@ def ledger_plan(state, tasks, asked, question_item):
 TERMINAL_PREFIX = "terminal:"
 
 
+VALUE_FLAGS = ("--title", "--status", "--inferred-question")
+
+
+def separate_values(args):
+    """`--name=value` as separate arguments, for herdr, whose parser takes the next argument
+    as the value and knows no `=` form."""
+    out = []
+    for arg in args:
+        flag, equals, value = arg.partition("=")
+        if equals and flag in VALUE_FLAGS:
+            out += [flag, value]
+        else:
+            out.append(arg)
+    return out
+
+
 def ledger_command(target, item, args):
     """The command that writes one inferred card update. `target` is a pane id (sheprd:
-    `herdr card update --pane`) or `terminal:<id>` (the Herdr app: `cards update --terminal`).
-    None when the tool for that target is not installed."""
+    `herdr card update --pane`, values as separate arguments) or `terminal:<id>` (the Herdr app:
+    `cards update --terminal`, argparse: the `--name=value` form keeps a text starting with
+    dashes from being read as an option). None when the tool for that target is not installed."""
     if target.startswith(TERMINAL_PREFIX):
         cards = os.environ.get("SHEPRD_CARDS_BIN") or shutil.which("cards")
         if not cards:
             return None
         return [cards, "update", item, "--inferred", "--terminal", target[len(TERMINAL_PREFIX):], *args]
     herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    return [herdr, "card", "update", item, "--inferred", "--pane", target, *args]
+    return [herdr, "card", "update", item, "--inferred", "--pane", target, *separate_values(args)]
 
 
 def send_ledger(key, pane, tasks, asked, question_item=None, seq=None):
