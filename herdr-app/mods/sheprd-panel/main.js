@@ -67,6 +67,21 @@ function machineTag(name) {
 
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
 
+// url:begin (a test runs this block in node)
+// Only an http(s) URL is ever handed to xdg-open: the ledger can be written by any process, and an
+// agent on another machine could plant file:, ssh: or a custom handler under a friendly label.
+const MAX_URL = 2048;
+function safeUrl(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL || value.startsWith("-") || /[\s\u0000-\u001f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.host ? { href: value, host: url.host } : null;
+  } catch {
+    return null;
+  }
+}
+// url:end
+
 // filter:begin (a test runs this block in node)
 // One table from a card's status to its filter chip. A status not listed shows under "All" only.
 const STATUS_BUCKET = {
@@ -99,6 +114,8 @@ const EVIDENCE_PER_ROW = 3;
 const THUMB = 80;
 const FULL = 240;
 const THUMBS_KEPT = 40;
+const FETCHES_PER_RENDER = 4;
+const IMAGES_SHOWN = 12;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 const stored = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
@@ -296,9 +313,18 @@ export default class SheprdPanel extends View {
           .child(allDecisions ? "Fewer" : `${decisions.length - DECISIONS_SHOWN} more`))))
       .when(qs.length > 0, (el) => el.child(label(qs.length === 1 ? "Question" : `${qs.length} questions`)))
       .children(qs.map((q) => this.question(t, address, card, q)))
-      .when(Boolean(card.link), (el) => el.child(div().id(`ln-${key}`).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
-        .on_click(() => exec("xdg-open", [card.link]).catch(() => {})).child(card.link)))
+      .when(Boolean(card.link), (el) => el.child(this.linkRow(t, `ln-${key}`, card.link, "")))
       .when(Boolean(card.writeback), (el) => el.child(div().text_size(10.5).text_color(card.writeback.ok ? t.dim : t.blocked).child(`${card.writeback.ok ? "✓" : "!"} ${card.writeback.message}`)));
+  }
+
+  // A link: clickable only when it is a plain http(s) URL, with its host next to the label so a
+  // misleading label shows; anything else is dim text that does nothing.
+  linkRow(t, id, url, label) {
+    const safe = safeUrl(url);
+    const text = label ? `${label} · ${safe ? safe.host : String(url).slice(0, 60)}` : String(url).slice(0, 200);
+    if (!safe) return div().id(id).text_size(11.5).text_color(t.dim).truncate().child(`${text} (not opened: not an http(s) link)`);
+    return div().id(id).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
+      .on_click(() => exec("xdg-open", [safe.href]).catch(() => {})).child(text);
   }
 
   // An evidence image's data URI, fetched once over the same `cards` channel as the cards
@@ -306,6 +332,10 @@ export default class SheprdPanel extends View {
   thumb(cx, address, card, item, n) {
     const key = `${address}/${card.id}/${item.file}`;
     if (this.thumbs.has(key)) return this.thumbs.get(key);
+    // At most FETCHES_PER_RENDER new fetches per render, and a failed one is remembered (""), so a
+    // ledger full of images cannot keep running big execs on every redraw.
+    if (this.fetchesLeft <= 0) return null;
+    this.fetchesLeft -= 1;
     this.thumbs.set(key, null);
     while (this.thumbs.size > THUMBS_KEPT) this.thumbs.delete(this.thumbs.keys().next().value);
     cx.spawn(async (cx) => {
@@ -329,7 +359,7 @@ export default class SheprdPanel extends View {
   evidence(t, address, card) {
     const cx = this.cx;
     const items = (card.evidence ?? []).map((item, i) => ({ item, n: i + 1 }));
-    const images = items.filter(({ item }) => item.kind === "image");
+    const images = items.filter(({ item }) => item.kind === "image").slice(-IMAGES_SHOWN);
     const rows = [];
     for (let i = 0; i < images.length; i += EVIDENCE_PER_ROW) rows.push(images.slice(i, i + EVIDENCE_PER_ROW));
     const frame = (el) => el.rounded(6).border_1().border_color(t.border).bg(t.raised).flex().items_center().justify_center();
@@ -353,8 +383,7 @@ export default class SheprdPanel extends View {
           .bg(color + "1f").text_color(color).border_1().border_color(color + "55").child(item.text);
       }))
       .children(items.filter(({ item }) => item.kind === "link").map(({ item, n }) =>
-        div().id(`el-${address}/${card.id}/${n}`).text_size(11.5).text_color(t.accent).truncate().cursor_pointer()
-          .on_click(() => exec("xdg-open", [item.url]).catch(() => {})).child(item.label || item.url)));
+        this.linkRow(t, `el-${address}/${card.id}/${n}`, item.url, item.label)));
   }
 
   // One agent's cards, with its Send button when answers are staged.
@@ -374,6 +403,7 @@ export default class SheprdPanel extends View {
 
   render(cx) {
     this.cx = cx;
+    this.fetchesLeft = FETCHES_PER_RENDER;
     const t = theme();
     const byAddress = cardsByAddress();
     const visible = (cards) => cards.filter((c) => !c.dismissed).sort((x, y) => (x.done - y.done) || y.updated_at.localeCompare(x.updated_at));

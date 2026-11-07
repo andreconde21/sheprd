@@ -354,8 +354,37 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(len(doc["inbox"]["t7"]), 5)
 
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
-WEBP = b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 8
+import struct
+
+
+def png(width=1, height=1):
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + b"\x08\x02\0\0\0" + b"\0" * 8
+
+
+def gif(width=1, height=1):
+    return b"GIF89a" + struct.pack("<HH", width, height) + b"\0" * 8
+
+
+def jpeg(width=1, height=1):
+    return (b"\xff\xd8\xff\xe0\x00\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0"
+            + b"\xff\xc0\x00\x11\x08" + struct.pack(">HH", height, width) + b"\x03" + b"\0" * 9)
+
+
+def webp_x(width=1, height=1):
+    return (b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0" + (width - 1).to_bytes(3, "little")
+            + (height - 1).to_bytes(3, "little"))
+
+
+def webp_l(width=1, height=1):
+    return b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f" + ((width - 1) | ((height - 1) << 14)).to_bytes(4, "little")
+
+
+def webp_lossy(width=1, height=1):
+    return (b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0\x9d\x01\x2a" + struct.pack("<HH", width, height))
+
+
+PNG = png()
+WEBP = webp_x()
 
 
 def evidence_args(**kw):
@@ -416,6 +445,49 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(self.items()[0]["mime"], "image/webp")
         for name, data in (("a.svg", b"<svg xmlns='x'/>"), ("a.png", b"not a png at all"), ("a.txt", b"")):
             self.refuses(cards.cmd_evidence, evidence_args(image=self.file(name, data)))
+
+    def test_image_sizes_are_read_from_every_format_and_capped(self):
+        for make in (png, gif, jpeg, webp_x, webp_l, webp_lossy):
+            self.assertEqual(cards.image_size(make(640, 480)), (640, 480), make.__name__)
+            self.assertEqual(cards.image_size(make(8000, 8000)), (8000, 8000), make.__name__)
+            self.add(image=self.file(f"ok-{make.__name__}", make(8000, 8000)))
+            for wide, tall in ((8001, 10), (10, 8001), (60000, 60000)):
+                if make is webp_lossy and max(wide, tall) > 16383:
+                    continue
+                self.refuses(cards.cmd_evidence, evidence_args(image=self.file("big", make(wide, tall))))
+
+    def test_an_image_whose_size_cannot_be_read_is_refused(self):
+        for data in (b"\x89PNG\r\n\x1a\n" + b"\0" * 4, b"\xff\xd8\xff\xe0\x00\x02", b"RIFF\0\0\0\0WEBPVP8Z" + b"\0" * 20):
+            self.refuses(cards.cmd_evidence, evidence_args(image=self.file("odd", data)))
+
+    def test_a_stored_file_swapped_for_an_oversized_image_is_not_served(self):
+        self.add(image=self.file("shot.png", PNG))
+        with open(os.path.join(self.store, self.items()[0]["file"]), "wb") as handle:
+            handle.write(png(20000, 20000))
+        self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=1))
+
+    def test_a_loose_evidence_folder_is_tightened_and_a_foreign_one_refused(self):
+        os.makedirs(self.store, mode=0o755)
+        os.chmod(self.store, 0o755)
+        self.add(image=self.file("shot.png", PNG))
+        self.assertEqual(os.stat(self.store).st_mode & 0o777, 0o700)
+        link = os.path.join(self.tmp.name, "linked")
+        os.symlink(self.store, link)
+        with unittest.mock.patch.dict(os.environ, {"SHEPRD_EVIDENCE_DIR": link}):
+            self.refuses(cards.cmd_evidence, evidence_args(image=self.file("shot2.png", png(2, 2))))
+
+    def test_a_planted_temp_link_is_never_written_through(self):
+        self.add(image=self.file("first.png", PNG))
+        target = os.path.join(self.tmp.name, "victim.txt")
+        with open(target, "w") as handle:
+            handle.write("keep")
+        data = png(3, 3)
+        name = f"t7-SHE-1-{__import__('hashlib').sha256(data).hexdigest()[:16]}.png"
+        os.symlink(target, os.path.join(self.store, f".{name}.{os.getpid()}.tmp"))
+        self.add(image=self.file("second.png", data))
+        with open(target) as handle:
+            self.assertEqual(handle.read(), "keep")
+        self.assertEqual(self.items()[-1]["file"], name)
 
     def test_only_regular_files_under_the_size_cap(self):
         fifo = os.path.join(self.tmp.name, "fifo.png")
@@ -555,6 +627,34 @@ class PanelFilterTests(unittest.TestCase):
           console.log(JSON.stringify(filterCounts(cards)));
         ''')
         self.assertEqual(out, {"needs": 2, "working": 1, "review": 1, "blocked": 0, "done": 2, "all": 4})
+
+    def run_url(self, urls):
+        with open(PANEL) as handle:
+            source = handle.read()
+        block = source.split("// url:begin", 1)[1].split("// url:end", 1)[0].split("\n", 1)[1]
+        script = block + f"\nconsole.log(JSON.stringify({json.dumps(urls)}.map((u) => safeUrl(u))));"
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_only_plain_http_urls_reach_xdg_open(self):
+        good = ["https://example.test/a?b=1", "http://example.test:8080/x"]
+        bad = ["file:///home/me/x.desktop", "ssh://host/", "javascript:alert(1)", "data:text/html,x", "ftp://x.test/",
+               "custom-handler://run?x", "-https://x.test", "--help", "//x.test", "https://", "https://a b.test",
+               "https://x.test/\nsecond", "", "x" * 10, "https://example.test/" + "a" * 2100, "mailto:a@b.test", "vscode://file/etc"]
+        for url, out in zip(good + bad, self.run_url(good + bad)):
+            if url in good:
+                self.assertEqual(out["href"], url)
+            else:
+                self.assertIsNone(out, url)
+        self.assertEqual(self.run_url(good)[0]["host"], "example.test")
+        self.assertEqual(self.run_url(good)[1]["host"], "example.test:8080")
+
+    def test_every_xdg_open_in_the_panel_goes_through_the_check(self):
+        with open(PANEL) as handle:
+            source = handle.read()
+        self.assertEqual(source.count('exec("xdg-open"'), 1)
+        self.assertIn('exec("xdg-open", [safe.href])', source)
 
     def test_the_chips_and_their_remembered_choice_are_wired_in_the_panel(self):
         with open(PANEL) as handle:
