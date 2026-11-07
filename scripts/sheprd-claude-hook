@@ -754,10 +754,11 @@ def cards_backoff_path():
 def cards_paused():
     """`cards` timed out within the last CARDS_BACKOFF seconds (any session): a wedged core costs
     one delay, not one per prompt."""
+    # read_small: a FIFO or device there must not hang every prompt. A timestamp in the future
+    # (clock change, a forged file) does not pause forever: it must lie in the past.
     try:
-        with open(cards_backoff_path()) as handle:
-            return time.time() - float(handle.read().strip() or 0) < CARDS_BACKOFF
-    except (OSError, ValueError):
+        return 0 <= time.time() - float(read_small(cards_backoff_path(), 64).strip() or 0) < CARDS_BACKOFF
+    except ValueError:
         return False
 
 
@@ -781,13 +782,18 @@ def run_cards(args):
         except OSError:
             pass
         try:
-            child.communicate(timeout=1)
+            child.communicate(timeout=0.2)
         except subprocess.SubprocessError:
             pass
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(cards_backoff_path(), "w") as handle:
-                handle.write(str(time.time()))
+            # O_NOFOLLOW: a planted link there is not written through; O_NONBLOCK: nor a FIFO waited on.
+            fd = os.open(cards_backoff_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            try:
+                if stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.write(fd, str(time.time()).encode())
+            finally:
+                os.close(fd)
         except OSError:
             pass
         return None

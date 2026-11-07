@@ -369,6 +369,41 @@ class ChatAnswerTests(unittest.TestCase):
                 self.assertFalse(hook.cards_paused())
                 self.assertEqual(hook.asked_questions("t7"), [("SHE-1", 1, "Which provider?")])
 
+    def backoff(self):
+        return Path(hook.cards_backoff_path())
+
+    def test_a_fifo_as_the_backoff_file_does_not_hang_and_is_not_a_pause(self):
+        os.makedirs(self.root / "cache", exist_ok=True)
+        os.mkfifo(self.backoff())
+        started = time.time()
+        self.assertFalse(hook.cards_paused())
+        self.assertLess(time.time() - started, 2)
+
+    def test_the_backoff_write_does_not_follow_a_link_or_wait_on_a_fifo(self):
+        os.makedirs(self.root / "cache", exist_ok=True)
+        victim = self.root / "victim.txt"
+        victim.write_text("keep")
+        os.symlink(victim, self.backoff())
+        self.hanging_cards(5)
+        with mock.patch.object(hook, "CARDS_TIMEOUT", 0.3):
+            hook.asked_questions("t7")
+        self.assertEqual(victim.read_text(), "keep")
+        self.backoff().unlink()
+        os.mkfifo(self.backoff())
+        with mock.patch.object(hook, "CARDS_TIMEOUT", 0.3):
+            started = time.time()
+            hook.asked_questions("t7")
+            self.assertLess(time.time() - started, 3)
+
+    def test_a_future_timestamp_does_not_pause_forever(self):
+        os.makedirs(self.root / "cache", exist_ok=True)
+        self.backoff().write_text(str(time.time() + 10 ** 9))
+        self.assertFalse(hook.cards_paused())
+        self.backoff().write_text(str(time.time() - 5))
+        self.assertTrue(hook.cards_paused())
+        self.backoff().write_text("garbage")
+        self.assertFalse(hook.cards_paused())
+
     def test_a_prompt_with_a_wedged_cards_costs_one_delay(self):
         self.hanging_cards(5)
         with mock.patch.object(hook, "CARDS_TIMEOUT", 0.3):
