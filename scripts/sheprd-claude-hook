@@ -473,7 +473,8 @@ def task_updates(tasks):
     for task in tasks:
         key = task.get("key") or ""
         if LEDGER_ID.match(key):
-            updates[key] = ["--title", one_line(task["label"], 120), "--status", ledger_status(task)]
+            # The `--name=value` form: a text starting with "--" must not be read as an option.
+            updates[key] = [f"--title={one_line(task['label'], 120)}", f"--status={ledger_status(task)}"]
     return updates
 
 
@@ -492,13 +493,13 @@ def ledger_plan(state, tasks, asked, question_item):
         return {}
     sent = state.get("sent", {})
     updates = {key: list(args) for key, args in tasks.items()}
-    if asked is not None and (asked or "--inferred-question" in sent.get(question_item, [])):
+    if asked is not None and (asked or any(a.startswith("--inferred-question") for a in sent.get(question_item, []))):
         args = updates.setdefault(question_item, [])
-        if question_item == "session" and "--title" not in args:
-            args += ["--title", "this session"]
+        if question_item == "session" and not any(a.startswith("--title") for a in args):
+            args += ["--title=this session"]
         if asked:
             for question in asked:
-                args += ["--inferred-question", one_line(question, 400)]
+                args += [f"--inferred-question={one_line(question, 400)}"]
         else:
             args.append("--clear-questions")
     return {key: args for key, args in updates.items() if sent.get(key) != args}

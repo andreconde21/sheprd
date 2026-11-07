@@ -51,8 +51,11 @@ by apps through `cards stage / dismiss / send`.
   program starts in `t7` (a core restart reuses the id, or a new session), its
   first `cards` write adopts the open cards of the older `born` (their `born`
   becomes the new one, so a restarted session still sees its work) and drops
-  the finished or dismissed ones, the open ones untouched for 7 days, and the
-  read answers. Unread answers are kept.
+  the finished or dismissed ones, the open ones untouched for 7 days, and every
+  answer in the `inbox` of the older `born` (read or not: it may answer someone
+  else's question; each answer is also kept on its question).
+- Cards written before `explicit` existed have no such list, so the first
+  inferred write after an upgrade may overwrite a field an agent set earlier.
 - `explicit` (card, optional): the fields an explicit `cards update` set. A hook's
   `cards update --inferred` fills only the other fields, never reopens a done
   card, and keeps `--inferred-question` entries (`inferred: true` on the question)

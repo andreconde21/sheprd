@@ -207,6 +207,20 @@ class HerdrAppLedgerTests(unittest.TestCase):
         hook.send_ledger("s1", "w1:p1", {"SHE-1": ["--title", "one"]}, None)
         self.assertEqual(self.calls(), ["card update SHE-1 --inferred --pane w1:p1 --title one"])
 
+    def test_texts_starting_with_dashes_are_sent_in_the_equals_form(self):
+        updates = hook.task_updates([{"key": "SHE-1", "label": "--help me", "stages": [{"state": "r"}]}])
+        self.assertEqual(updates["SHE-1"], ["--title=--help me", "--status=running"])
+        plan = hook.ledger_plan({}, {}, ["--force it?"], "session")
+        self.assertIn("--inferred-question=--force it?", plan["session"])
+        self.assertIn("--title=this session", plan["session"])
+        self.fake_cards()
+        hook.send_ledger("s1", "terminal:t7", updates, ["--force it?"])
+        self.assertIn("update SHE-1 --inferred --terminal t7 --title=--help me --status=running", self.calls())
+
+    def test_clearing_questions_is_recognised_in_the_equals_form(self):
+        plan = hook.ledger_plan({"sent": {"session": ["--title=this session", "--inferred-question=Q?"]}}, {}, [], "session")
+        self.assertIn("--clear-questions", plan["session"])
+
     def run_hook(self, env):
         transcript = self.root / "t.jsonl"
         transcript.write_text(json.dumps({

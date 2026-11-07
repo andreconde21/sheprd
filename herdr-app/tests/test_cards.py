@@ -243,16 +243,20 @@ class LedgerTests(unittest.TestCase):
         quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
         self.assertIn("t7/SHE-1", self.doc()["cards"])
 
-    def test_unread_answers_survive_a_new_program_read_ones_do_not(self):
-        doc = self.doc()
-        doc["inbox"]["t7"] = [
-            {"line": "unread", "at": cards.now(), "read": False, "born": 1},
-            {"line": "read", "at": cards.now(), "read": True, "born": 1},
-        ]
-        FakeCore.docs[cards.DOC] = (doc, 1)
-        self.born["t7"] = 2
-        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
-        self.assertEqual([a["line"] for a in self.doc()["inbox"]["t7"]], ["unread"])
+    def test_answers_for_the_previous_program_are_not_delivered_to_the_next(self):
+        self.ask("SHE-1", "Provider?")
+        self.stage(1, "A")
+        quiet(cards.cmd_send, argparse.Namespace(terminal="t7"))
+        self.assertTrue(self.doc()["inbox"]["t7"])  # unread, typed for the first program
+        self.born["t7"] = 2  # a new program in t7: maybe another task
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cards.cmd_answers(argparse.Namespace(terminal="t7", peek=False))
+        self.assertEqual(out.getvalue().strip(), "no new answers")
+        self.assertEqual(self.doc()["inbox"].get("t7", []), [])
+        # the answer is still on its question, on the adopted card
+        question = self.doc()["cards"]["t7/SHE-1"]["questions"][0]
+        self.assertEqual((question["state"], question["answer"]), ("sent", "A"))
 
     def test_an_inferred_update_never_overrides_an_explicit_one(self):
         quiet(cards.cmd_update, ns(id="SHE-1", title="Mine", status="dev"))

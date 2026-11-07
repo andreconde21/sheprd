@@ -215,8 +215,10 @@ def born_of(terminal):
 def forget_previous(doc, terminal, born):
     """A new program started in this terminal. Cards a previous program left open stay and
     become this program's (so a restarted session still sees its work); finished or dismissed
-    ones go, and open ones not touched for KEEP_PREVIOUS_DAYS expire. Unread answers stay
-    (the questions they answer are still on the cards); read ones go."""
+    ones go, and open ones not touched for KEEP_PREVIOUS_DAYS expire. The previous program's
+    answers go too, read or not: after a restart this may be a different task, and `cards
+    answers` must not hand it answers to someone else's questions (each answer is still on its
+    question)."""
     if born is None:
         return
     for key in list(doc["cards"]):
@@ -228,14 +230,7 @@ def forget_previous(doc, terminal, born):
         else:
             card["born"] = born
     if terminal in doc["inbox"]:
-        kept = []
-        for a in doc["inbox"][terminal]:
-            if a.get("born") in (None, born):
-                kept.append(a)
-            elif not a.get("read") and age_days(a.get("at")) < KEEP_PREVIOUS_DAYS:
-                a["born"] = born
-                kept.append(a)
-        doc["inbox"][terminal] = kept
+        doc["inbox"][terminal] = [a for a in doc["inbox"][terminal] if a.get("born") in (None, born)]
 
 
 def my_terminal(args):
