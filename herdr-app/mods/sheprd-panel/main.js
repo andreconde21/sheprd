@@ -333,8 +333,21 @@ export default class SheprdPanel extends View {
         .child(`Sending → ${q.answer}. If this stays for 2 minutes the send died: choose the answer again to resend.`)));
   }
 
+  // A question the user answered in the chat without the agent closing it: dim, out of the
+  // unanswered count; Dismiss drops it, Reopen makes it a live question again.
+  replied(t, address, card, q) {
+    const key = `${address}/${card.id}/${q.n}`;
+    const terminal = split(address).terminal;
+    return h_flex().gap(6).items_start().text_size(11.5).text_color(t.dim)
+      .child(div().flex_none().font_semibold().child(`Q${q.n}`))
+      .child(div().flex_1().min_w(0).child(`${q.text} (replied in chat)`))
+      .child(this.button(t, `qr-${key}`, "Reopen", (cx) => this.act(cx, address, ["reopen", terminal, card.id, "--question", String(q.n)]), { dim: true }))
+      .child(this.button(t, `qx-${key}`, "Dismiss", (cx) => this.act(cx, address, ["dismiss", terminal, card.id, "--question", String(q.n)]), { dim: true }));
+  }
+
   card(t, address, card) {
     const qs = card.questions.filter(live);
+    const replied = card.questions.filter((q) => q.state === "replied");
     const key = `${address}/${card.id}`;
     const allDecisions = this.openDecisions.has(key);
     // Newest first; the rest behind "N more".
@@ -360,6 +373,7 @@ export default class SheprdPanel extends View {
           .child(allDecisions ? "Fewer" : `${decisions.length - DECISIONS_SHOWN} more`))))
       .when(qs.length > 0, (el) => el.child(label(qs.length === 1 ? "Question" : `${qs.length} questions`)))
       .children(qs.map((q) => this.question(t, address, card, q)))
+      .children(replied.map((q) => this.replied(t, address, card, q)))
       .when(Boolean(card.link), (el) => el.child(this.linkRow(t, `ln-${key}`, card.link, "")))
       .when(Boolean(card.writeback), (el) => el.child(div().text_size(10.5).text_color(card.writeback.ok ? t.dim : t.blocked).child(`${card.writeback.ok ? "✓" : "!"} ${card.writeback.message}`)));
   }

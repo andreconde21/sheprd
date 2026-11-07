@@ -13,6 +13,7 @@ writing at once never lose an update.
   cards ask SHE-12 "Which provider?" --option Stripe --option Multibanco --recommend 1
   cards decide SHE-12 "Use Checkout, not Elements"
   cards answered SHE-12 --question 1 [--answer "Stripe"]    the user answered in the chat: close it
+  cards replied SHE-12:1 [SHE-13:2 ...]    (hook) open questions the user replied to in the chat
   cards done SHE-12 --summary "Merged as #41; live on dev"
   cards answers [--peek]     answers the user sent you (marks them read)
   cards list                 your cards
@@ -373,7 +374,7 @@ def cmd_answered(args):
         card = get_card(doc, terminal, args.id)
         closed = []
         for q in card["questions"]:
-            if not live(q) or not (args.all or q["n"] == args.question):
+            if not (live(q) or q["state"] == "replied") or not (args.all or q["n"] == args.question):
                 continue
             if q["state"] == "sending" and not stale_claim(q):
                 fail(f"{args.id} Q{q['n']} is being sent")
@@ -389,6 +390,49 @@ def cmd_answered(args):
 
     closed = change(mutate)
     print(f"{args.id} " + ", ".join(f"Q{n}" for n in closed) + " answered")
+
+
+def cmd_replied(args):
+    """A hook marks open questions the user replied to in the chat without the agent closing
+    them: `replied` (not live, so no longer counted as unanswered). Only `open` ones change:
+    staged, sending, answered and dismissed questions are left alone, and so is a
+    question that no longer exists. `cards answered` or an app answer still wins later."""
+    terminal = my_terminal(args)
+
+    def mutate(doc):
+        marked = []
+        for item in args.items:
+            card_id, _, number = item.rpartition(":")
+            card = doc["cards"].get(card_key(terminal, card_id))
+            if not card or not number.isdigit():
+                continue
+            for q in card["questions"]:
+                if q["n"] == int(number) and q["state"] == "open":
+                    q["state"] = "replied"
+                    q["replied_at"] = now()
+                    marked.append(item)
+        return marked
+
+    marked = change(mutate)
+    print("replied " + (", ".join(marked) if marked else "none"))
+
+
+def cmd_reopen(args):
+    """An app puts a `replied` question back to `open`."""
+    def mutate(doc):
+        card = get_card(doc, args.terminal, args.id)
+        for q in card["questions"]:
+            if q["n"] == args.question:
+                if q["state"] != "replied":
+                    fail(f"{args.id} Q{args.question} is not marked as replied")
+                q["state"] = "open"
+                q.pop("replied_at", None)
+                card["updated_at"] = now()
+                return
+        fail(f"{args.id} has no Q{args.question}")
+
+    change(mutate)
+    print("reopened")
 
 
 def cmd_decide(args):
@@ -462,7 +506,7 @@ def cmd_list(args):
         if c.get("summary"):
             print(f"    {c['summary']}")
         for q in c["questions"]:
-            if live(q):
+            if live(q) or q["state"] == "replied":
                 print(f"    Q{q['n']} ({q['state']}): {q['text']}")
 
 
@@ -1027,6 +1071,10 @@ def main():
     p.add_argument("--answer", help="what the user answered (optional)")
     p.set_defaults(func=cmd_answered)
 
+    p = agent("replied", help="mark open questions the user replied to in the chat (for hooks)")
+    p.add_argument("items", nargs="+", help="CARD:N, e.g. SHE-12:1")
+    p.set_defaults(func=cmd_replied)
+
     p = agent("decide", help="record a decision")
     p.add_argument("id")
     p.add_argument("decision")
@@ -1074,6 +1122,12 @@ def main():
     p.add_argument("id")
     p.add_argument("--question", type=int)
     p.set_defaults(func=cmd_dismiss)
+
+    p = sub.add_parser("reopen", help="put a question marked as replied back to open (for apps)")
+    p.add_argument("terminal")
+    p.add_argument("id")
+    p.add_argument("--question", type=int, required=True)
+    p.set_defaults(func=cmd_reopen)
 
     p = sub.add_parser("send", help="send a terminal's staged answers (for apps)")
     p.add_argument("terminal")

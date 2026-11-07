@@ -63,3 +63,10 @@ The panel's chips (Needs me, Working, Review, Blocked, Done, All) filter by the 
 mapping is one table at the top of `mods/sheprd-panel/main.js`, Done is hidden under All, and the
 choice is remembered. Evidence images are shown as thumbnails drawn from a `data:` URI; where the
 app's `image()` does not accept one, the label shows instead.
+
+Answers typed in the chat: when you send a message while a terminal has open questions, the hook
+reminds the agent of them (and the `cards answered` command), and at the end of its turn the
+questions still open are marked "replied in chat" and shown dim. The hook cannot tell whether your
+message was about them, so an unrelated message dims them too; use Reopen on the question to bring
+it back, or Dismiss to drop it. The hook gives `cards` 1.5 seconds and, after a timeout, skips it
+for 5 minutes.

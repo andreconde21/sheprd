@@ -44,6 +44,13 @@ by apps through `cards stage / dismiss / send`.
   `cards answered <id> --question N [--answer TEXT]` (or `--all`): the state
   becomes `answered` (with `answered_at`, and `answer` when given). Open and
   staged questions can be closed this way; one being sent cannot.
+  `replied` is a soft state a hook sets (`cards replied <id>:N ...`, only on
+  `open` questions) when the user sent a chat message while the question was
+  open and the agent did not close it: not live (not counted as unanswered),
+  shown dim as "replied in chat". `cards answered` (or `--all`) still closes
+  it, an app can `cards reopen <terminal> <id> --question N` (back to `open`,
+  only from `replied`) or `dismiss` it, and staging an answer works as on an
+  open one. `replied_at` records when.
   While `sending`, a question carries `claim` and `claimed_at`; a claim older
   than 120 s belongs to a send that died and may be staged and sent again
   (if that send had already typed the line, the agent gets it twice).

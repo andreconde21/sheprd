@@ -58,6 +58,8 @@ sheprd card list             # your cards as the user sees them
 - When the user answers a question in the conversation instead of the panel, close it so it stops
   showing as open: `cards answered SHE-12 --question 1 --answer "Stripe"` (or `--all` for the
   card). This is a `cards` command (Herdr app); under sheprd answer it in the panel or dismiss it.
+  The app's hook reminds you of the open questions when the user writes; one you leave open is
+  shown as "replied in chat" after your turn, which is a fallback: close it yourself.
 - When you verify something, attach the proof to the card (Herdr app, `cards`): a screenshot
   `cards evidence SHE-12 --image shot.png --label "Login page"`, a test run
   `cards evidence SHE-12 --test "unit: 37/0"` (passed/failed, last), a deploy check or PR
