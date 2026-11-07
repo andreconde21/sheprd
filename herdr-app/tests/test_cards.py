@@ -319,6 +319,47 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 cards.cmd_answered(args)
 
+    def replied(self, *items):
+        return quiet(cards.cmd_replied, ns(items=list(items)))
+
+    def states(self):
+        return [q["state"] for q in self.doc()["cards"]["t7/SHE-1"]["questions"]]
+
+    def test_replied_marks_only_open_questions(self):
+        for text in ("A?", "B?", "C?", "D?"):
+            self.ask("SHE-1", text)
+        self.stage(2, "x")
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=3, all=False, answer=None))
+        quiet(cards.cmd_dismiss, ns(terminal="t7", id="SHE-1", question=4))
+        self.replied("SHE-1:1", "SHE-1:2", "SHE-1:3", "SHE-1:4", "SHE-1:9", "NOPE-1:1", "bad", "SHE-1:x")
+        self.assertEqual(self.states(), ["replied", "staged", "answered", "dismissed"])
+        self.assertIn("replied_at", self.doc()["cards"]["t7/SHE-1"]["questions"][0])
+        self.assertFalse(cards.live(self.doc()["cards"]["t7/SHE-1"]["questions"][0]))
+
+    def test_a_replied_question_can_still_be_answered_or_reopened(self):
+        self.ask("SHE-1", "A?")
+        self.ask("SHE-1", "B?")
+        self.replied("SHE-1:1", "SHE-1:2")
+        quiet(cards.cmd_answered, ns(id="SHE-1", question=1, all=False, answer="Stripe"))
+        quiet(cards.cmd_reopen, ns(terminal="t7", id="SHE-1", question=2))
+        self.assertEqual(self.states(), ["answered", "open"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cards.cmd_reopen(ns(terminal="t7", id="SHE-1", question=1))  # answered, not replied
+
+    def test_a_replied_question_is_dismissed_like_any_other(self):
+        self.ask("SHE-1", "A?")
+        self.replied("SHE-1:1")
+        quiet(cards.cmd_dismiss, ns(terminal="t7", id="SHE-1", question=1))
+        self.assertEqual(self.states(), ["dismissed"])
+
+    def test_a_new_inferred_question_set_leaves_replied_ones_alone(self):
+        quiet(cards.cmd_update, ns(id="SHE-1", title=None, status=None, summary=None, link=None, inferred=True,
+                                   inferred_question=["Old?"], clear_questions=False))
+        self.replied("SHE-1:1")
+        quiet(cards.cmd_update, ns(id="SHE-1", title=None, status=None, summary=None, link=None, inferred=True,
+                                   inferred_question=["New?"], clear_questions=False))
+        self.assertEqual(self.states(), ["replied", "open"])
+
     def test_a_question_being_sent_is_not_closed_under_the_send(self):
         self.ask("SHE-1", "Provider?")
         self.stage(1, "A")

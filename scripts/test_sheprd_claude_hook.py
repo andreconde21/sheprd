@@ -1,3 +1,5 @@
+import contextlib
+import io
 import importlib.machinery
 import importlib.util
 import json
@@ -268,6 +270,87 @@ class HerdrAppLedgerTests(unittest.TestCase):
         report, start = self.run_hook({})
         report.assert_not_called()
         start.assert_not_called()
+
+
+class ChatAnswerTests(unittest.TestCase):
+    """A message typed while questions are open may answer them: the agent is told how to close
+    them, and the ones still open when it stops become `replied`."""
+
+    LISTING = json.dumps([
+        {"id": "SHE-1", "dismissed": False, "questions": [
+            {"n": 1, "state": "open", "text": "Which provider?"},
+            {"n": 2, "state": "staged", "text": "Staged one"},
+            {"n": 3, "state": "answered", "text": "Done one"}]},
+        {"id": "SHE-2", "dismissed": True, "questions": [{"n": 1, "state": "open", "text": "Hidden"}]},
+    ])
+
+    tearDown = HerdrAppLedgerTests.tearDown
+    fake_cards = HerdrAppLedgerTests.fake_cards
+    calls = HerdrAppLedgerTests.calls
+
+    def setUp(self):
+        HerdrAppLedgerTests.setUp(self)
+        os.environ["HC_TERMINAL_ID"] = "t7"
+        self.transcript = self.root / "t.jsonl"
+        self.transcript.write_text(json.dumps({"type": "user", "timestamp": "2026-11-07T10:00:00Z",
+                                               "message": {"content": "hi"}}) + "\n")
+
+    def run_hook(self, event):
+        payload = json.dumps({"session_id": "s1", "transcript_path": str(self.transcript),
+                              "hook_event_name": event, "cwd": str(self.root)})
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(payload)), contextlib.redirect_stdout(out):
+            hook.main()
+        return out.getvalue()
+
+    def cached(self):
+        with open(self.root / "cache" / "s1.json") as handle:
+            return json.load(handle)
+
+    def test_the_prompt_lists_open_questions_and_the_command_to_close_them(self):
+        self.fake_cards(f"if [ \"$1\" = list ]; then echo '{self.LISTING}'; fi")
+        out = json.loads(self.run_hook("UserPromptSubmit"))["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], "UserPromptSubmit")
+        context = out["additionalContext"]
+        self.assertIn("SHE-1 Q1: Which provider?", context)
+        self.assertIn('cards answered SHE-1 --question 1 --answer "<the user', context)
+        for left_out in ("Staged one", "Done one", "Hidden"):
+            self.assertNotIn(left_out, context)
+        self.assertEqual(self.cached()["asked_at_prompt"], ["SHE-1:1"])
+        self.assertIn("list --json --terminal t7", self.calls()[0])
+
+    def test_no_open_questions_adds_no_context(self):
+        self.fake_cards("echo '[]'")
+        self.assertEqual(self.run_hook("UserPromptSubmit"), "")
+        self.assertEqual(self.cached()["asked_at_prompt"], [])
+
+    def test_a_missing_or_failing_cards_adds_no_context(self):
+        self.assertEqual(self.run_hook("UserPromptSubmit"), "")
+        self.fake_cards("echo 'not json'; exit 3")
+        self.assertEqual(self.run_hook("UserPromptSubmit"), "")
+
+    def test_stop_marks_the_questions_open_at_the_prompt_as_replied(self):
+        self.fake_cards(f"if [ \"$1\" = list ]; then echo '{self.LISTING}'; fi")
+        self.run_hook("UserPromptSubmit")
+        self.run_hook("Stop")
+        self.assertIn("replied --terminal t7 SHE-1:1", self.calls())
+        self.assertEqual(self.cached()["asked_at_prompt"], [])
+        before = len(self.calls())
+        self.run_hook("Stop")  # nothing was open at a prompt: nothing to mark
+        self.assertFalse([c for c in self.calls()[before:] if c.startswith("replied")])
+
+    def test_a_tool_call_between_prompt_and_stop_keeps_the_open_set(self):
+        self.fake_cards(f"if [ \"$1\" = list ]; then echo '{self.LISTING}'; fi")
+        self.run_hook("UserPromptSubmit")
+        self.run_hook("PostToolUse")
+        self.assertEqual(self.cached()["asked_at_prompt"], ["SHE-1:1"])
+
+    def test_the_sheprd_pane_is_left_alone(self):
+        self.fake_cards("echo '[]'")
+        os.environ["HERDR_PANE_ID"] = "p1"
+        with mock.patch.object(hook, "report"):
+            self.assertEqual(self.run_hook("UserPromptSubmit"), "")
+        self.assertEqual(self.calls(), [])
 
 
 class SubagentCardTests(unittest.TestCase):
