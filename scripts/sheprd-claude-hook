@@ -85,6 +85,8 @@ MAX_VALUE = 80
 LEDGER_ID = re.compile(r"^[A-Za-z0-9#._][A-Za-z0-9#._-]{0,31}$")  # no leading "-": not a flag
 LEDGER_REPROBE = 3600  # seconds before trying a server that had no card ledger again
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+DIRECT_MAX = 4  # cards inferred from the branch, edited files and prompts, per session
+DIRECT_PER_SOURCE = 3  # newest edited-file and prompt ids looked at
 COMMAND_TOOLS = {"Bash"}
 
 
@@ -105,12 +107,16 @@ class RefSource:
     def __init__(self, pattern, ids_from=None):
         self.pattern = re.compile(pattern)
         self.known = None
+        self.paths = {}
         if ids_from:
             self.known = set()
             root = os.path.expanduser(ids_from)
-            for _, dirs, files in os.walk(root):
+            for folder, dirs, files in os.walk(root):
                 dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
-                self.known.update(name[:-3] for name in files if name.endswith(".md"))
+                for name in files:
+                    if name.endswith(".md"):
+                        self.known.add(name[:-3])
+                        self.paths.setdefault(name[:-3], os.path.join(folder, name))
 
     def findall(self, text):
         found = [m if isinstance(m, str) else m[0] for m in self.pattern.findall(text or "")]
@@ -137,7 +143,7 @@ def task_patterns():
 def fresh_cache():
     return {
         "offset": 0, "last_id": None, "ctx": 0, "model": "", "days": {},
-        "todos": [], "pending_creates": {}, "timeline": [], "tasks": [], "prompt_tasks": [], "sent": [],
+        "todos": [], "pending_creates": {}, "timeline": [], "tasks": [], "prompt_tasks": [], "edit_tasks": [], "sent": [],
     }
 
 
@@ -180,9 +186,31 @@ def note_prompt_tasks(cache, text, patterns):
     del cache["prompt_tasks"][20:]
 
 
-def apply_tool_use(cache, use):
+def note_edit_tasks(cache, use, patterns):
+    """Reference ids in the file an agent edits or writes (any id in its name), or reads when the
+    file is the card itself (`<ID>.md`): the cards this session works on directly."""
+    name, data = use.get("name"), use.get("input") or {}
+    path = data.get("file_path") or data.get("notebook_path") or ""
+    if not isinstance(path, str) or not path:
+        return
+    base = os.path.basename(path)
+    if name in EDIT_TOOLS:
+        found = [task for source in patterns for task in source.findall(base)]
+    elif name == "Read" and base.endswith(".md"):
+        found = [task for source in patterns for task in source.findall(base[:-3]) if task == base[:-3]]
+    else:
+        return
+    for task in found:
+        if task in cache["edit_tasks"]:
+            cache["edit_tasks"].remove(task)
+        cache["edit_tasks"].insert(0, task)
+    del cache["edit_tasks"][20:]
+
+
+def apply_tool_use(cache, use, patterns=()):
     name, data = use.get("name"), use.get("input") or {}
     timeline = cache["timeline"]
+    note_edit_tasks(cache, use, patterns)
     if name in EDIT_TOOLS and timeline:
         timeline[-1]["edits"] += 1
     elif name in COMMAND_TOOLS and timeline:
@@ -245,7 +273,7 @@ def read_new_lines(cache, transcript, patterns):
                     if not isinstance(part, dict):
                         continue
                     if part.get("type") == "tool_use":
-                        apply_tool_use(cache, part)
+                        apply_tool_use(cache, part, patterns)
                     elif part.get("type") == "tool_result":
                         apply_tool_result(cache, part)
                     elif part.get("type") == "text" and entry.get("type") == "assistant":
@@ -491,6 +519,81 @@ def task_updates(tasks, own=None):
         if LEDGER_ID.match(key):
             # The `--name=value` form: a text starting with "--" must not be read as an option.
             updates[key] = [f"--title={one_line(task['label'], 120)}", f"--status={ledger_status(task)}"]
+    return updates
+
+
+def git_branch(cwd):
+    """The checked-out branch of the repository holding `cwd`, read from .git/HEAD (a worktree's
+    `.git` file points at its own). No git process runs, so no repository hook or config does."""
+    path = os.path.abspath(cwd or "")
+    while path and os.path.isdir(path):
+        dot = os.path.join(path, ".git")
+        try:
+            if os.path.isdir(dot):
+                head = os.path.join(dot, "HEAD")
+            elif os.path.isfile(dot):
+                with open(dot) as handle:
+                    line = handle.readline().strip()
+                if not line.startswith("gitdir:"):
+                    return ""
+                gitdir = line[len("gitdir:"):].strip()
+                head = os.path.join(path, gitdir, "HEAD")
+            else:
+                head = None
+            if head:
+                with open(head) as handle:
+                    ref = handle.readline().strip()
+                return ref[len("ref: refs/heads/"):] if ref.startswith("ref: refs/heads/") else ""
+        except OSError:
+            return ""
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return ""
+
+
+def card_title(task, patterns):
+    """A card's title from its file (`title:` front matter, else the first heading), if readable."""
+    for source in patterns:
+        path = source.paths.get(task)
+        if not path:
+            continue
+        try:
+            with open(path, errors="replace") as handle:
+                head = handle.read(4096).splitlines()
+        except OSError:
+            continue
+        for line in head:
+            match = re.match(r"title\s*:\s*(.+)", line)
+            if match:
+                return match.group(1).strip().strip("\"'")
+        for line in head:
+            if line.startswith("# "):
+                return line[2:].strip()
+    return ""
+
+
+def direct_updates(cache, cwd, patterns, event):
+    """Inferred card updates for cards this session works on without handing them to a subagent:
+    the one in the cwd's git branch, then those in edited files, then those the human named in
+    prompts (the newest few of each), at most DIRECT_MAX. Working while the agent runs, idle once
+    its turn has ended. An explicit `cards update` still wins (these are written `--inferred`)."""
+    branch = git_branch(cwd)
+    ordered = []
+    for source in (
+        [task for src in patterns for task in src.findall(branch)],
+        cache.get("edit_tasks", [])[:DIRECT_PER_SOURCE],
+        cache.get("prompt_tasks", [])[:DIRECT_PER_SOURCE],
+    ):
+        for task in source:
+            if task not in ordered and LEDGER_ID.match(task):
+                ordered.append(task)
+    status = "idle" if event == "Stop" else "working"
+    updates = {}
+    for task in ordered[:DIRECT_MAX]:
+        title = card_title(task, patterns) or (branch if task in branch else "")
+        updates[task] = ([f"--title={one_line(title, 120)}"] if title else []) + [f"--status={status}"]
     return updates
 
 
@@ -920,13 +1023,14 @@ def main():
     if os.path.getsize(transcript) < cache["offset"]:
         cache = fresh_cache()
 
-    read_new_lines(cache, transcript, task_patterns())
+    patterns = task_patterns()
+    read_new_lines(cache, transcript, patterns)
     oldest = (datetime.now() - timedelta(days=KEEP_DAYS - 1)).strftime("%Y-%m-%d")
     cache["days"] = {day: t for day, t in cache["days"].items() if day >= oldest}
 
     current = tokens(cache)
     current["sheprd_session"] = session
-    work_tokens, _, work_tasks = work(transcript, session, task_patterns(), cache)
+    work_tokens, _, work_tasks = work(transcript, session, patterns, cache)
     current.update(work_tokens)
     event = hook.get("hook_event_name", "")
     if event == "Stop":
@@ -948,6 +1052,8 @@ def main():
 
     asked = cache.get("questions", []) if event in ("Stop", "PostToolUse") else None
     ledger_tasks = task_updates(work_tasks, cache.get("prompt_tasks", []))
+    for item, args in direct_updates(cache, hook.get("cwd"), patterns, event).items():
+        ledger_tasks.setdefault(item, args)  # a subagent's running/done state is more exact
 
     if os.environ.get("SHEPRD_HOOK_DRY"):
         state = load_ledger_state(session)

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 import unittest
@@ -309,6 +310,79 @@ class SubagentCardTests(unittest.TestCase):
     def test_an_older_cache_without_prompt_tasks_still_loads(self):
         cache = {**hook.fresh_cache(), **{"offset": 5}}
         self.assertEqual(cache["prompt_tasks"], [])
+
+
+class DirectCardTests(unittest.TestCase):
+    """An agent that works a card itself (no subagent, no `cards` call) still gets a ledger entry."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        os.makedirs(os.path.join(self.dir, "cards"))
+        with open(os.path.join(self.dir, "cards", "ABC-7.md"), "w") as handle:
+            handle.write("---\nid: ABC-7\ntitle: Fix the thing\n---\nbody\n")
+        self.patterns = [hook.RefSource(r"\b[A-Z]{2,5}-\d+\b", self.dir)]
+
+    def repo(self, branch):
+        repo = os.path.join(self.dir, "repo")
+        os.makedirs(os.path.join(repo, ".git"), exist_ok=True)
+        os.makedirs(os.path.join(repo, "src"), exist_ok=True)
+        with open(os.path.join(repo, ".git", "HEAD"), "w") as handle:
+            handle.write(f"ref: refs/heads/{branch}\n")
+        return repo
+
+    def use(self, cache, name, path):
+        hook.apply_tool_use(cache, {"name": name, "input": {"file_path": path}}, self.patterns)
+
+    def test_branch_names_the_card_and_the_card_file_gives_the_title(self):
+        updates = hook.direct_updates(hook.fresh_cache(), os.path.join(self.repo("claude/ABC-7-fix"), "src"),
+                                      self.patterns, "PostToolUse")
+        self.assertEqual(updates, {"ABC-7": ["--title=Fix the thing", "--status=working"]})
+
+    def test_branch_name_is_the_title_when_the_card_is_unreadable(self):
+        updates = hook.direct_updates(hook.fresh_cache(), self.repo("claude/QQQ-9-x"),
+                                      [hook.RefSource(r"\b[A-Z]{2,5}-\d+\b")], "Stop")
+        self.assertEqual(updates, {"QQQ-9": ["--title=claude/QQQ-9-x", "--status=idle"]})
+
+    def test_worktree_git_file_and_no_branch(self):
+        wt = os.path.join(self.dir, "wt")
+        os.makedirs(wt)
+        gitdir = os.path.join(self.dir, "meta")
+        os.makedirs(gitdir)
+        with open(os.path.join(wt, ".git"), "w") as handle:
+            handle.write(f"gitdir: {gitdir}\n")
+        with open(os.path.join(gitdir, "HEAD"), "w") as handle:
+            handle.write("ref: refs/heads/claude/ABC-7-wt\n")
+        self.assertEqual(hook.git_branch(wt), "claude/ABC-7-wt")
+        self.assertEqual(hook.git_branch(os.path.join(self.dir, "nowhere")), "")
+
+    def test_edited_files_name_cards_but_reads_only_count_for_the_card_file(self):
+        cache = hook.fresh_cache()
+        self.use(cache, "Edit", "/x/src/ABC-7-notes.txt")
+        self.use(cache, "Read", "/x/src/ABC-7-other.txt")
+        self.use(cache, "Read", "/x/cards/ABC-7.md")
+        self.use(cache, "Write", "/x/src/plain.txt")
+        self.assertEqual(cache["edit_tasks"], ["ABC-7"])
+        cache2 = hook.fresh_cache()
+        self.use(cache2, "Read", "/x/src/ABC-7-other.txt")
+        self.assertEqual(cache2["edit_tasks"], [])
+
+    def test_prompts_and_edits_are_capped_newest_first(self):
+        cache = hook.fresh_cache()
+        cache["edit_tasks"] = ["AA-1", "AA-2", "AA-3", "AA-4"]
+        cache["prompt_tasks"] = ["BB-1", "BB-2", "BB-3", "BB-4"]
+        updates = hook.direct_updates(cache, "", [hook.RefSource(r"\b[A-Z]{2}-\d+\b")], "PostToolUse")
+        self.assertEqual(list(updates), ["AA-1", "AA-2", "AA-3", "BB-1"])
+
+    def test_nothing_inferred_is_nothing_sent(self):
+        self.assertEqual(hook.direct_updates(hook.fresh_cache(), "", self.patterns, "Stop"), {})
+
+    def test_a_subagent_state_wins_over_the_direct_one(self):
+        tasks = {"ABC-7": ["--title=sub", "--status=running"]}
+        for item, args in hook.direct_updates(hook.fresh_cache(), self.repo("claude/ABC-7-fix"),
+                                              self.patterns, "Stop").items():
+            tasks.setdefault(item, args)
+        self.assertEqual(tasks["ABC-7"], ["--title=sub", "--status=running"])
 
 
 class SummaryQuestionTests(unittest.TestCase):
