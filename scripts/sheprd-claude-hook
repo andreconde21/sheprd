@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -195,7 +196,10 @@ def note_edit_tasks(cache, use, patterns):
         return
     base = os.path.basename(path)
     if name in EDIT_TOOLS:
-        found = [task for source in patterns for task in source.findall(path)]
+        # An id in the file name; an id in a folder only when it is a known card (`ids_from`),
+        # so an unrelated path like `.../UTF-8/...` is no card.
+        found = [task for source in patterns
+                 for task in source.findall(base) + (source.findall(os.path.dirname(path)) if source.known else [])]
     elif name == "Read" and base.endswith(".md"):
         found = [task for source in patterns for task in source.findall(base[:-3]) if task == base[:-3]]
     else:
@@ -522,30 +526,42 @@ def task_updates(tasks, own=None):
     return updates
 
 
+def read_small(path, limit=256):
+    """The first `limit` bytes of a regular file as text, else "". A FIFO, device or symlink to
+    one is refused without blocking (O_NONBLOCK, then fstat), the read is capped and undecodable
+    bytes are replaced, so a hostile file can neither hang nor crash the hook."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0))
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
 def git_branch(cwd):
     """The checked-out branch of the repository holding `cwd`, read from .git/HEAD (a worktree's
-    `.git` file points at its own). No git process runs, so no repository hook or config does."""
+    `.git` file points at its own). No git process runs, so no repository hook or config does,
+    and every read goes through `read_small`."""
     path = os.path.abspath(cwd or "")
     while path and os.path.isdir(path):
         dot = os.path.join(path, ".git")
-        try:
-            if os.path.isdir(dot):
-                head = os.path.join(dot, "HEAD")
-            elif os.path.isfile(dot):
-                with open(dot) as handle:
-                    line = handle.readline().strip()
-                if not line.startswith("gitdir:"):
-                    return ""
-                gitdir = line[len("gitdir:"):].strip()
-                head = os.path.join(path, gitdir, "HEAD")
-            else:
-                head = None
-            if head:
-                with open(head) as handle:
-                    ref = handle.readline().strip()
-                return ref[len("ref: refs/heads/"):] if ref.startswith("ref: refs/heads/") else ""
-        except OSError:
-            return ""
+        head = None
+        if os.path.isdir(dot):
+            head = os.path.join(dot, "HEAD")
+        elif os.path.lexists(dot):
+            line = read_small(dot).splitlines()[:1]
+            if not line or not line[0].startswith("gitdir:"):
+                return ""
+            head = os.path.join(path, line[0][len("gitdir:"):].strip(), "HEAD")
+        if head:
+            ref = (read_small(head).splitlines() or [""])[0].strip()
+            return ref[len("ref: refs/heads/"):] if ref.startswith("ref: refs/heads/") else ""
         parent = os.path.dirname(path)
         if parent == path:
             break
@@ -559,11 +575,7 @@ def card_title(task, patterns):
         path = source.paths.get(task)
         if not path:
             continue
-        try:
-            with open(path, errors="replace") as handle:
-                head = handle.read(4096).splitlines()
-        except OSError:
-            continue
+        head = read_small(path, 4096).splitlines()
         for line in head:
             match = re.match(r"title\s*:\s*(.+)", line)
             if match:

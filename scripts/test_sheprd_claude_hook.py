@@ -380,6 +380,46 @@ class DirectCardTests(unittest.TestCase):
         updates = hook.direct_updates(hook.fresh_cache(), self.repo("claude/ABC-7-fix"), self.patterns, "SessionEnd")
         self.assertEqual(updates["ABC-7"][-1], "--status=stopped")
 
+    def test_hostile_head_files_are_refused_without_hanging(self):
+        repo = self.repo("main")
+        head = os.path.join(repo, ".git", "HEAD")
+        os.unlink(head)
+        os.mkfifo(head)
+        started = time.time()
+        self.assertEqual(hook.git_branch(repo), "")
+        self.assertLess(time.time() - started, 2)
+        os.unlink(head)
+        os.symlink("/dev/zero", head)
+        self.assertEqual(hook.git_branch(repo), "")
+        os.unlink(head)
+        with open(head, "wb") as handle:
+            handle.write(b"ref: refs/heads/" + b"a" * 100000)
+        self.assertLessEqual(len(hook.git_branch(repo)), 256)
+        with open(head, "wb") as handle:
+            handle.write(b"\xff\xfe\x00binary\n")
+        self.assertEqual(hook.git_branch(repo), "")
+
+    def test_worktree_pointer_that_is_not_a_regular_file_is_refused(self):
+        wt = os.path.join(self.dir, "wt2")
+        os.makedirs(wt)
+        os.mkfifo(os.path.join(wt, ".git"))
+        started = time.time()
+        self.assertEqual(hook.git_branch(wt), "")
+        self.assertLess(time.time() - started, 2)
+
+    def test_card_file_that_is_a_fifo_gives_no_title(self):
+        os.unlink(os.path.join(self.dir, "cards", "ABC-7.md"))
+        os.mkfifo(os.path.join(self.dir, "cards", "ABC-7.md"))
+        self.assertEqual(hook.card_title("ABC-7", self.patterns), "")
+
+    def test_folder_ids_count_only_when_they_are_known_cards(self):
+        loose = [hook.RefSource(r"\b[A-Z]{2,5}-\d+\b")]  # no ids_from: nothing to check against
+        cache = hook.fresh_cache()
+        hook.apply_tool_use(cache, {"name": "Edit", "input": {"file_path": "/x/UTF-8/plain.txt"}}, loose)
+        self.assertEqual(cache["edit_tasks"], [])
+        hook.apply_tool_use(cache, {"name": "Edit", "input": {"file_path": "/x/UTF-8/plain.txt"}}, self.patterns)
+        self.assertEqual(cache["edit_tasks"], [])
+
     def test_nothing_inferred_is_nothing_sent(self):
         self.assertEqual(hook.direct_updates(hook.fresh_cache(), "", self.patterns, "Stop"), {})
 
