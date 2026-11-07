@@ -37,6 +37,13 @@ $link && ! $cards_only && echo "note: --link leaves image() assets (the header's
 echo "Installing:"
 chmod +x "$here/bin/cards"
 place "$here/bin/cards" "$HOME/.local/bin/cards"
+# herdr-core started over SSH has a minimal PATH without ~/.local/bin, so the app would not find
+# `cards` there. Also link it into /usr/local/bin when that is writable and has no other `cards`
+# (the panel falls back to ~/.local/bin/cards when this is not possible).
+if [ -d /usr/local/bin ] && [ -w /usr/local/bin ] && { [ ! -e /usr/local/bin/cards ] || [ -L /usr/local/bin/cards ]; }; then
+  ln -sfn "$HOME/.local/bin/cards" /usr/local/bin/cards
+  echo "  /usr/local/bin/cards -> $HOME/.local/bin/cards"
+fi
 # Agents learn the ledger (and that `cards` is the command in the app) from these skills.
 if [ -d "$HOME/.claude" ]; then
   mkdir -p "$HOME/.claude/skills/sheprd-card" "$HOME/.claude/skills/sheprd-msg"

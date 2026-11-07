@@ -16,6 +16,28 @@ const OUTPUT_EVERY_MS = 3000;
 // The sidebar loads cards every 5 s; the panel loads them itself only when that stops.
 const CARDS_STALE_MS = 12000;
 
+// `cards` lives in ~/.local/bin, which the herdr-core of a machine reached over SSH often does not
+// have on its PATH. Try the PATH first, then that file. Resolves to the result, or null when it
+// could not be run at all.
+async function runCards(args, on) {
+  const missing = (r) => r.code === 127 || /not found|no such file/i.test(r.stderr ?? "");
+  let first = null;
+  try {
+    first = await exec("cards", args, { on });
+    if (first.code === 0 || !missing(first)) return first;
+  } catch {
+    first = null;
+  }
+  try {
+    return await exec("sh", ["-c", 'exec "$HOME/.local/bin/cards" "$@"', "cards", ...args], { on });
+  } catch {
+    return first;
+  }
+}
+
+// Why a machine's cards could not be read: a line to show instead of an empty list.
+const cardsFailure = (r) => (r ? (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0].slice(0, 120) : "could not run it");
+
 // `dev/t7` → { on: "dev", terminal: "t7" }; `t7` → { on: null, terminal: "t7" }.
 function split(address) {
   const i = address.indexOf("/");
@@ -73,16 +95,24 @@ export default class SheprdPanel extends View {
       try {
         const list = machines().filter((m) => full || (m.name ?? null) === only);
         const docs = { .../** @type {object} */ (shared("sheprd.cards") ?? {}) };
+        const errs = { .../** @type {object} */ (shared("sheprd.cards.err") ?? {}) };
         const got = await Promise.all(list.filter((m) => m.layout !== "unavailable").map(async (m) => {
+          const name = m.name ?? "local";
           try {
-            const r = await exec("cards", ["json"], { on: m.name });
-            return r.code === 0 ? [m.name ?? "local", JSON.parse(r.stdout)] : null;
+            const r = await runCards(["json"], m.name);
+            if (r && r.code === 0) {
+              delete errs[name];
+              return [name, JSON.parse(r.stdout)];
+            }
+            errs[name] = cardsFailure(r); // not installed there, or the machine went away
           } catch {
-            return null; // not installed there, or the machine went away
+            errs[name] = "unreadable answer";
           }
+          return null;
         }));
         for (const entry of got) if (entry) docs[entry[0]] = entry[1];
         setShared("sheprd.cards", docs);
+        setShared("sheprd.cards.err", errs);
         if (full) setShared("sheprd.cards.at", Date.now());
       } finally {
         if (full) this.loading = false;
@@ -114,8 +144,8 @@ export default class SheprdPanel extends View {
     const { on } = split(address);
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("cards", args, { on });
-        this.note = r.code === 0 ? null : (r.stderr || r.stdout).trim().replace(/^cards: /, "");
+        const r = await runCards(args, on);
+        this.note = r && r.code === 0 ? null : cardsFailure(r).replace(/^cards: /, "");
       } catch (err) {
         this.note = String(err);
       }
@@ -137,6 +167,21 @@ export default class SheprdPanel extends View {
     cx.notify();
   }
 
+  // Machines whose cards could not be read, as text to show next to (or instead of) an empty list.
+  failures() {
+    const errs = /** @type {Record<string, string>} */ (shared("sheprd.cards.err") ?? {});
+    const list = Object.entries(errs).map(([machine, why]) => `cards not available on ${machine === "local" ? "this machine" : machine} (${why})`);
+    return list.length ? ` ${list.join("; ")}.` : "";
+  }
+
+  noCards(address) {
+    const errs = /** @type {Record<string, string>} */ (shared("sheprd.cards.err") ?? {});
+    const machine = split(address).on ?? "local";
+    return errs[machine]
+      ? `cards not available on ${machine === "local" ? "this machine" : machine} (${errs[machine]})`
+      : "No cards from this agent.";
+  }
+
   // ---- pieces ---------------------------------------------------------------
 
   button(t, id, label, action, { primary = false, active = false, dim = false } = {}) {
@@ -149,6 +194,16 @@ export default class SheprdPanel extends View {
       .child(label);
   }
 
+  // An answer option: as wide as the panel, as tall as its text.
+  option(t, id, label, action, active) {
+    return h_flex().id(id).w_full().min_h(24).px(8).py(4).rounded(6).items_start().text_size(11.5)
+      .bg(active ? t.selected : t.raised).text_color(t.foreground)
+      .border_1().border_color(active ? t.accent : t.border)
+      .cursor_pointer().hover((s) => s.opacity(0.85))
+      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
+      .child(div().flex_1().min_w(0).child(label));
+  }
+
   question(t, address, card, q) {
     const key = `${address}/${card.id}/${q.n}`;
     const editing = this.editing?.key === key;
@@ -157,15 +212,16 @@ export default class SheprdPanel extends View {
         .child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child(`Q${q.n}`))
         .child(div().flex_1().min_w(0).text_size(12.5).child(q.text))
         .child(this.button(t, `qd-${key}`, "✕", (cx) => this.act(cx, address, ["dismiss", split(address).terminal, card.id, "--question", String(q.n)]), { dim: true })))
-      .child(h_flex().gap(6).flex_wrap()
-        .children(q.options.map((o, i) => this.button(t, `qo-${key}-${i}`, q.recommend === i + 1 ? `★ ${o}` : o,
-          (cx) => this.stage(cx, address, card, q, o), { active: q.state === "staged" && q.answer === o })))
-        .child(this.button(t, `qe-${key}`, "✎", (cx) => {
+      // One option per row, its text wrapping: a long option used to run past the panel's edge.
+      .child(v_flex().gap(4)
+        .children(q.options.map((o, i) => this.option(t, `qo-${key}-${i}`, q.recommend === i + 1 ? `★ ${o}` : o,
+          (cx) => this.stage(cx, address, card, q, o), q.state === "staged" && q.answer === o)))
+        .child(h_flex().child(this.button(t, `qe-${key}`, "✎", (cx) => {
           this.editing = { key, address, card, q };
           this.input.set_value(q.state === "staged" && !q.options.includes(q.answer) ? q.answer : "");
           this.input.focus();
           cx.notify();
-        }, { active: editing })))
+        }, { active: editing }))))
       .when(editing, (el) => el.child(Input.new(this.input).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.chrome).text_size(12.5)))
       .when(q.state === "staged" && !q.options.includes(q.answer) && !editing, (el) => el.child(div().text_size(11.5).text_color(t.accent).child(`→ ${q.answer}`)))
       .when(q.state === "sending", (el) => el.child(div().text_size(11.5).text_color(t.dim)
@@ -236,8 +292,9 @@ export default class SheprdPanel extends View {
         .filter(([, cards]) => cards.length > 0)
         .sort(([, x], [, y]) => y.flatMap((c) => c.questions.filter(live)).length - x.flatMap((c) => c.questions.filter(live)).length);
       body = entries.length === 0
-        ? div().text_size(12).text_color(t.dim).child("No open cards. Agents add them with `cards update`.")
-        : v_flex().gap(14).children(entries.map(([addr, cards]) => this.agentBlock(t, addr, cards, true)));
+        ? div().text_size(12).text_color(t.dim).child(`No open cards. Agents add them with \`cards update\`.${this.failures()}`)
+        : v_flex().gap(14).children(entries.map(([addr, cards]) => this.agentBlock(t, addr, cards, true)))
+          .when(this.failures() !== "", (el) => el.child(div().text_size(11).text_color(t.dim).child(this.failures().trim())));
     } else if (!address) {
       body = div().text_size(12).text_color(t.dim).child("Focus an agent to see its cards and output.");
     } else {
@@ -247,7 +304,7 @@ export default class SheprdPanel extends View {
         .child(h_flex().gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(agent?.space_name || address))
           .child(div().flex_none().text_size(10.5).text_color(t.dim).child(split(address).on ? machineTag(split(address).on) : "here")))
-        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child("No cards from this agent."))
+        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child(this.noCards(address)))
         .child(div().id("out-toggle").pt(6).text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => {
             this.showOutput = !this.showOutput;

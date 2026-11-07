@@ -137,7 +137,7 @@ def task_patterns():
 def fresh_cache():
     return {
         "offset": 0, "last_id": None, "ctx": 0, "model": "", "days": {},
-        "todos": [], "pending_creates": {}, "timeline": [], "tasks": [], "sent": [],
+        "todos": [], "pending_creates": {}, "timeline": [], "tasks": [], "prompt_tasks": [], "sent": [],
     }
 
 
@@ -168,6 +168,16 @@ def note_tasks(cache, text, patterns):
                 cache["tasks"].remove(task)
             cache["tasks"].insert(0, task)
     del cache["tasks"][20:]
+
+
+def note_prompt_tasks(cache, text, patterns):
+    """Reference ids the human named in a prompt: the cards this session itself works on."""
+    for source in patterns:
+        for task in source.findall(text):
+            if task in cache["prompt_tasks"]:
+                cache["prompt_tasks"].remove(task)
+            cache["prompt_tasks"].insert(0, task)
+    del cache["prompt_tasks"][20:]
 
 
 def apply_tool_use(cache, use):
@@ -228,6 +238,7 @@ def read_new_lines(cache, transcript, patterns):
                 })
                 del cache["timeline"][:-50]
                 note_tasks(cache, prompt, patterns)
+                note_prompt_tasks(cache, prompt, patterns)
 
             if isinstance(content, list):
                 for part in content:
@@ -467,11 +478,16 @@ def one_line(text, limit):
     return fit("".join(c if c.isprintable() else " " for c in str(text)), limit)
 
 
-def task_updates(tasks):
-    """Inferred `sheprd card update` arguments for the subagent tasks that have a card id."""
+def task_updates(tasks, own=None):
+    """Inferred `sheprd card update` arguments for the subagent tasks that have a card id.
+    A subagent's description can name any card ("Build ... (XYZ-1 A)"), and that must not become
+    a card of the parent session: only the ids the human named in this session's own prompts
+    (`own`, from `prompt_tasks`) get one. `own=None` keeps every id (older callers)."""
     updates = {}
     for task in tasks:
         key = task.get("key") or ""
+        if own is not None and key not in own:
+            continue
         if LEDGER_ID.match(key):
             # The `--name=value` form: a text starting with "--" must not be read as an option.
             updates[key] = [f"--title={one_line(task['label'], 120)}", f"--status={ledger_status(task)}"]
@@ -931,7 +947,7 @@ def main():
     os.replace(tmp, cache_path)
 
     asked = cache.get("questions", []) if event in ("Stop", "PostToolUse") else None
-    ledger_tasks = task_updates(work_tasks)
+    ledger_tasks = task_updates(work_tasks, cache.get("prompt_tasks", []))
 
     if os.environ.get("SHEPRD_HOOK_DRY"):
         state = load_ledger_state(session)

@@ -269,6 +269,48 @@ class HerdrAppLedgerTests(unittest.TestCase):
         start.assert_not_called()
 
 
+class SubagentCardTests(unittest.TestCase):
+    """A subagent's description may name any card: it must not become a card of the parent."""
+
+    patterns = [hook.RefSource(r"\b[A-Z]{2,5}-\d+\b")]
+
+    def transcript(self, *entries):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        self.addCleanup(os.unlink, handle.name)
+        for entry in entries:
+            handle.write(json.dumps(entry) + "\n")
+        handle.close()
+        return handle.name
+
+    def read(self, *entries):
+        cache = hook.fresh_cache()
+        hook.read_new_lines(cache, self.transcript(*entries), self.patterns)
+        return cache
+
+    def user(self, text):
+        return {"type": "user", "timestamp": "2026-10-30T10:00:00Z", "message": {"content": text}}
+
+    def assistant(self, text):
+        return {"type": "assistant", "timestamp": "2026-10-30T10:00:01Z",
+                "message": {"id": text, "content": [{"type": "text", "text": text}],
+                            "usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+    def test_only_the_humans_prompts_name_the_sessions_own_cards(self):
+        cache = self.read(self.user("work on ABC-1"), self.assistant("I will also look at XYZ-1"))
+        self.assertEqual(cache["prompt_tasks"], ["ABC-1"])
+        self.assertIn("XYZ-1", cache["tasks"])  # still shown by the work panel
+
+    def test_a_subagent_naming_another_card_makes_no_card_for_the_parent(self):
+        tasks = [{"key": "ABC-1", "label": "mine", "stages": [{"state": "r"}]},
+                 {"key": "XYZ-1", "label": "Build the thing (XYZ-1 A)", "stages": [{"state": "d"}]}]
+        self.assertEqual(sorted(hook.task_updates(tasks, ["ABC-1"])), ["ABC-1"])
+        self.assertEqual(hook.task_updates(tasks, []), {})
+
+    def test_an_older_cache_without_prompt_tasks_still_loads(self):
+        cache = {**hook.fresh_cache(), **{"offset": 5}}
+        self.assertEqual(cache["prompt_tasks"], [])
+
+
 class SummaryQuestionTests(unittest.TestCase):
     """Questions from the summarizer and the pane-text fallback (SHE-100009 review): no
     placeholders, no shell prompts."""

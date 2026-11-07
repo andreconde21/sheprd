@@ -157,20 +157,50 @@ function cardsByAddress() {
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
 const openQuestions = (cards) => (cards ?? []).filter((c) => !c.dismissed).flatMap((c) => c.questions.filter(live));
 
+// `cards` lives in ~/.local/bin, which the herdr-core of a machine reached over SSH often does not
+// have on its PATH. Try the PATH first, then that file. Resolves to the result, or null when it
+// could not be run at all.
+async function runCards(args, on) {
+  const missing = (r) => r.code === 127 || /not found|no such file/i.test(r.stderr ?? "");
+  let first = null;
+  try {
+    first = await exec("cards", args, { on });
+    if (first.code === 0 || !missing(first)) return first;
+  } catch {
+    first = null;
+  }
+  try {
+    return await exec("sh", ["-c", 'exec "$HOME/.local/bin/cards" "$@"', "cards", ...args], { on });
+  } catch {
+    return first;
+  }
+}
+
+// Why a machine's cards could not be read: a line to show instead of an empty list.
+const cardsFailure = (r) => (r ? (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0].slice(0, 120) : "could not run it");
+
 // `cards json` from the given machines, merged over the last good result.
 async function fetchCards(list) {
   const docs = { .../** @type {object} */ (shared("sheprd.cards") ?? {}) };
+  const errs = { .../** @type {object} */ (shared("sheprd.cards.err") ?? {}) };
   const present = new Set(machines().map((m) => m.name ?? "local"));
   for (const key of Object.keys(docs)) if (!present.has(key)) delete docs[key];
   const got = await Promise.all(list.filter((m) => m.layout !== "unavailable").map(async (m) => {
+    const name = m.name ?? "local";
     try {
-      const r = await exec("cards", ["json"], { on: m.name });
-      return r.code === 0 ? [m.name ?? "local", JSON.parse(r.stdout)] : null;
+      const r = await runCards(["json"], m.name);
+      if (r && r.code === 0) {
+        delete errs[name];
+        return [name, JSON.parse(r.stdout)];
+      }
+      errs[name] = cardsFailure(r); // not installed there, or the machine went away
     } catch {
-      return null; // not installed there, or the machine went away
+      errs[name] = "unreadable answer";
     }
+    return null;
   }));
   for (const entry of got) if (entry) docs[entry[0]] = entry[1];
+  setShared("sheprd.cards.err", errs);
   return docs;
 }
 

@@ -39,6 +39,10 @@ by apps through `cards stage / dismiss / send`.
 - `questions[].state`: `open` → `staged` (an app chose an answer) →
   `sending` (claimed by one `cards send`) → `sent` (delivered with
   `hc send`), or `dismissed`. A failed send puts `sending` back to `staged`.
+  An agent closes a question the user answered in the conversation with
+  `cards answered <id> --question N [--answer TEXT]` (or `--all`): the state
+  becomes `answered` (with `answered_at`, and `answer` when given). Open and
+  staged questions can be closed this way; one being sent cannot.
   While `sending`, a question carries `claim` and `claimed_at`; a claim older
   than 120 s belongs to a send that died and may be staged and sent again
   (if that send had already typed the line, the agent gets it twice).
