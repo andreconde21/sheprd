@@ -11,9 +11,12 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 loader = importlib.machinery.SourceFileLoader("cards", os.path.join(HERE, "..", "bin", "cards"))
@@ -349,6 +352,217 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(len(card["questions"]), 21)
         self.assertEqual(card["questions"][-1]["n"], 99)
         self.assertEqual(len(doc["inbox"]["t7"]), 5)
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+WEBP = b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 8
+
+
+def evidence_args(**kw):
+    base = dict(id="SHE-1", image=None, test=None, link=None, label=None, clear=False)
+    return ns(**{**base, **kw})
+
+
+class EvidenceTests(unittest.TestCase):
+    setUp_ledger = LedgerTests.setUp
+    tearDown_ledger = LedgerTests.tearDown
+    doc = LedgerTests.doc
+
+    def setUp(self):
+        self.setUp_ledger()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = os.path.join(self.tmp.name, "store")
+        self.env = unittest.mock.patch.dict(os.environ, {"SHEPRD_EVIDENCE_DIR": self.store})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tearDown_ledger()
+
+    def file(self, name, data):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    def add(self, **kw):
+        quiet(cards.cmd_evidence, evidence_args(**kw))
+
+    def items(self):
+        return self.doc()["cards"]["t7/SHE-1"]["evidence"]
+
+    def refuses(self, fn, args):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            fn(args)
+
+    def test_images_are_copied_to_a_private_folder_and_read_back_as_base64(self):
+        self.add(image=self.file("shot.png", PNG), label="Login page")
+        item = self.items()[0]
+        self.assertEqual((item["kind"], item["mime"], item["label"]), ("image", "image/png", "Login page"))
+        stored = os.path.join(self.store, item["file"])
+        with open(stored, "rb") as handle:
+            self.assertEqual(handle.read(), PNG)
+        self.assertEqual(os.stat(stored).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(self.store).st_mode & 0o777, 0o700)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cards.cmd_evidence_image(ns(id="SHE-1", n=1))
+        import base64
+        self.assertEqual(base64.b64decode(out.getvalue()), PNG)
+
+    def test_webp_is_accepted_and_other_types_are_not(self):
+        self.add(image=self.file("a.webp", WEBP))
+        self.assertEqual(self.items()[0]["mime"], "image/webp")
+        for name, data in (("a.svg", b"<svg xmlns='x'/>"), ("a.png", b"not a png at all"), ("a.txt", b"")):
+            self.refuses(cards.cmd_evidence, evidence_args(image=self.file(name, data)))
+
+    def test_only_regular_files_under_the_size_cap(self):
+        fifo = os.path.join(self.tmp.name, "fifo.png")
+        os.mkfifo(fifo)
+        started = time.time()
+        self.refuses(cards.cmd_evidence, evidence_args(image=fifo))
+        self.assertLess(time.time() - started, 2)
+        os.symlink("/dev/zero", os.path.join(self.tmp.name, "zero.png"))
+        self.refuses(cards.cmd_evidence, evidence_args(image=os.path.join(self.tmp.name, "zero.png")))
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.tmp.name))
+        self.refuses(cards.cmd_evidence, evidence_args(image=os.path.join(self.tmp.name, "missing.png")))
+        self.refuses(cards.cmd_evidence, evidence_args(image=self.file("big.png", PNG + b"\0" * cards.IMAGE_MAX)))
+        self.assertEqual(self.doc()["cards"].get("t7/SHE-1", {}).get("evidence", []), [])
+
+    def test_a_stored_file_that_grew_or_changed_is_not_served(self):
+        self.add(image=self.file("shot.png", PNG))
+        stored = os.path.join(self.store, self.items()[0]["file"])
+        with open(stored, "wb") as handle:
+            handle.write(b"<html>")
+        self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=1))
+        self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=2))
+
+    def test_test_runs_keep_passed_and_failed(self):
+        self.add(test="unit: 37/0")
+        self.add(test="e2e: 12 / 3")
+        self.add(test="smoke ok")
+        first, second, third = self.items()
+        self.assertEqual((first["passed"], first["failed"]), (37, 0))
+        self.assertEqual((second["passed"], second["failed"]), (12, 3))
+        self.assertEqual((third["passed"], third["failed"]), (None, None))
+
+    def test_links_must_be_http(self):
+        self.add(link="https://example.test/deploy/1", label="Deploy check")
+        self.add(link="https://example.test/x")
+        self.assertEqual([i["label"] for i in self.items()], ["Deploy check", "example.test"])
+        for bad in ("javascript:alert(1)", "file:///etc/passwd", "https://a b", "ftp://x.test/", "//x.test"):
+            self.refuses(cards.cmd_evidence, evidence_args(link=bad))
+
+    def test_exactly_one_kind_per_call(self):
+        self.refuses(cards.cmd_evidence, evidence_args())
+        self.refuses(cards.cmd_evidence, evidence_args(test="a: 1/0", link="https://x.test/"))
+        self.refuses(cards.cmd_evidence, evidence_args(test="a: 1/0", clear=True))
+
+    def test_only_the_newest_twelve_stay_and_dropped_images_leave_the_disk(self):
+        self.add(image=self.file("first.png", PNG))
+        first = self.items()[0]["file"]
+        for n in range(12):
+            self.add(test=f"run {n}: {n}/0")
+        items = self.items()
+        self.assertEqual(len(items), 12)
+        self.assertEqual(items[0]["text"], "run 0: 0/0")
+        self.assertFalse(os.path.exists(os.path.join(self.store, first)))
+
+    def test_the_same_image_twice_survives_dropping_one_copy(self):
+        path = self.file("shot.png", PNG)
+        self.add(image=path)
+        self.add(image=path)
+        self.assertEqual(self.items()[0]["file"], self.items()[1]["file"])
+        for n in range(11):
+            self.add(test=f"t{n}: 1/0")
+        self.assertEqual(len(self.items()), 12)
+        self.assertTrue(os.path.exists(os.path.join(self.store, self.items()[0]["file"])))
+
+    def test_clear_removes_items_and_files(self):
+        self.add(image=self.file("shot.png", PNG))
+        name = self.items()[0]["file"]
+        self.add(clear=True)
+        self.assertEqual(self.items(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.store, name)))
+
+    def test_a_tampered_file_name_in_the_document_is_never_read_or_deleted(self):
+        victim = self.file("victim", PNG)
+        self.add(test="a: 1/0")
+
+        def forge(doc):
+            doc["cards"]["t7/SHE-1"]["evidence"] = [{"kind": "image", "file": "../victim", "mime": "image/png"}]
+
+        cards.change(forge)
+        self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=1))
+        for name in ("..", "."):
+            cards.change(lambda doc, name=name: doc["cards"]["t7/SHE-1"].update(
+                evidence=[{"kind": "image", "file": name, "mime": "image/png"}]))
+            self.refuses(cards.cmd_evidence_image, ns(id="SHE-1", n=1))
+        self.add(clear=True)
+        self.assertTrue(os.path.exists(victim))
+
+
+PANEL = os.path.join(HERE, "..", "mods", "sheprd-panel", "main.js")
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the panel's filter block")
+class PanelFilterTests(unittest.TestCase):
+    """The panel's status filter: its marked block of main.js, run in node."""
+
+    def run_js(self, body):
+        with open(PANEL) as handle:
+            source = handle.read()
+        block = source.split("// filter:begin", 1)[1].split("// filter:end", 1)[0].split("\n", 1)[1]
+        script = ('const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";\n'
+                  + block + "\n" + body)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_every_status_maps_to_one_chip_and_unknown_ones_only_show_under_all(self):
+        out = self.run_js('''
+          const card = (status, extra = {}) => ({ status, done: false, questions: [], ...extra });
+          const names = ["needs", "working", "review", "blocked", "done", "all"];
+          const where = (c) => names.filter((n) => cardMatches(c, n));
+          console.log(JSON.stringify({
+            "in-progress": where(card("in-progress")), working: where(card("Working")), running: where(card("running")),
+            review: where(card("review")), prOpen: where(card("PR open")), verify: where(card("verify")),
+            blocked: where(card("blocked")), stopped: where(card("stopped")),
+            done: where(card("done")), toDeploy: where(card("to-deploy")),
+            flagged: where(card("x", { done: true })),
+            unknown: where(card("idle")), none: where(card(null)),
+          }));
+        ''')
+        self.assertEqual(out["in-progress"], ["working", "all"])
+        self.assertEqual(out["working"], ["working", "all"])
+        self.assertEqual(out["running"], ["working", "all"])
+        self.assertEqual((out["review"], out["prOpen"], out["verify"]), (["review", "all"],) * 3)
+        self.assertEqual((out["blocked"], out["stopped"]), (["blocked", "all"],) * 2)
+        self.assertEqual((out["done"], out["toDeploy"], out["flagged"]), (["done"],) * 3)
+        self.assertEqual((out["unknown"], out["none"]), (["all"], ["all"]))
+
+    def test_open_questions_need_you_whatever_the_status_and_keep_a_done_card_visible(self):
+        out = self.run_js('''
+          const q = (state) => ({ state });
+          const cards = [
+            { status: "working", done: false, questions: [q("open")] },
+            { status: "done", done: true, questions: [q("open")] },
+            { status: "review", done: false, questions: [q("answered"), q("sent"), q("dismissed")] },
+            { status: "done", done: true, questions: [] },
+            { status: "weird", done: false, questions: [] },
+          ];
+          console.log(JSON.stringify(filterCounts(cards)));
+        ''')
+        self.assertEqual(out, {"needs": 2, "working": 1, "review": 1, "blocked": 0, "done": 2, "all": 4})
+
+    def test_the_chips_and_their_remembered_choice_are_wired_in_the_panel(self):
+        with open(PANEL) as handle:
+            source = handle.read()
+        self.assertIn('stored("filter", "all")', source)
+        self.assertIn('store("filter", key)', source)
+        self.assertRegex(source, r"const stored = .*try \{ return localStorage")
+        self.assertIn("FILTERS.some(([key]) => key === saved)", source)  # a bad saved value falls back
 
 
 class WritebackEdgeTests(unittest.TestCase):

@@ -58,3 +58,8 @@ card back to its task file with the same `[ledger.writeback]` section of
   `on_card_done` hook is not ported.
 - The sidebar has no per-project notification setting.
 - Cards refresh every 5 s (herdr-core has no doc events through `exec`).
+
+The panel's chips (Needs me, Working, Review, Blocked, Done, All) filter by the card's status; the
+mapping is one table at the top of `mods/sheprd-panel/main.js`, Done is hidden under All, and the
+choice is remembered. Evidence images are shown as thumbnails drawn from a `data:` URI; where the
+app's `image()` does not accept one, the label shows instead.

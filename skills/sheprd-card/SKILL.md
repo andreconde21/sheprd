@@ -58,6 +58,11 @@ sheprd card list             # your cards as the user sees them
 - When the user answers a question in the conversation instead of the panel, close it so it stops
   showing as open: `cards answered SHE-12 --question 1 --answer "Stripe"` (or `--all` for the
   card). This is a `cards` command (Herdr app); under sheprd answer it in the panel or dismiss it.
+- When you verify something, attach the proof to the card (Herdr app, `cards`): a screenshot
+  `cards evidence SHE-12 --image shot.png --label "Login page"`, a test run
+  `cards evidence SHE-12 --test "unit: 37/0"` (passed/failed, last), a deploy check or PR
+  `cards evidence SHE-12 --link https://… --label "Deploy check"`. Images only (png, jpeg, gif,
+  webp, at most 2 MB); the newest 12 stay. Never attach a screenshot showing secrets or personal data.
 
 ## Rules
 - One line per field, no control characters. Card IDs: `A-Z a-z 0-9 # . _ -`, max 32 chars.

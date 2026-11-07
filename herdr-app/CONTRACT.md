@@ -27,6 +27,7 @@ by apps through `cards stage / dismiss / send`.
           "recommend": 1, "state": "open", "answer": null, "asked_at": "…" }
       ],
       "decisions": [ { "text": "Use Checkout, not Elements", "at": "…" } ],
+      "evidence": [ { "kind": "test", "text": "unit: 37/0", "passed": 37, "failed": 0, "label": "", "at": "…" } ],
       "done": false, "done_at": null, "dismissed": false,
       "writeback": { "ok": true, "message": "wrote SHE-12.md" },
       "created_at": "…", "updated_at": "…"
@@ -50,6 +51,17 @@ by apps through `cards stage / dismiss / send`.
 - Sending joins every staged answer of one terminal into one line, e.g.
   `SHE-12 Q1 (Which provider?) → Stripe · Q2 → "EUR only"`, delivered with
   `hc send <terminal>` and kept in `inbox` until the agent runs `cards answers`.
+- `evidence` (newest 12): what the agent verified, added with `cards evidence <id>`.
+  `kind: "image"` (`--image PATH`: png, jpeg, gif or webp, regular file, at most 2 MB, checked by its
+  first bytes) is copied to `$SHEPRD_EVIDENCE_DIR` (default `~/.local/share/sheprd/evidence`, mode
+  0700, files 0600) and stored as `file` (a bare name) + `mime` + `label`; the document never holds
+  the bytes. `kind: "test"` (`--test "suite: P/F"`) keeps `text`, and `passed`/`failed` when the
+  text ends in `P/F` (else `null`). `kind: "link"` (`--link URL`, http or https only) has `url` and
+  `label` (default: the host). `--clear` removes them all. Images that fall off the list (or are
+  cleared) are deleted from the folder. Apps fetch an image over the same `cards` channel as
+  `cards json`: `cards evidence-image <id> <N> --terminal T` prints it as base64 (N counts from 1
+  in `evidence`); it refuses anything but a stored regular image file. Show a test green when
+  `failed` is 0, red when above 0, neutral when `null`; a missing image as its label.
 - `dismissed` hides a card from views until its next update.
 - `born` (cards and inbox entries) is the terminal's `created_ms`. When a new
   program starts in `t7` (a core restart reuses the id, or a new session), its
