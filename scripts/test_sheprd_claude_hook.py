@@ -43,7 +43,10 @@ class CardLedgerTests(unittest.TestCase):
 
     def fake_herdr(self, body):
         script = self.root / "herdr"
-        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n{body}\n')
+        # Strict like herdr's own parser: it knows no `--name=value` form.
+        strict = ('for a in "$@"; do case "$a" in --title=*|--status=*|--inferred-question=*) '
+                  'echo "unknown option for `card update`: $a" >&2; exit 2;; esac; done')
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n{strict}\n{body}\n')
         script.chmod(0o755)
         os.environ["HERDR_BIN_PATH"] = str(script)
 
@@ -151,6 +154,119 @@ class CardLedgerTests(unittest.TestCase):
             time.sleep(0.1)
         self.assertEqual(hook.load_ledger_state("s1")["sent"], tasks)
 
+
+
+class HerdrAppLedgerTests(unittest.TestCase):
+    """Inside the Herdr app there is no pane id: the hook writes the ledger with `cards`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = self.root / "calls.log"
+        self.env = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.env.start()
+        for name in ("HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_BIN_PATH", "SHEPRD_CARDS_BIN", "HC_TERMINAL_ID"):
+            os.environ.pop(name, None)
+        self.cache = mock.patch.object(hook, "CACHE_DIR", str(self.root / "cache"))
+        self.cache.start()
+
+    def tearDown(self):
+        self.cache.stop()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def fake_cards(self, body=""):
+        script = self.root / "cards"
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n{body}\n')
+        script.chmod(0o755)
+        os.environ["SHEPRD_CARDS_BIN"] = str(script)
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_a_terminal_target_writes_with_cards(self):
+        self.fake_cards()
+        hook.send_ledger("s1", "terminal:t7", {"SHE-1": ["--title", "one", "--status", "running"]}, None)
+        self.assertEqual(self.calls(), ["update SHE-1 --inferred --terminal t7 --title one --status running"])
+
+    def test_cards_without_the_inferred_flags_pauses_the_ledger(self):
+        self.fake_cards('echo "cards update: error: unrecognized arguments: --inferred" >&2; exit 2')
+        tasks = {"SHE-1": ["--title", "one"], "SHE-2": ["--title", "two"]}
+        hook.send_ledger("s1", "terminal:t7", tasks, None)
+        hook.send_ledger("s1", "terminal:t7", tasks, None)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertTrue(hook.load_ledger_state("s1")["unsupported"])
+
+    def test_no_cards_command_pauses_the_ledger(self):
+        with mock.patch.object(hook.shutil, "which", return_value=None):
+            hook.send_ledger("s1", "terminal:t7", {"SHE-1": ["--title", "one"]}, None)
+        self.assertTrue(hook.load_ledger_state("s1")["unsupported"])
+
+    def test_a_pane_target_still_uses_herdr(self):
+        script = self.root / "herdr"
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{self.log}"\n')
+        script.chmod(0o755)
+        os.environ["HERDR_BIN_PATH"] = str(script)
+        hook.send_ledger("s1", "w1:p1", {"SHE-1": ["--title", "one"]}, None)
+        self.assertEqual(self.calls(), ["card update SHE-1 --inferred --pane w1:p1 --title one"])
+
+    def test_the_pane_command_uses_separate_arguments_even_for_dashed_text(self):
+        script = self.root / "herdr"
+        script.write_text('#!/bin/sh\nfor a in "$@"; do case "$a" in --title=*|--status=*|--inferred-question=*) '
+                          'echo "unknown option for `card update`: $a" >&2; exit 2;; esac; done\n'
+                          f'printf "%s|" "$@" >> "{self.log}"; echo >> "{self.log}"\n')
+        script.chmod(0o755)
+        os.environ["HERDR_BIN_PATH"] = str(script)
+        updates = hook.task_updates([{"key": "SHE-1", "label": "--help me", "stages": [{"state": "r"}]}])
+        hook.send_ledger("s1", "w1:p1", updates, ["--force it?"])
+        self.assertEqual(self.calls()[0], "card|update|SHE-1|--inferred|--pane|w1:p1|--title|--help me|--status|running|")
+        self.assertIn("--inferred-question|--force it?|", self.calls()[1])
+        self.assertIn("SHE-1", hook.load_ledger_state("s1")["sent"])  # accepted, so not retried every turn
+        self.assertNotIn("unsupported", hook.load_ledger_state("s1"))
+
+    def test_texts_starting_with_dashes_are_sent_in_the_equals_form(self):
+        updates = hook.task_updates([{"key": "SHE-1", "label": "--help me", "stages": [{"state": "r"}]}])
+        self.assertEqual(updates["SHE-1"], ["--title=--help me", "--status=running"])
+        plan = hook.ledger_plan({}, {}, ["--force it?"], "session")
+        self.assertIn("--inferred-question=--force it?", plan["session"])
+        self.assertIn("--title=this session", plan["session"])
+        self.fake_cards()
+        hook.send_ledger("s1", "terminal:t7", updates, ["--force it?"])
+        self.assertIn("update SHE-1 --inferred --terminal t7 --title=--help me --status=running", self.calls())
+
+    def test_clearing_questions_is_recognised_in_the_equals_form(self):
+        plan = hook.ledger_plan({"sent": {"session": ["--title=this session", "--inferred-question=Q?"]}}, {}, [], "session")
+        self.assertIn("--clear-questions", plan["session"])
+
+    def run_hook(self, env):
+        transcript = self.root / "t.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-10-30T10:00:00Z",
+            "message": {"id": "a", "model": "m", "content": [{"type": "text", "text": "Deploy now?"}],
+                        "usage": {"input_tokens": 1, "output_tokens": 1}},
+        }) + "\n")
+        payload = json.dumps({"transcript_path": str(transcript), "session_id": "s1", "hook_event_name": "Stop"})
+        with mock.patch.dict(os.environ, env), \
+                mock.patch("sys.stdin", __import__("io").StringIO(payload)), \
+                mock.patch.object(hook, "report") as report, \
+                mock.patch.object(hook, "start_ledger") as start:
+            hook.main()
+        return report, start
+
+    def test_the_hook_runs_with_only_a_terminal_id(self):
+        report, start = self.run_hook({"HC_TERMINAL_ID": "t7"})
+        report.assert_not_called()  # pane metadata needs a sheprd pane
+        self.assertEqual(start.call_args.args[1], "terminal:t7")
+
+    def test_the_hook_still_prefers_the_pane(self):
+        report, start = self.run_hook({"HERDR_PANE_ID": "w1:p1", "HC_TERMINAL_ID": "t7"})
+        report.assert_called_once()
+        self.assertEqual(start.call_args.args[1], "w1:p1")
+
+    def test_the_hook_does_nothing_with_neither(self):
+        report, start = self.run_hook({})
+        report.assert_not_called()
+        start.assert_not_called()
 
 
 class SummaryQuestionTests(unittest.TestCase):

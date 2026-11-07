@@ -47,9 +47,20 @@ by apps through `cards stage / dismiss / send`.
   `SHE-12 Q1 (Which provider?) → Stripe · Q2 → "EUR only"`, delivered with
   `hc send <terminal>` and kept in `inbox` until the agent runs `cards answers`.
 - `dismissed` hides a card from views until its next update.
-- `born` (cards and inbox entries) is the terminal's `created_ms`: when a
-  core restart reuses `t7` for a new program, that program's first `cards`
-  write drops whatever an older `born` left behind.
+- `born` (cards and inbox entries) is the terminal's `created_ms`. When a new
+  program starts in `t7` (a core restart reuses the id, or a new session), its
+  first `cards` write adopts the open cards of the older `born` (their `born`
+  becomes the new one, so a restarted session still sees its work) and drops
+  the finished or dismissed ones, the open ones untouched for 7 days, and every
+  answer in the `inbox` of the older `born` (read or not: it may answer someone
+  else's question; each answer is also kept on its question).
+- Cards written before `explicit` existed have no such list, so the first
+  inferred write after an upgrade may overwrite a field an agent set earlier.
+- `explicit` (card, optional): the fields an explicit `cards update` set. A hook's
+  `cards update --inferred` fills only the other fields, never reopens a done
+  card, and keeps `--inferred-question` entries (`inferred: true` on the question)
+  separate from asked ones: each inferred write replaces the open inferred
+  questions, `--clear-questions` drops them, an asked question is never touched.
 - Pruning on every write: done cards 14 days after `done_at`; dismissed cards
   7 days and not-done cards 30 days after `updated_at`; per card all live
   questions plus the last 20 answered, the last 50 decisions; inbox entries
