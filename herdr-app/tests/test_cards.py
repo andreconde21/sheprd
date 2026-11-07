@@ -209,11 +209,77 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.doc()["cards"]["t7/SHE-1"]["questions"][0]["state"], "staged")
         self.assertEqual(self.doc()["inbox"], {})
 
-    def test_new_program_in_a_reused_terminal_starts_clean(self):
+    def backdate(self, key, days):
+        doc = self.doc()
+        doc["cards"][key]["updated_at"] = (cards.dt.datetime.now(cards.dt.timezone.utc) - cards.dt.timedelta(days=days)).isoformat(timespec="seconds")
+        FakeCore.docs[cards.DOC] = (doc, FakeCore.docs[cards.DOC][1])
+
+    def test_a_new_program_in_the_terminal_keeps_open_cards(self):
         self.ask("SHE-1", "Provider?")
-        self.born["t7"] = 2  # core restarted; t7 is someone else now
-        quiet(cards.cmd_update, ns(id="SHE-1", status="dev"))
-        self.assertEqual(self.doc()["cards"]["t7/SHE-1"]["questions"], [])
+        self.born["t7"] = 2  # the terminal got a new program (core restart or new session)
+        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
+        card = self.doc()["cards"]["t7/SHE-1"]
+        self.assertEqual(len(card["questions"]), 1)
+        self.assertEqual(card["born"], 2)  # adopted by the new program
+
+    def test_a_new_program_drops_finished_cards(self):
+        self.ask("SHE-1", "Provider?")
+        quiet(cards.cmd_done, ns(id="SHE-1", summary="ok"))
+        self.born["t7"] = 2
+        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
+        self.assertNotIn("t7/SHE-1", self.doc()["cards"])
+
+    def test_a_new_program_lets_stale_open_cards_expire(self):
+        self.ask("SHE-1", "Provider?")
+        self.backdate("t7/SHE-1", cards.KEEP_PREVIOUS_DAYS + 1)
+        self.born["t7"] = 2
+        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
+        self.assertNotIn("t7/SHE-1", self.doc()["cards"])
+
+    def test_a_card_the_program_keeps_updating_never_expires_on_restart_alone(self):
+        self.ask("SHE-1", "Provider?")
+        self.backdate("t7/SHE-1", cards.KEEP_PREVIOUS_DAYS - 1)
+        self.born["t7"] = 2
+        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
+        self.assertIn("t7/SHE-1", self.doc()["cards"])
+
+    def test_unread_answers_survive_a_new_program_read_ones_do_not(self):
+        doc = self.doc()
+        doc["inbox"]["t7"] = [
+            {"line": "unread", "at": cards.now(), "read": False, "born": 1},
+            {"line": "read", "at": cards.now(), "read": True, "born": 1},
+        ]
+        FakeCore.docs[cards.DOC] = (doc, 1)
+        self.born["t7"] = 2
+        quiet(cards.cmd_update, ns(id="SHE-2", status="dev"))
+        self.assertEqual([a["line"] for a in self.doc()["inbox"]["t7"]], ["unread"])
+
+    def test_an_inferred_update_never_overrides_an_explicit_one(self):
+        quiet(cards.cmd_update, ns(id="SHE-1", title="Mine", status="dev"))
+        quiet(cards.cmd_update, ns(id="SHE-1", title="Guess", status="running", summary="from a hook", inferred=True))
+        card = self.doc()["cards"]["t7/SHE-1"]
+        self.assertEqual((card["title"], card["status"], card["summary"]), ("Mine", "dev", "from a hook"))
+
+    def test_an_inferred_update_does_not_reopen_a_done_card(self):
+        quiet(cards.cmd_update, ns(id="SHE-1", title="Mine"))
+        quiet(cards.cmd_done, ns(id="SHE-1", summary="ok"))
+        quiet(cards.cmd_update, ns(id="SHE-1", status="running", inferred=True))
+        card = self.doc()["cards"]["t7/SHE-1"]
+        self.assertTrue(card["done"])
+        self.assertEqual(card["status"], "done")
+
+    def test_inferred_questions_are_replaced_and_can_be_cleared(self):
+        quiet(cards.cmd_update, ns(id="session", inferred=True, inferred_question=["Monthly?"]))
+        quiet(cards.cmd_update, ns(id="session", inferred=True, inferred_question=["Yearly?"]))
+        texts = [q["text"] for q in self.doc()["cards"]["t7/session"]["questions"] if q["state"] == "open"]
+        self.assertEqual(texts, ["Yearly?"])
+        quiet(cards.cmd_update, ns(id="session", inferred=True, clear_questions=True))
+        self.assertEqual([q for q in self.doc()["cards"]["t7/session"]["questions"] if q["state"] == "open"], [])
+
+    def test_an_explicit_question_survives_inferred_replacement(self):
+        self.ask("SHE-1", "Provider?")
+        quiet(cards.cmd_update, ns(id="SHE-1", inferred=True, clear_questions=True))
+        self.assertEqual(len(self.doc()["cards"]["t7/SHE-1"]["questions"]), 1)
 
     def test_write_over_the_cap_prunes_history_and_lands(self):
         for i in range(30):

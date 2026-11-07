@@ -40,6 +40,9 @@ DOC = os.environ.get("CARDS_DOC", "sheprd-cards")
 VIEW_DOC = os.environ.get("CARDS_VIEW_DOC", "sheprd-view")
 VERSION = 1
 KEEP_DONE_DAYS = 14
+# Open cards a previous program in the same terminal left behind are kept (a new session
+# usually continues the same work) but expire sooner than the 30 days of a live card.
+KEEP_PREVIOUS_DAYS = 7
 MAX_DECISIONS = 50
 MAX_INBOX = 50
 
@@ -194,7 +197,8 @@ def live(question):
 
 
 # A terminal id (t7) can come back for a new program after a core restart; its
-# start time tells the two apart, so a new agent never inherits old cards.
+# start time tells the two apart. A new program keeps the open cards of the old
+# one (they are adopted), drops the finished ones, and lets stale ones expire.
 _born = {}
 
 
@@ -209,15 +213,29 @@ def born_of(terminal):
 
 
 def forget_previous(doc, terminal, born):
-    """Drops cards and answers a previous program in this terminal left behind."""
+    """A new program started in this terminal. Cards a previous program left open stay and
+    become this program's (so a restarted session still sees its work); finished or dismissed
+    ones go, and open ones not touched for KEEP_PREVIOUS_DAYS expire. Unread answers stay
+    (the questions they answer are still on the cards); read ones go."""
     if born is None:
         return
     for key in list(doc["cards"]):
         card = doc["cards"][key]
-        if card["terminal"] == terminal and card.get("born") not in (None, born):
+        if card["terminal"] != terminal or card.get("born") in (None, born):
+            continue
+        if card.get("done") or card.get("dismissed") or age_days(card.get("updated_at")) >= KEEP_PREVIOUS_DAYS:
             del doc["cards"][key]
+        else:
+            card["born"] = born
     if terminal in doc["inbox"]:
-        doc["inbox"][terminal] = [a for a in doc["inbox"][terminal] if a.get("born") in (None, born)]
+        kept = []
+        for a in doc["inbox"][terminal]:
+            if a.get("born") in (None, born):
+                kept.append(a)
+            elif not a.get("read") and age_days(a.get("at")) < KEEP_PREVIOUS_DAYS:
+                a["born"] = born
+                kept.append(a)
+        doc["inbox"][terminal] = kept
 
 
 def my_terminal(args):
@@ -279,13 +297,37 @@ def cmd_update(args):
 
     def mutate(doc):
         card = get_card(doc, terminal, args.id, create=True)
+        inferred = getattr(args, "inferred", False)
+        # An explicit write always wins: an inferred one (from a hook) only fills what no
+        # explicit write has set, and never reopens a done card or un-dismisses one.
+        explicit = card.setdefault("explicit", [])
         for field, limit in (("title", 120), ("status", 30), ("summary", 600), ("link", 500)):
             value = getattr(args, field)
-            if value is not None:
+            if value is None:
+                continue
+            if inferred:
+                if field not in explicit and not card["done"]:
+                    card[field] = clip(value, limit)
+            else:
                 card[field] = clip(value, limit)
-        if card["done"] and args.status and args.status not in ("done",):
+                if field not in explicit:
+                    explicit.append(field)
+        if not inferred and card["done"] and args.status and args.status not in ("done",):
             card["done"] = False
-        touch(card)
+        questions = getattr(args, "inferred_question", None) or []
+        if inferred and (questions or getattr(args, "clear_questions", False)):
+            # The hook sends the questions the agent's last message left open, all of them
+            # each time: the earlier inferred ones are replaced (answered ones stay).
+            card["questions"] = [q for q in card["questions"] if not (q.get("inferred") and q["state"] == "open")]
+            number = max((q["n"] for q in card["questions"]), default=0)
+            for text in questions:
+                number += 1
+                card["questions"].append({"n": number, "text": clip(text, 300), "options": [], "recommend": None,
+                                          "state": "open", "answer": None, "asked_at": now(), "inferred": True})
+        if inferred:
+            card["updated_at"] = now()
+        else:
+            touch(card)
 
     change(mutate)
     print(f"{args.id} updated")
@@ -702,6 +744,10 @@ def main():
     p.add_argument("id")
     for field in ("title", "status", "summary", "link"):
         p.add_argument(f"--{field}")
+    p.add_argument("--inferred", action="store_true",
+                   help="written by a hook: fills only what no explicit write has set (never wins over one)")
+    p.add_argument("--inferred-question", action="append", help="with --inferred: an open question (repeat)")
+    p.add_argument("--clear-questions", action="store_true", help="with --inferred: drop earlier inferred questions")
     p.set_defaults(func=cmd_update)
 
     p = agent("ask", help="ask the user a question about a card")

@@ -30,6 +30,9 @@ inferred entries, one per subagent task with a reference id (title, running/done
 the open questions of the last message on the workspace's card (else on "session"). An explicit
 `sheprd card` write always wins; on an older sheprd the tokens above still carry it all. A
 background process per turn sends them, only when something changed, so the agent never waits.
+Inside the Herdr app (no HERDR_PANE_ID, HC_TERMINAL_ID set) the same entries are written with
+`cards update --inferred --terminal`; the pane metadata tokens and summaries need a sheprd pane
+and are skipped there.
 
 Model summaries run in the background with `summary_command` from ~/.config/herdr/sheprd-hook.toml
 (any command that reads a prompt on stdin and prints the answer: `codex exec -`, `ollama run
@@ -501,6 +504,22 @@ def ledger_plan(state, tasks, asked, question_item):
     return {key: args for key, args in updates.items() if sent.get(key) != args}
 
 
+TERMINAL_PREFIX = "terminal:"
+
+
+def ledger_command(target, item, args):
+    """The command that writes one inferred card update. `target` is a pane id (sheprd:
+    `herdr card update --pane`) or `terminal:<id>` (the Herdr app: `cards update --terminal`).
+    None when the tool for that target is not installed."""
+    if target.startswith(TERMINAL_PREFIX):
+        cards = os.environ.get("SHEPRD_CARDS_BIN") or shutil.which("cards")
+        if not cards:
+            return None
+        return [cards, "update", item, "--inferred", "--terminal", target[len(TERMINAL_PREFIX):], *args]
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    return [herdr, "card", "update", item, "--inferred", "--pane", target, *args]
+
+
 def send_ledger(key, pane, tasks, asked, question_item=None, seq=None):
     """Sends the inferred card updates that changed (in the background: from `start_ledger` or a
     summary). One batch at a time per session, and a batch older than the last one sent is
@@ -521,16 +540,18 @@ def _send_ledger_locked(key, pane, tasks, asked, question_item, seq):
         return
     if question_item is None:
         question_item = workspace_card(state) if asked is not None else "session"
-    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
     sent = state.setdefault("sent", {})
     for item, args in sorted(ledger_plan(state, tasks, asked, question_item).items()):
+        command = ledger_command(pane, item, args)
+        if command is None:  # no `cards` here: same as a server without a ledger
+            state["unsupported"] = time.time()
+            break
         try:
-            result = subprocess.run([herdr, "card", "update", item, "--inferred", "--pane", pane, *args],
-                                    capture_output=True, text=True, timeout=5, check=False)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
         except (OSError, subprocess.SubprocessError):
             break
         stderr = (result.stderr or "").lower()
-        if "no card ledger" in stderr or "unknown command" in stderr:
+        if "no card ledger" in stderr or "unknown command" in stderr or "unrecognized arguments" in stderr:
             state["unsupported"] = time.time()
             break
         if result.returncode == 0:
@@ -846,10 +867,14 @@ def main():
         return
     hook = json.load(sys.stdin)
     pane = os.environ.get("HERDR_PANE_ID")
+    # Inside the Herdr app there is no pane id: the terminal id stands in, and only the card
+    # ledger (`cards`) is written; the pane metadata tokens and summaries need a sheprd pane.
+    terminal = os.environ.get("HC_TERMINAL_ID") if not pane else None
     transcript = hook.get("transcript_path")
     session = hook.get("session_id")
-    if not (pane and transcript and session and os.path.exists(transcript)):
+    if not ((pane or terminal) and transcript and session and os.path.exists(transcript)):
         return
+    target = pane or TERMINAL_PREFIX + terminal
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, f"{session}.json")
@@ -877,7 +902,8 @@ def main():
     for i, question in enumerate(cache.get("questions", []), 1):
         current[f"sheprd_q_{i}"] = question
     current.update(summary_tokens(session))
-    maybe_summarize(cache, session, transcript, pane, event)
+    if pane:
+        maybe_summarize(cache, session, transcript, pane, event)
     stale = [name for name in cache.get("sent", []) if name not in current]
     cache["sent"] = sorted(current)
 
@@ -894,8 +920,9 @@ def main():
         ledger = ledger_plan(state, ledger_tasks, asked, workspace_card(state) if asked is not None else "session")
         print(json.dumps({"set": current, "clear": stale, "ledger": ledger}, ensure_ascii=False, indent=1))
         return
-    report(pane, current, stale)
-    start_ledger(session, pane, ledger_tasks, asked)
+    if pane:
+        report(pane, current, stale)
+    start_ledger(session, target, ledger_tasks, asked)
 
 
 def install():
