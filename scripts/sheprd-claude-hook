@@ -187,7 +187,7 @@ def note_prompt_tasks(cache, text, patterns):
 
 
 def note_edit_tasks(cache, use, patterns):
-    """Reference ids in the file an agent edits or writes (any id in its name), or reads when the
+    """Reference ids in the path of a file an agent edits or writes (in its name or a folder), or reads when the
     file is the card itself (`<ID>.md`): the cards this session works on directly."""
     name, data = use.get("name"), use.get("input") or {}
     path = data.get("file_path") or data.get("notebook_path") or ""
@@ -195,7 +195,7 @@ def note_edit_tasks(cache, use, patterns):
         return
     base = os.path.basename(path)
     if name in EDIT_TOOLS:
-        found = [task for source in patterns for task in source.findall(base)]
+        found = [task for source in patterns for task in source.findall(path)]
     elif name == "Read" and base.endswith(".md"):
         found = [task for source in patterns for task in source.findall(base[:-3]) if task == base[:-3]]
     else:
@@ -589,7 +589,7 @@ def direct_updates(cache, cwd, patterns, event):
         for task in source:
             if task not in ordered and LEDGER_ID.match(task):
                 ordered.append(task)
-    status = "idle" if event == "Stop" else "working"
+    status = {"Stop": "idle", "SessionEnd": "stopped"}.get(event, "working")
     updates = {}
     for task in ordered[:DIRECT_MAX]:
         title = card_title(task, patterns) or (branch if task in branch else "")

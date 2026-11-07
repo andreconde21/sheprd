@@ -321,6 +321,7 @@ class DirectCardTests(unittest.TestCase):
         os.makedirs(os.path.join(self.dir, "cards"))
         with open(os.path.join(self.dir, "cards", "ABC-7.md"), "w") as handle:
             handle.write("---\nid: ABC-7\ntitle: Fix the thing\n---\nbody\n")
+        open(os.path.join(self.dir, "cards", "DEF-2.md"), "w").close()
         self.patterns = [hook.RefSource(r"\b[A-Z]{2,5}-\d+\b", self.dir)]
 
     def repo(self, branch):
@@ -362,7 +363,8 @@ class DirectCardTests(unittest.TestCase):
         self.use(cache, "Read", "/x/src/ABC-7-other.txt")
         self.use(cache, "Read", "/x/cards/ABC-7.md")
         self.use(cache, "Write", "/x/src/plain.txt")
-        self.assertEqual(cache["edit_tasks"], ["ABC-7"])
+        self.use(cache, "Write", "/x/DEF-2/plain.txt")
+        self.assertEqual(cache["edit_tasks"], ["DEF-2", "ABC-7"])
         cache2 = hook.fresh_cache()
         self.use(cache2, "Read", "/x/src/ABC-7-other.txt")
         self.assertEqual(cache2["edit_tasks"], [])
@@ -373,6 +375,10 @@ class DirectCardTests(unittest.TestCase):
         cache["prompt_tasks"] = ["BB-1", "BB-2", "BB-3", "BB-4"]
         updates = hook.direct_updates(cache, "", [hook.RefSource(r"\b[A-Z]{2}-\d+\b")], "PostToolUse")
         self.assertEqual(list(updates), ["AA-1", "AA-2", "AA-3", "BB-1"])
+
+    def test_session_end_marks_the_card_stopped(self):
+        updates = hook.direct_updates(hook.fresh_cache(), self.repo("claude/ABC-7-fix"), self.patterns, "SessionEnd")
+        self.assertEqual(updates["ABC-7"][-1], "--status=stopped")
 
     def test_nothing_inferred_is_nothing_sent(self):
         self.assertEqual(hook.direct_updates(hook.fresh_cache(), "", self.patterns, "Stop"), {})
