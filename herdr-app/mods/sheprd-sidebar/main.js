@@ -49,6 +49,18 @@ function saveMarks(change) {
   saveView({ marks: change(marks()) });
 }
 
+// Moves project [name] next to project [target] in the saved order (before
+// it, or after it with [after]), which is the order the sidebar shows.
+function moveProject(name, target, after) {
+  const list = view().projects;
+  const me = list.find((x) => x.name === name);
+  const rest = list.filter((x) => x.name !== name);
+  const at = rest.findIndex((x) => x.name === target);
+  if (!me || at < 0) return;
+  rest.splice(after ? at + 1 : at, 0, me);
+  saveView({ projects: rest });
+}
+
 // A space's name key: its machine (`local` for this one) and its name. Two
 // spaces can share it, so the sidebar writes `spaceRef` (name key + `#` + the
 // space's id) and still reads plain name keys from older views.
@@ -573,9 +585,18 @@ export default class SheprdSidebar extends View {
       const setMuted = (on) => other
         ? saveView({ other_muted: on })
         : saveView({ projects: view().projects.map((x) => (x.name === name ? { ...x, muted: on } : x)) });
+      // Up and down go past the next project on screen (empty ones are not
+      // shown) and stay among the pinned or the unpinned ones; Other stays last.
+      const pinned = (n) => Boolean(projects.find((x) => x.name === n)?.pinned);
+      const peers = other ? [] : (p.menu.shown ?? []).filter((n) => pinned(n) === pinned(name));
+      const at = peers.indexOf(name);
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
         .child(item("m-new", "New tab or space…", () => openNew(name)))
-        .child(item("m-mute", muted ? "Unmute: sound and notify again" : "Mute: no sound or notification", () => setMuted(!muted)));
+        .child(item("m-mute", muted ? "Unmute: sound and notify again" : "Mute: no sound or notification", () => setMuted(!muted)))
+        .when(at > 1, (el) => el.child(item("m-top", "Move to top", () => moveProject(name, peers[0], false))))
+        .when(at > 0, (el) => el.child(item("m-up", "Move up", () => moveProject(name, peers[at - 1], false))))
+        .when(at >= 0 && at < peers.length - 1, (el) => el.child(item("m-down", "Move down", () => moveProject(name, peers[at + 1], true))))
+        .when(at >= 0 && at < peers.length - 2, (el) => el.child(item("m-bottom", "Move to bottom", () => moveProject(name, peers[peers.length - 1], true))));
     }
     if (unhideOnly) {
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
@@ -810,7 +831,12 @@ export default class SheprdSidebar extends View {
         .on_click(() => fold(g))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 78, props: { menu: { project: g.other ? null : g.project.name } } });
+          // The menu's height follows its items: 28 px each, plus padding.
+          const shown = list.filter((x) => !x.other).map((x) => x.project.name);
+          const peers = shown.filter((n) => Boolean(v.projects.find((x) => x.name === n)?.pinned) === Boolean(g.project.pinned));
+          const at = g.other ? -1 : peers.indexOf(g.project.name);
+          const moves = at < 0 ? 0 : [at > 1, at > 0, at < peers.length - 1, at < peers.length - 2].filter(Boolean).length;
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 78 + 28 * moves, props: { menu: { project: g.other ? null : g.project.name, shown } } });
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim))
         .child(div().truncate().text_color(waiting ? t.blocked : t.muted).child(g.project.name))
