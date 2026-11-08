@@ -49,10 +49,12 @@ function saveMarks(change) {
   saveView({ marks: change(marks()) });
 }
 
-// Moves project [name] next to project [target] in the saved order (before
-// it, or after it with [after]), which is the order the sidebar shows.
+// Moves project [name] next to project [target] (before it, or after it with
+// [after]). The saved list becomes the order on screen and pins go: once you
+// order projects yourself, the list is the order (pins came from sheprd).
 function moveProject(name, target, after) {
-  const list = view().projects;
+  const all = view().projects;
+  const list = [...all.filter((x) => x.pinned), ...all.filter((x) => !x.pinned)].map(({ pinned: _pinned, ...x }) => x);
   const me = list.find((x) => x.name === name);
   const rest = list.filter((x) => x.name !== name);
   const at = rest.findIndex((x) => x.name === target);
@@ -309,7 +311,7 @@ export default class SheprdSidebar extends View {
     });
     this.loadCards(cx);
     // The companion's view of each agent (context, permission mode, last
-    // tool), by address: asked of a machine on Shift-hover, at most every 10 s.
+    // tool), by address: asked of a machine on hover, at most every 10 s.
     this.facts = new Map();
     this.factsAt = new Map();
     if (!shared("sheprd.hostname")) {
@@ -344,7 +346,7 @@ export default class SheprdSidebar extends View {
     });
   }
 
-  // Shift-hover's tooltip: how to ping it, where it runs and what it's doing.
+  // A row's hover tooltip: how to ping it, where it runs and what it's doing.
   details(r, now) {
     const a = r.a;
     const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
@@ -586,9 +588,8 @@ export default class SheprdSidebar extends View {
         ? saveView({ other_muted: on })
         : saveView({ projects: view().projects.map((x) => (x.name === name ? { ...x, muted: on } : x)) });
       // Up and down go past the next project on screen (empty ones are not
-      // shown) and stay among the pinned or the unpinned ones; Other stays last.
-      const pinned = (n) => Boolean(projects.find((x) => x.name === n)?.pinned);
-      const peers = other ? [] : (p.menu.shown ?? []).filter((n) => pinned(n) === pinned(name));
+      // shown); Other stays last.
+      const peers = other ? [] : (p.menu.shown ?? []);
       const at = peers.indexOf(name);
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
         .child(item("m-new", "New tab or space…", () => openNew(name)))
@@ -622,6 +623,40 @@ export default class SheprdSidebar extends View {
         .children(projects.map((x, i) => item(`m-p${i}`, x.name, () => moveTo(x.name))))
         .child(item("m-other", "Other", () => moveTo(null), true))
         .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
+  }
+
+  // ---- dragging a project ---------------------------------------------------
+
+  // A project's header and rows: where a dragged header lands, with a line
+  // where it will go (above when dragged up, below when dragged down).
+  dropTarget(t, g, children) {
+    const d = this.drag?.moved ? this.drag : null;
+    const name = g.other ? null : g.project.name;
+    const over = Boolean(d && name && d.over === name && name !== d.name);
+    const down = over && this.shownOrder.indexOf(name) > this.shownOrder.indexOf(d.name);
+    return v_flex().id(`dt-${g.project.name}`).w_full().flex_none()
+      .when(over && !down, (el) => el.border_t_2().border_color(t.solid))
+      .when(over && down, (el) => el.border_b_2().border_color(t.solid))
+      .on_mouse_move((e, cx) => {
+        const x = this.drag;
+        if (!x) return;
+        if (!x.moved && Math.abs(e.position.y - x.y) < 5) return;
+        const was = x.moved && x.over;
+        x.moved = true;
+        x.over = name;
+        if (was !== name) cx.notify();
+      })
+      .children(children);
+  }
+
+  dropProject(cx) {
+    const d = this.drag;
+    this.drag = null;
+    if (!d?.moved) return;
+    this.droppedAt = Date.now();
+    const order = this.shownOrder ?? [];
+    if (d.over && d.over !== d.name) moveProject(d.name, d.over, order.indexOf(d.over) > order.indexOf(d.name));
+    cx.notify();
   }
 
   // ---- the list -----------------------------------------------------------
@@ -816,8 +851,10 @@ export default class SheprdSidebar extends View {
     // The rail has no filter chips, so it shows every agent that isn't hidden.
     if (narrow()) return this.rail(t, grouped(rows, fixed), m);
     const list = grouped(shown, v.filter === "needs-you" ? urgent : fixed);
+    this.shownOrder = list.filter((g) => !g.other).map((g) => g.project.name);
 
     const fold = (g) => {
+      if (this.drag?.moved || Date.now() - (this.droppedAt ?? 0) < 400) return;
       if (g.other) return saveView({ other_collapsed: !v.other_collapsed });
       saveView({ projects: v.projects.map((x) => (x.name === g.project.name ? { ...x, collapsed: !x.collapsed } : x)) });
     };
@@ -829,13 +866,17 @@ export default class SheprdSidebar extends View {
       return h_flex().id(`pj-${g.project.name}`).px(8).pt(8).h(30).flex_none().gap(6).items_center()
         .text_size(11).font_medium().cursor_pointer().hover((s) => s.text_color(t.foreground))
         .on_click(() => fold(g))
+        // Press and drag a header onto another project to move it there.
+        .on_mouse_down("left", (e) => {
+          if (!g.other) this.drag = { name: g.project.name, y: e.position.y, moved: false, over: null };
+        })
+        .when(this.drag?.moved && this.drag.name === g.project.name, (el) => el.opacity(0.5))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           // The menu's height follows its items: 28 px each, plus padding.
           const shown = list.filter((x) => !x.other).map((x) => x.project.name);
-          const peers = shown.filter((n) => Boolean(v.projects.find((x) => x.name === n)?.pinned) === Boolean(g.project.pinned));
-          const at = g.other ? -1 : peers.indexOf(g.project.name);
-          const moves = at < 0 ? 0 : [at > 1, at > 0, at < peers.length - 1, at < peers.length - 2].filter(Boolean).length;
+          const at = g.other ? -1 : shown.indexOf(g.project.name);
+          const moves = at < 0 ? 0 : [at > 1, at > 0, at < shown.length - 1, at < shown.length - 2].filter(Boolean).length;
           openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 260, height: 78 + 28 * moves, props: { menu: { project: g.other ? null : g.project.name, shown } } });
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim))
@@ -858,20 +899,15 @@ export default class SheprdSidebar extends View {
       const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer().hover((s) => s.bg(t.hover))
-        .tooltip(this.shift && this.hovered === a.address
+        // Hover: the details (Shift-hover never worked: a held Shift sends no
+        // event to a row the pointer rests on). Only the hovered row builds them.
+        .tooltip(this.hovered === a.address
           ? this.details(r, now)
-          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift for details`)
+          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)}`)
         .on_hover((on, cx) => {
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
-          if (on && this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
-          cx.notify();
-        })
-        // Shift while hovering: the details tooltip (and the companion asked).
-        .on_mouse_move((e, cx) => {
-          if (e.modifiers.shift === Boolean(this.shift)) return;
-          this.shift = e.modifiers.shift;
-          if (this.shift) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
+          if (on) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
           cx.notify();
         })
         .on_click((e) => {
@@ -882,7 +918,7 @@ export default class SheprdSidebar extends View {
         })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 230, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id, needs: r.needs } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 320, height: menuHeight(view().projects.length), props: { menu: { address: a.address, seq: a.seq, key: r.key, space: r.space?.id, needs: r.needs } } });
         });
       // Hovered or marked: the mark toggle (★) in place of the age.
       const age = r.marked || this.hovered === a.address
@@ -937,7 +973,15 @@ export default class SheprdSidebar extends View {
       .when(list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
         .child(rows.length === 0 ? "No agents yet. They show up here when they report their status." : "Nothing here with this filter.")))
       .child(v_flex().id("sp-list").flex_1().min_h(0).px(8).overflow_y_scrollbar()
-        .children(list.flatMap((g) => [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))]))
+        .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
+        // Released outside the list: no mouse-up reaches it, so leaving ends the drag.
+        .on_hover((on, cx) => {
+          if (!on && this.drag) {
+            this.drag = null;
+            cx.notify();
+          }
+        })
+        .children(list.map((g) => this.dropTarget(t, g, [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))])))
         .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow))));
   }
 }
