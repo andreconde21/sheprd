@@ -503,7 +503,9 @@ export default class SheprdSidebar extends View {
     if (place.space) return run("tab.new", { space: place.space, ...(folder ? { folder } : {}), ...start });
     // The new space joins the project once it shows up (render picks it up).
     if (p.newIn.project !== null) setShared("sheprd.joining", { project: p.newIn.project, machine: place.machine, before: spaces().map((s) => s.id), at: Date.now() });
-    run("space.new", { ...(folder ? { folder } : {}), ...(place.machine ? { machine: place.machine } : {}), ...start });
+    // Always name the machine: without one, space.new from a click goes to the
+    // focused space's machine, not the one picked ("": this computer).
+    run("space.new", { ...(folder ? { folder } : {}), machine: place.machine ?? "", ...start });
   }
 
   newView(t) {
