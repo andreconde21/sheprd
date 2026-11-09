@@ -143,6 +143,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 - `machine_tags`: a short tag per machine name, shown instead of the host name.
   A machine without one gets its name's first part, cut to 3 letters when
   longer than 5 (`development-central` → `dev`); this machine gets none.
+- `marks.highlighted`: addresses the user highlighted; only a look (a
+  coloured bar and tint on the row), no filter or order. Missing means none.
 - Marks follow sheprd's: `unread` clears on focus; `dismissed` is
   `<address>@<seq>` and lapses when the agent's `seq` moves on; `kept` stays in
   the active view; `marked` is the user's own flag on an agent (★), shown by the
@@ -225,6 +227,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
 - `machine_tags`: a short tag per machine name, shown instead of the host name.
   A machine without one gets its name's first part, cut to 3 letters when
   longer than 5 (`development-central` → `dev`); this machine gets none.
+- `marks.highlighted`: addresses the user highlighted; only a look (a
+  coloured bar and tint on the row), no filter or order. Missing means none.
 - Marks follow sheprd's: `unread` clears on focus; `dismissed` is
   `<address>@<seq>` and lapses when the agent's `seq` moves on; `kept` stays in
   the active view; `marked` is the user's own flag on an agent (★), shown by the
