@@ -1,13 +1,16 @@
 // sheprd's work panel: the focused agent's cards, each with its summary first,
 // then its latest decisions, then its open questions with answer buttons; what
-// the agent printed last stays folded until asked for. Or every agent's cards. Cards come from each machine's `sheprd-cards`
+// the agent printed last stays folded until asked for. Or the Inbox: every open
+// question of every agent, oldest first, each with its agent, project and card.
+// Opened as an overlay with props { reader: { id } } it is the card reader: a
+// ProjectsTasks card (or any id a reference source knows) shown in full. Cards come from each machine's `sheprd-cards`
 // herdr-core document through the `cards` CLI (herdr-app/CONTRACT.md in the
 // sheprd repo). Answers are staged per question, then sent as one line with
 // `cards send`, which types them into the agent with `hc send`.
 
 import { View, div, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, machines, focused, run, theme, shared, setShared, exec, hc } from "herdr";
+import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
+import { agents, terminals, spaces, machines, focused, run, theme, shared, setShared, exec, hc, home, readTextFile, openOverlay, closeOverlay, props } from "herdr";
 
 const OUTPUT_LINES = 15;
 // Decisions shown before "N more".
@@ -66,6 +69,79 @@ function machineTag(name) {
 }
 
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
+
+// The sidebar's project of a space (same rules: members by ref, then by name
+// key, then the match substrings), for the Inbox's context line.
+const spaceKey = (s) => `${s?.machine ?? "local"}/${s?.name ?? ""}`;
+function projectName(space) {
+  if (!space) return null;
+  const projects = /** @type {any} */ (shared("sheprd.view") ?? {}).projects ?? [];
+  const key = spaceKey(space);
+  const ref = `${key}#${space.id}`;
+  const byMember = projects.find((p) => (p.members ?? []).includes(ref))
+    ?? projects.find((p) => (p.members ?? []).some((m) => m.toLowerCase() === key.toLowerCase()));
+  if (byMember) return byMember.name;
+  const hay = `${space.name} ${space.folder ?? ""}`.toLowerCase();
+  return projects.find((p) => (p.match ?? []).some((m) => m && hay.includes(m.toLowerCase())))?.name ?? null;
+}
+
+// A question longer than this folds behind "more".
+const QUESTION_FOLD = 220;
+
+// ---- the card reader ----------------------------------------------------------
+
+// Opens the reader for [id] (a card id such as HZ-018). Also called by the sidebar.
+export function openReader(id) {
+  openOverlay({ mod: "sheprd-panel", kind: "dialog", width: 680, height: 620, props: { reader: { id } } });
+}
+
+// The command that prints [id], from the [[refs]] sources of sheprd's
+// ~/.config/herdr/sheprd-refs.toml (the TUI's: `pattern`, `command` with {id}),
+// or null. The id comes from a card any agent can write, so it must be a plain
+// token and match the source's whole pattern before it goes into a command.
+async function refCommand(id) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$/.test(id)) return null;
+  let text = null;
+  try {
+    text = await readTextFile(`${home()}/.config/herdr/sheprd-refs.toml`);
+  } catch {
+    text = null;
+  }
+  if (!text) return null;
+  const value = (block, key) => {
+    const m = new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, "m").exec(block);
+    return m ? m[1].replace(/\\(.)/g, "$1") : null;
+  };
+  for (const block of text.split(/^\s*\[\[refs\]\]\s*$/m).slice(1)) {
+    const section = block.split(/^\s*\[/m)[0];
+    const pattern = value(section, "pattern");
+    const command = value(section, "command");
+    if (!pattern || !command) continue;
+    try {
+      if (!new RegExp(`^(?:${pattern})$`).test(id)) continue;
+    } catch {
+      continue;
+    }
+    return command.replaceAll("{id}", id).replaceAll("{ssh}", "").replaceAll("{cwd}", home());
+  }
+  return null;
+}
+
+// A card's text (YAML front matter, then markdown) as { title, meta, body }.
+function readerDocument(id, text) {
+  const fields = {};
+  let body = text;
+  const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
+  if (m) {
+    for (const line of m[1].split("\n")) {
+      const i = line.indexOf(":");
+      if (i > 0 && !line.startsWith(" ")) fields[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
+    }
+    body = text.slice(m[0].length);
+  }
+  const meta = ["status", "priority", "project", "assignee", "type"].filter((k) => fields[k]).map((k) => `${k} ${fields[k]}`).join(" · ");
+  return { title: fields.title ? `${id}  ${fields.title}` : id, meta, body: body.trim() };
+}
 
 // url:begin (a test runs this block in node)
 // Only an http(s) URL is ever handed to xdg-open: the ledger can be written by any process, and an
@@ -170,9 +246,9 @@ const store = (key, value) => { try { localStorage.setItem(key, value); } catch 
 
 export default class SheprdPanel extends View {
   init(_props, cx) {
-    this.mode = localStorage.getItem("mode") ?? "agent";
-    const saved = stored("filter", "all");
-    this.filter = FILTERS.some(([key]) => key === saved) ? saved : "all";
+    if (props()?.reader) return this.initReader(cx);
+    this.mode = stored("mode", "agent") === "agent" ? "agent" : "inbox";
+    this.openQuestions = new Set();
     this.thumbs = new Map(); // evidence image -> data URI, "" (could not load) or null (loading)
     this.fullImage = null;
     this.output = "";
@@ -189,6 +265,41 @@ export default class SheprdPanel extends View {
       if (Date.now() - at > CARDS_STALE_MS) this.loadCards(cx);
     });
     this.loadCards(cx);
+  }
+
+  initReader(cx) {
+    const id = String(props().reader.id ?? "");
+    this.reader = { id, doc: null, problem: null };
+    cx.spawn(async (cx) => {
+      try {
+        const command = await refCommand(id);
+        if (!command) {
+          this.reader.problem = "No reference source in ~/.config/herdr/sheprd-refs.toml matches this id.";
+        } else {
+          // Output counts, not the exit code: pt-show prints the card and still exits 1.
+          const r = await exec("sh", ["-lc", command], { timeout: 20000 });
+          if (r.stdout.trim()) this.reader.doc = readerDocument(id, r.stdout);
+          else this.reader.problem = `Nothing found for ${id}${r.stderr.trim() ? `: ${r.stderr.trim().split("\n")[0]}` : "."}`;
+        }
+      } catch (err) {
+        this.reader.problem = String(err);
+      }
+      cx.notify();
+    });
+  }
+
+  readerView(t) {
+    const { id, doc, problem } = this.reader;
+    return v_flex().size_full().min_h(0).p(16).gap(8).bg(t.popover).text_color(t.foreground).text_size(13)
+      .child(h_flex().gap(8).items_start().flex_none()
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(div().text_size(15).font_semibold().child(doc?.title ?? id))
+          .when(Boolean(doc?.meta), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(doc.meta))))
+        .child(this.button(t, "rd-close", "✕", () => closeOverlay(props().overlay), { dim: true })))
+      .child(div().h(1).flex_none().bg(t.border))
+      .child(doc
+        ? v_flex().id("rd-body").flex_1().min_h(0).overflow_y_scrollbar().child(TextView.markdown(`rd-${id}`, doc.body || "_(empty)_").selectable(true))
+        : div().text_size(12).text_color(problem ? t.blocked : t.dim).child(problem ?? `Loading ${id}…`));
   }
 
   // `only`: just that machine (after an action there), even while a full load runs.
@@ -315,8 +426,12 @@ export default class SheprdPanel extends View {
     return v_flex().gap(6).p(8).rounded(8).bg(t.background).border_1().border_color(q.state === "staged" ? t.accent : t.border)
       .child(h_flex().gap(6).items_center()
         .child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child(`Q${q.n}`))
-        .child(div().flex_1().min_w(0).text_size(12.5).child(q.text))
+        .child(div().flex_1().min_w(0).text_size(12.5).child(q.text.length > QUESTION_FOLD && !this.openQuestions.has(key) ? `${q.text.slice(0, QUESTION_FOLD - 20).trimEnd()}…` : q.text))
         .child(this.button(t, `qd-${key}`, "✕", (cx) => this.act(cx, address, ["dismiss", split(address).terminal, card.id, "--question", String(q.n)]), { dim: true })))
+      .when(q.text.length > QUESTION_FOLD, (el) => el.child(div().id(`qm-${key}`).text_size(11).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { this.openQuestions.has(key) ? this.openQuestions.delete(key) : this.openQuestions.add(key); cx.notify(); })
+        .child(this.openQuestions.has(key) ? "less" : "more")))
       // One option per row, its text wrapping: a long option used to run past the panel's edge.
       .child(v_flex().gap(4)
         .children(q.options.map((o, i) => this.option(t, `qo-${key}-${i}`, q.recommend === i + 1 ? `★ ${o}` : o,
@@ -357,7 +472,7 @@ export default class SheprdPanel extends View {
     return v_flex().gap(6).p(10).rounded(10).bg(t.surface).border_1().border_color(qs.length ? t.blocked + "66" : t.border)
       .when(card.done, (el) => el.opacity(0.7))
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_none().text_size(11).font_semibold().text_color(t.accent).child(card.id))
+        .child(this.cardId(t, `ci-${key}`, card.id))
         .child(div().flex_1())
         .when(Boolean(card.status), (el) => el.child(div().flex_none().px(6).h(18).rounded(5).bg(t.raised).text_size(10.5).text_color(t.muted).flex().items_center().child(card.status))))
       .when(Boolean(card.title), (el) => el.child(div().text_size(13).font_semibold().child(card.title)))
@@ -376,6 +491,58 @@ export default class SheprdPanel extends View {
       .children(replied.map((q) => this.replied(t, address, card, q)))
       .when(Boolean(card.link), (el) => el.child(this.linkRow(t, `ln-${key}`, card.link, "")))
       .when(Boolean(card.writeback), (el) => el.child(div().text_size(10.5).text_color(card.writeback.ok ? t.dim : t.blocked).child(`${card.writeback.ok ? "✓" : "!"} ${card.writeback.message}`)));
+  }
+
+  // A card id: a ticket-like id opens the reader; "session" and other made-up
+  // ids are plain text.
+  cardId(t, id, cardId, size = 11) {
+    const el = div().id(id).flex_none().text_size(size).font_semibold().text_color(t.accent);
+    if (!/^[A-Z][A-Z0-9]{1,5}-\d+$/.test(cardId)) return el.child(cardId);
+    return el.cursor_pointer().hover((s) => s.underline()).tooltip(`Open ${cardId}`)
+      .on_click((_e, cx) => { cx.stop_propagation(); openReader(cardId); })
+      .child(cardId);
+  }
+
+  // The Inbox: agents with open questions, the one waiting longest first; each
+  // with who it is (hc name, else its space), its project and machine, then per
+  // card the id and title, the latest summary and the questions.
+  inbox(t, byAddress) {
+    const names = new Map(terminals().filter((x) => x.name).map((x) => [x.address, x.name]));
+    const spaceById = new Map(spaces().map((x) => [x.id, x]));
+    const entries = [];
+    for (const [address, cards] of byAddress) {
+      const open = cards.filter((c) => !c.dismissed && c.questions.some(live));
+      if (!open.length) continue;
+      const since = open.flatMap((c) => c.questions.filter(live).map((q) => q.asked_at ?? "")).sort()[0] ?? "";
+      entries.push({ address, cards: open, since });
+    }
+    entries.sort((x, y) => x.since.localeCompare(y.since));
+    if (!entries.length) return div().text_size(12).text_color(t.dim).child(`Nothing waiting on you.${this.failures()}`);
+    return v_flex().gap(14)
+      .children(entries.map(({ address, cards }) => {
+        const a = agents().find((x) => x.address === address);
+        const space = a ? spaceById.get(a.space) : null;
+        const project = projectName(space);
+        const machine = split(address).on;
+        const context = [project ?? "Other", a?.space_name, machine ? machineTag(machine) : ""].filter(Boolean).join(" · ");
+        const staged = cards.flatMap((c) => c.questions.filter((q) => q.state === "staged")).length;
+        return v_flex().gap(8).p(10).rounded(10).bg(t.surface).border_1().border_color(t.blocked + "66")
+          .child(h_flex().id(`ib-${address}`).gap(6).items_center().cursor_pointer()
+            .tooltip("Go to this agent")
+            .on_click(() => a && run("pane.focus", { pane: a.pane }))
+            .child(div().flex_none().text_size(13).font_semibold().child(names.get(address) || a?.space_name || address))
+            .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(context)))
+          .children(cards.map((card) => v_flex().gap(6)
+            .child(h_flex().gap(6).items_start()
+              .child(this.cardId(t, `ibc-${address}/${card.id}`, card.id))
+              .when(Boolean(card.title), (el) => el.child(div().flex_1().min_w(0).text_size(12).font_semibold().child(card.title))))
+            .when(Boolean(card.summary), (el) => el.child(div().text_size(12).text_color(t.muted).child(card.summary)))
+            .children(card.questions.filter(live).map((q) => this.question(t, address, card, q)))))
+          .when(staged > 0, (el) => el.child(h_flex().justify_end()
+            .child(this.button(t, `ibsend-${address}`, `Send ${staged} answer${staged === 1 ? "" : "s"}`,
+              (cx) => this.act(cx, address, ["send", split(address).terminal]), { primary: true }))));
+      }))
+      .when(this.failures() !== "", (el) => el.child(div().text_size(11).text_color(t.dim).child(this.failures().trim())));
   }
 
   // A link: clickable only when it is a plain http(s) URL, with its host next to the label so a
@@ -463,6 +630,7 @@ export default class SheprdPanel extends View {
   }
 
   render(cx) {
+    if (this.reader) return this.readerView(theme());
     this.cx = cx;
     this.fetchesLeft = FETCHES_PER_RENDER;
     const t = theme();
@@ -471,41 +639,34 @@ export default class SheprdPanel extends View {
     const address = focused()?.agent ?? null;
     const agent = address ? agents().find((x) => x.address === address) : null;
 
-    const tabs = h_flex().px(10).pt(10).pb(6).gap(4).flex_none().items_center()
-      .child(this.button(t, "mode-agent", "This agent", (cx) => { this.mode = "agent"; localStorage.setItem("mode", "agent"); this.readOutput(cx); cx.notify(); }, { active: this.mode === "agent" }))
-      .child(this.button(t, "mode-all", "All cards", (cx) => { this.mode = "all"; localStorage.setItem("mode", "all"); cx.notify(); }, { active: this.mode === "all" }));
-
-    // The chips count the cards of the current view (this agent's, or everyone's).
-    const scope = this.mode === "all" ? [...byAddress.values()].flatMap(visible) : (address ? visible(byAddress.get(address) ?? []) : []);
-    const counts = filterCounts(scope);
-    const chip = ([key, name]) => this.button(t, `f-${key}`, `${name} ${counts[key]}`,
-      (cx) => { this.filter = key; store("filter", key); cx.notify(); }, { active: this.filter === key });
-    const chips = v_flex().px(10).pb(6).gap(4).flex_none()
-      .child(h_flex().gap(4).children(FILTERS.slice(0, 3).map(chip)))
-      .child(h_flex().gap(4).children(FILTERS.slice(3).map(chip)));
-    const none = (text) => div().text_size(12).text_color(t.dim).child(text);
+    // Two tabs (an underlined segmented control, unlike the buttons inside cards).
+    const waiting = [...byAddress.values()].flat().filter((c) => !c.dismissed).flatMap((c) => c.questions.filter(live)).length;
+    const tab = (id, label, mode) => {
+      const on = this.mode === mode;
+      return div().id(id).px(4).pb(5).text_size(12.5).cursor_pointer()
+        .font_medium().text_color(on ? t.foreground : t.dim).hover((s) => s.text_color(t.foreground))
+        .border_b_2().border_color(on ? t.accent : t.chrome)
+        .on_click((_e, cx) => { this.mode = mode; store("mode", mode); this.readOutput(cx); cx.notify(); })
+        .child(label);
+    };
+    const tabs = h_flex().px(12).pt(10).mb(8).gap(14).flex_none().items_end().border_b_1().border_color(t.border)
+      .child(tab("mode-agent", "This agent", "agent"))
+      .child(tab("mode-inbox", waiting ? `Inbox ${waiting}` : "Inbox", "inbox"));
 
     let body;
-    if (this.mode === "all") {
-      const entries = [...byAddress.entries()]
-        .map(([addr, cards]) => [addr, visible(cards).filter((c) => cardMatches(c, this.filter))])
-        .filter(([, cards]) => cards.length > 0)
-        .sort(([, x], [, y]) => y.flatMap((c) => c.questions.filter(live)).length - x.flatMap((c) => c.questions.filter(live)).length);
-      body = entries.length === 0
-        ? none(scope.length ? "No cards match this filter." : `No open cards. Agents add them with \`cards update\`.${this.failures()}`)
-        : v_flex().gap(14).children(entries.map(([addr, cards]) => this.agentBlock(t, addr, cards, true)))
-          .when(this.failures() !== "", (el) => el.child(div().text_size(11).text_color(t.dim).child(this.failures().trim())));
+    if (this.mode === "inbox") {
+      body = this.inbox(t, byAddress);
     } else if (!address) {
       body = div().text_size(12).text_color(t.dim).child("Focus an agent to see its cards and output.");
     } else {
       const all = visible(byAddress.get(address) ?? []);
-      const cards = all.filter((c) => cardMatches(c, this.filter));
+      const cards = all.filter((c) => cardMatches(c, "all"));
       const lines = this.outputFor === address && this.output ? this.output.split("\n") : [];
       body = v_flex().gap(10)
         .child(h_flex().gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(agent?.space_name || address))
           .child(div().flex_none().text_size(10.5).text_color(t.dim).child(split(address).on ? machineTag(split(address).on) : "here")))
-        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child(all.length ? "No cards match this filter." : this.noCards(address)))
+        .child(cards.length ? this.agentBlock(t, address, cards, false) : div().text_size(11.5).text_color(t.dim).child(all.length ? "Only done cards." : this.noCards(address)))
         .child(div().id("out-toggle").pt(6).text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => {
             this.showOutput = !this.showOutput;
@@ -520,7 +681,6 @@ export default class SheprdPanel extends View {
 
     return v_flex().size_full().min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
       .child(tabs)
-      .child(chips)
       .when(Boolean(this.note), (el) => el.child(div().id("note").mx(10).mb(4).p(6).rounded(6).bg(t.blocked + "1f").text_size(11.5).text_color(t.blocked)
         .cursor_pointer().on_click((_e, cx) => { this.note = null; cx.notify(); }).child(this.note)))
       .child(v_flex().id("panel-body").flex_1().min_h(0).px(10).pb(10).overflow_y_scrollbar().child(body));

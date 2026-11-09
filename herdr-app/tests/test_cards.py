@@ -729,13 +729,43 @@ class PanelFilterTests(unittest.TestCase):
         self.assertEqual(source.count('exec("xdg-open"'), 1)
         self.assertIn('exec("xdg-open", [safe.href])', source)
 
-    def test_the_chips_and_their_remembered_choice_are_wired_in_the_panel(self):
+    def test_the_tabs_and_their_remembered_choice_are_wired_in_the_panel(self):
         with open(PANEL) as handle:
             source = handle.read()
-        self.assertIn('stored("filter", "all")', source)
-        self.assertIn('store("filter", key)', source)
+        # A saved mode other than "agent" (the old "all" included) opens the Inbox.
+        self.assertIn('stored("mode", "agent") === "agent" ? "agent" : "inbox"', source)
+        self.assertIn('store("mode", mode)', source)
         self.assertRegex(source, r"const stored = .*try \{ return localStorage")
-        self.assertIn("FILTERS.some(([key]) => key === saved)", source)  # a bad saved value falls back
+
+    def test_the_reader_runs_only_ids_that_match_a_reference_pattern(self):
+        with open(PANEL) as handle:
+            source = handle.read()
+        block = source.split("async function refCommand", 1)[1].split("\n}\n", 1)[0]
+        script = (f"""
+          const home = () => "/h";
+          const readTextFile = async () => {json.dumps(REFS_TOML)};
+          async function refCommand{block}
+          }}
+          (async () => {{
+            const out = [];
+            for (const id of {json.dumps(["HZ-018", "session", "HZ-1;id", "HZ-1 $(id)", "hz-018", "ABCDEFG-1"])}) out.push(await refCommand(id));
+            console.log(JSON.stringify(out));
+          }})();
+        """)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), ["pt-show HZ-018", None, None, None, None, None])
+
+
+REFS_TOML = """# refs
+[[refs]]
+name = "ProjectsTasks"
+pattern = "[A-Z]{2,5}-\\\\d+"
+command = "pt-show {id}"
+
+[[status]]
+name = "card"
+command = "pt-status"
+"""
 
 
 class WritebackEdgeTests(unittest.TestCase):
