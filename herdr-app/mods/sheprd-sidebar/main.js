@@ -14,7 +14,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, machines, panes, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents, notify } from "herdr";
+import { agents, terminals, spaces, machines, panes, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, layout, window, playSound, knownAgents, notify } from "herdr";
 
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Each filter's label, and the shorter one for a narrow sidebar.
@@ -371,7 +371,7 @@ export default class SheprdSidebar extends View {
     const pane = panes().find((x) => x.pane === a.pane);
     const f = this.facts.get(a.address);
     const since = this.changed[a.address]?.at;
-    const lines = [workOf(r, a.space_name || a.address)];
+    const lines = [r.name ? `${r.name}: ${workOf(r, a.space_name || a.address)}` : workOf(r, a.space_name || a.address)];
     lines.push(`Ping: ${pingAddress(a.address)}${machine ? "" : `  (here: ${a.address})`}`);
     lines.push(`${a.space_name || "?"} · tab ${a.tab_index}${machine ? ` · ${machine}` : ""}`);
     if (pane?.cwd) lines.push(`${pane.cwd}${pane.branch ? ` (${pane.branch})` : ""}`);
@@ -842,6 +842,9 @@ export default class SheprdSidebar extends View {
     const cards = cardsByAddress();
     const dismissed = new Set(m.dismissed);
 
+    // Each terminal's hc name (`hc name`, `hc run --name`), by address: the
+    // agent's fixed name in the list, when it has one.
+    const hcName = new Map(terminals().filter((x) => x.name).map((x) => [x.address, x.name]));
     const everyRow = all
       .map((a) => {
         const space = spaceById.get(a.space);
@@ -852,7 +855,7 @@ export default class SheprdSidebar extends View {
         // The circle follows read state: a finished agent marked read shows
         // idle, an idle one marked unread shows finished.
         const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
-        return { a, space, dot, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary, name: hcName.get(a.address), marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
@@ -976,7 +979,7 @@ export default class SheprdSidebar extends View {
         // event to a row the pointer rests on). Only the hovered row builds them.
         .tooltip(this.hovered === a.address
           ? this.details(r, now)
-          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift over the list: names and addresses`)
+          : `${r.name ? `${r.name} · ` : ""}${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift over the list: work and code`)
         .on_hover((on, cx) => {
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
@@ -1020,33 +1023,30 @@ export default class SheprdSidebar extends View {
           })
           .child(r.marked ? "★" : "☆")
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
+      // Shift (or ctrl+space d): the agent's current work in bold (its card
+      // summary, else what it would show without a name), then its terminal
+      // code (t1d) and machine tag small, in place of the space.
       if (info) {
-        // The terminal's code (t1m) first, its machine as the short tag the
-        // other rows use; the full address is in the tooltip and Shift-click.
         const code = a.address.split("/").pop();
-        const kind = a.app || a.program?.name || "";
-        // A tab named only by its number would repeat "tab 1".
-        const tabName = a.tab_name && a.tab_name !== a.space_name && a.tab_name !== String(a.tab_index) ? a.tab_name : "";
-        const where = [a.space_name || code, a.tab_index ? `tab ${a.tab_index}` : "", tabName].filter(Boolean).join(" · ");
-        const tag = (el) => el.when(Boolean(machine), (x) => x.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)));
+        const ref = machine ? `${code} · ${machine}` : code;
         if (!detailed) {
-          return tag(base.h(28)
+          return base.h(28)
             .child(this.status(t, r.dot, r.questions))
-            .child(div().flex_none().text_color(t.foreground).font_semibold().child(code))
-            .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(where)));
+            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(work))
+            .child(div().flex_none().text_size(11).text_color(t.dim).child(ref));
         }
         return base.py(4).items_start()
           .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
           .child(v_flex().flex_1().min_w(0).gap(1)
-            .child(tag(h_flex().gap(6).items_center()
-              .child(div().flex_none().text_color(t.foreground).font_semibold().child(code))
-              .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(kind))))
-            .child(div().truncate().text_size(11).text_color(t.muted).child(where)));
+            .child(h_flex().gap(6).items_center()
+              .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(work))
+              .child(age))
+            .child(div().truncate().text_size(11).text_color(t.muted).child(ref)));
       }
       if (!detailed) {
         return base.h(28)
           .child(this.status(t, r.dot, r.questions))
-          .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(space))
+          .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(r.name || space))
           .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
           .child(age);
       }
@@ -1054,7 +1054,7 @@ export default class SheprdSidebar extends View {
         .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(h_flex().gap(6).items_center()
-            .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(work))
+            .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(r.name || work))
             .child(age))
           .child(div().truncate().text_size(11).text_color(t.dim).child(machine ? `${space} · ${machine}` : space)));
     };
@@ -1088,7 +1088,7 @@ export default class SheprdSidebar extends View {
         .bg(t.raised).text_size(11).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
         .tooltip("Switch off (ctrl+space d)")
         .on_click(() => setShared("sheprd.info", false))
-        .child(div().flex_1().min_w(0).truncate().child("Showing names and addresses"))
+        .child(div().flex_1().min_w(0).truncate().child("Showing work and terminal codes"))
         .child(div().flex_none().child("✕"))))
       .child(v_flex().id("sp-list").flex_1().min_h(0).px(8).overflow_y_scrollbar()
         .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
