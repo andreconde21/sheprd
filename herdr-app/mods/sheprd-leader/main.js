@@ -94,6 +94,7 @@ const GROUPS = [
     ["u", "next needing you", nextNeedingYou],
     ["m", "mark / unmark ★", toggleMark],
     ["w", "Work panel", toggleWork],
+    ["d", "agent names / addresses", () => setShared("sheprd.info", !shared("sheprd.info"))],
     ["a", "next agent", () => run("agent.next")],
     ["A", "previous agent", () => run("agent.prev")],
     ["g", "go to (picker)", () => run("mod.open", { name: "picker" })],

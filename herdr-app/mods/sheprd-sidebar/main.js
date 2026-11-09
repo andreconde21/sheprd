@@ -905,6 +905,11 @@ export default class SheprdSidebar extends View {
     };
 
     const detailed = v.density !== "compact";
+    // Names and addresses in place of the work: while Shift is held with the
+    // pointer over the list, or switched on with the prefix key (ctrl+space d).
+    // A held Shift reaches the list only through mouse moves: the keyboard
+    // belongs to the terminal.
+    const info = Boolean(shared("sheprd.info")) || Boolean(this.shiftInfo);
     const row = (r) => {
       const a = r.a;
       const machine = a.address.includes("/") ? machineTag(a.address.split("/")[0]) : "";
@@ -919,7 +924,7 @@ export default class SheprdSidebar extends View {
         // event to a row the pointer rests on). Only the hovered row builds them.
         .tooltip(this.hovered === a.address
           ? this.details(r, now)
-          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)}`)
+          : `${space}${machine ? ` · ${machine}` : ""}${work !== space ? ` — ${work}` : ""}\n${pingAddress(a.address)} · Shift over the list: names and addresses`)
         .on_hover((on, cx) => {
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
@@ -954,6 +959,24 @@ export default class SheprdSidebar extends View {
           })
           .child(r.marked ? "★" : "☆")
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
+      if (info) {
+        const code = pingAddress(a.address);
+        const kind = a.app || a.program?.name || "";
+        const where = [a.space_name || a.address, a.tab_index ? `tab ${a.tab_index}` : "", a.tab_name && a.tab_name !== a.space_name ? a.tab_name : ""].filter(Boolean).join(" · ");
+        if (!detailed) {
+          return base.h(28)
+            .child(this.status(t, r.dot, r.questions))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(code))
+            .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(where));
+        }
+        return base.py(4).items_start()
+          .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
+          .child(v_flex().flex_1().min_w(0).gap(1)
+            .child(h_flex().gap(6).items_center()
+              .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(code))
+              .when(Boolean(kind), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(kind))))
+            .child(div().truncate().text_size(11).text_color(t.muted).child(where)));
+      }
       if (!detailed) {
         return base.h(28)
           .child(this.status(t, r.dot, r.questions))
@@ -995,14 +1018,26 @@ export default class SheprdSidebar extends View {
       .when(Boolean(this.problem), (el) => el.child(div().px(12).py(6).text_size(11.5).text_color(t.blocked).child(this.problem)))
       .when(list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
         .child(rows.length === 0 ? "No agents yet. They show up here when they report their status." : "Nothing here with this filter.")))
+      .when(Boolean(shared("sheprd.info")), (el) => el.child(h_flex().id("info-off").mx(10).mb(4).px(8).h(22).flex_none().gap(6).rounded(6).items_center()
+        .bg(t.raised).text_size(11).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
+        .tooltip("Switch off (ctrl+space d)")
+        .on_click(() => setShared("sheprd.info", false))
+        .child(div().flex_1().min_w(0).truncate().child("Showing names and addresses"))
+        .child(div().flex_none().child("✕"))))
       .child(v_flex().id("sp-list").flex_1().min_h(0).px(8).overflow_y_scrollbar()
         .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
-        // Released outside the list: no mouse-up reaches it, so leaving ends the drag.
+        .on_mouse_move((e, cx) => {
+          if (e.modifiers.shift === Boolean(this.shiftInfo)) return;
+          this.shiftInfo = e.modifiers.shift;
+          cx.notify();
+        })
+        // Released outside the list: no mouse-up reaches it, so leaving ends
+        // the drag (and a Shift view: its release would go unseen).
         .on_hover((on, cx) => {
-          if (!on && this.drag) {
-            this.drag = null;
-            cx.notify();
-          }
+          if (on || (!this.drag && !this.shiftInfo)) return;
+          this.drag = null;
+          this.shiftInfo = false;
+          cx.notify();
         })
         .children(list.map((g) => this.dropTarget(t, g, [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))])))
         .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow))));
