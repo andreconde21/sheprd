@@ -960,21 +960,26 @@ export default class SheprdSidebar extends View {
           .child(r.marked ? "★" : "☆")
         : div().flex_none().text_size(11).text_color(t.dim).child(when ? duration(now - when) : "");
       if (info) {
-        const code = pingAddress(a.address);
+        // The terminal's code (t1m) first, its machine as the short tag the
+        // other rows use; the full address is in the tooltip and Shift-click.
+        const code = a.address.split("/").pop();
         const kind = a.app || a.program?.name || "";
-        const where = [a.space_name || a.address, a.tab_index ? `tab ${a.tab_index}` : "", a.tab_name && a.tab_name !== a.space_name ? a.tab_name : ""].filter(Boolean).join(" · ");
+        // A tab named only by its number would repeat "tab 1".
+        const tabName = a.tab_name && a.tab_name !== a.space_name && a.tab_name !== String(a.tab_index) ? a.tab_name : "";
+        const where = [a.space_name || code, a.tab_index ? `tab ${a.tab_index}` : "", tabName].filter(Boolean).join(" · ");
+        const tag = (el) => el.when(Boolean(machine), (x) => x.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)));
         if (!detailed) {
-          return base.h(28)
+          return tag(base.h(28)
             .child(this.status(t, r.dot, r.questions))
-            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(code))
-            .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(where));
+            .child(div().flex_none().text_color(t.foreground).font_semibold().child(code))
+            .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(where)));
         }
         return base.py(4).items_start()
           .child(div().pt(3).flex_none().child(this.status(t, r.dot, r.questions)))
           .child(v_flex().flex_1().min_w(0).gap(1)
-            .child(h_flex().gap(6).items_center()
-              .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).font_semibold().child(code))
-              .when(Boolean(kind), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(kind))))
+            .child(tag(h_flex().gap(6).items_center()
+              .child(div().flex_none().text_color(t.foreground).font_semibold().child(code))
+              .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(kind))))
             .child(div().truncate().text_size(11).text_color(t.muted).child(where)));
       }
       if (!detailed) {
