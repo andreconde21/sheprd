@@ -132,6 +132,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
   `match` are case-insensitive substrings of a space's name or folder.
   Members win over rules; the first matching project takes the space; the
   rest go to Other. `short` is the two-letter rail tag.
+- `order` on a project (optional): agent addresses in the order the user
+  dragged them; agents it doesn't list follow in the spaces' order.
 - `filter`: `needs-you` | `working` | `marked` | `all`.
 - `active_only` and `marks.kept`: sheprd's Active view. The app's sidebar no
   longer offers it (Marked covers it) and leaves them as they are.
@@ -216,6 +218,8 @@ the app runs on (the hub), like sheprd's `sidebar.toml`.
   `match` are case-insensitive substrings of a space's name or folder.
   Members win over rules; the first matching project takes the space; the
   rest go to Other. `short` is the two-letter rail tag.
+- `order` on a project (optional): agent addresses in the order the user
+  dragged them; agents it doesn't list follow in the spaces' order.
 - `filter`: `needs-you` | `working` | `marked` | `all`.
 - `active_only` and `marks.kept`: sheprd's Active view. The app's sidebar no
   longer offers it (Marked covers it) and leaves them as they are.

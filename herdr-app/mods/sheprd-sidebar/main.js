@@ -676,11 +676,35 @@ export default class SheprdSidebar extends View {
     this.droppedAt = Date.now();
     if (d.space !== undefined) {
       if (d.over !== undefined && d.over !== d.from) moveSpace(spaces().find((s) => s.id === d.space), d.over);
+      else if (this.reorderLine(d.overRow, d) !== 0) this.reorderAgent(d);
     } else {
       const order = this.shownOrder ?? [];
       if (d.over && d.over !== d.name) moveProject(d.name, d.over, order.indexOf(d.over) > order.indexOf(d.name));
     }
     cx.notify();
+  }
+
+  // Where a dragged agent would land relative to row [address]: -1 above it,
+  // 1 below it, 0 not a reorder (another project, itself, Other, Needs you).
+  reorderLine(address, d = this.drag?.moved ? this.drag : null) {
+    if (!d || d.space === undefined || !address || d.overRow !== address || address === d.address) return 0;
+    if (d.from === null || d.over !== d.from || !this.agentOrder) return 0;
+    const shown = this.shownAgents?.get(d.from) ?? [];
+    const to = shown.indexOf(address), from = shown.indexOf(d.address);
+    if (to < 0) return 0;
+    return from >= 0 && to > from ? 1 : -1;
+  }
+
+  // Saves the project's agent order with the dragged agent next to the row it
+  // was dropped on.
+  reorderAgent(d) {
+    const all = this.agentOrder?.get(d.from) ?? [];
+    const below = this.reorderLine(d.overRow, d) > 0;
+    const rest = all.filter((k) => k !== d.address);
+    const at = rest.indexOf(d.overRow);
+    if (at < 0) return;
+    rest.splice(below ? at + 1 : at, 0, d.address);
+    saveView({ projects: view().projects.map((x) => (x.name === d.from ? { ...x, order: rest } : x)) });
   }
 
   // ---- the list -----------------------------------------------------------
@@ -864,18 +888,30 @@ export default class SheprdSidebar extends View {
       const a = placed(x), b = placed(y);
       return b.rank - a.rank || b.at - a.at || b.seq - a.seq;
     };
+    // A project's own agent order (dragged in the sidebar) first, by address;
+    // agents it doesn't list yet follow in the spaces' order.
+    const ordered = (g) => {
+      const at = new Map((g.project.order ?? []).map((k, i) => [k, i]));
+      return (x, y) => (at.get(x.a.address) ?? 1e9) - (at.get(y.a.address) ?? 1e9) || fixed(x, y);
+    };
     const grouped = (source, sort) => {
       const groups = new Map(order.map((x) => [x.name, { project: x, rows: [] }]));
       const other = { project: { name: "Other", collapsed: v.other_collapsed }, rows: [], other: true };
       for (const r of source) (groups.get(projectOf(r.space, v.projects)?.name)?.rows ?? other.rows).push(r);
       const out = [...groups.values(), other].filter((g) => g.rows.length > 0);
-      for (const g of out) g.rows.sort(sort);
+      for (const g of out) g.rows.sort(sort === fixed ? ordered(g) : sort);
       return out;
     };
     // The rail has no filter chips, so it shows every agent that isn't hidden.
     if (narrow()) return this.rail(t, grouped(rows, fixed), m);
     const list = grouped(shown, v.filter === "needs-you" ? urgent : fixed);
     this.shownOrder = list.filter((g) => !g.other).map((g) => g.project.name);
+    // Every agent of each project in its order, filter or not, for a drop to
+    // place the dragged one among all of them. Needs you sorts by urgency, so
+    // agents are not reordered there.
+    this.agentOrder = v.filter === "needs-you" ? null
+      : new Map(grouped(rows, fixed).filter((g) => !g.other).map((g) => [g.project.name, g.rows.map((r) => r.a.address)]));
+    this.shownAgents = new Map(list.map((g) => [g.other ? null : g.project.name, g.rows.map((r) => r.a.address)]));
 
     const fold = (g) => {
       if (this.drag?.moved || Date.now() - (this.droppedAt ?? 0) < 400) return;
@@ -895,6 +931,12 @@ export default class SheprdSidebar extends View {
           if (!g.other) this.drag = { name: g.project.name, y: e.position.y, moved: false, over: undefined };
         })
         .when(this.drag?.moved && this.drag.name === g.project.name, (el) => el.opacity(0.5))
+        .on_mouse_move((_e, cx) => {
+          if (this.drag?.overRow) {
+            this.drag.overRow = null;
+            cx.notify();
+          }
+        })
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           // The menu's height follows its items: 28 px each, plus padding.
@@ -944,9 +986,18 @@ export default class SheprdSidebar extends View {
         // Press and drag onto another project: the agent's space joins it
         // (like right-click > Move to). The click that ends a drag does nothing.
         .on_mouse_down("left", (e) => {
-          if (r.space) this.drag = { space: r.space.id, from: projectOf(r.space, v.projects)?.name ?? null, y: e.position.y, moved: false, over: undefined };
+          if (r.space) this.drag = { space: r.space.id, address: a.address, from: projectOf(r.space, v.projects)?.name ?? null, y: e.position.y, moved: false, over: undefined, overRow: null };
         })
         .when(Boolean(this.drag?.moved && r.space && this.drag.space === r.space.id), (el) => el.opacity(0.5))
+        // Another agent of the same project under a dragged agent: it goes
+        // there (line above when dragged up, below when dragged down).
+        .on_mouse_move((_e, cx) => {
+          const x = this.drag;
+          if (!x?.moved || x.space === undefined || x.overRow === a.address) return;
+          x.overRow = a.address;
+          cx.notify();
+        })
+        .when(this.reorderLine(a.address) !== 0, (el) => (this.reorderLine(a.address) < 0 ? el.border_t_2() : el.border_b_2()).border_color(t.solid))
         .on_click((e) => {
           if (this.drag?.moved || Date.now() - (this.droppedAt ?? 0) < 400) return;
           if (e.modifiers.shift) return copyAddress(a.address);
