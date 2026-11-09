@@ -26,9 +26,16 @@ const FILTERS = [
 ];
 const CARDS_EVERY_MS = 5000;
 
-const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [] } };
+const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false, other_collapsed: false, density: "detailed", machine_tags: {}, marks: { unread: [], kept: [], dismissed: [], marked: [], highlighted: [] } };
 const view = () => ({ ...EMPTY_VIEW, .../** @type {object} */ (shared("sheprd.view") ?? {}) });
-const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], ...(view().marks ?? {}) });
+const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], highlighted: [], ...(view().marks ?? {}) });
+
+// Highlighted: only a look (a coloured bar and tint on the row), to tell some
+// agents apart at a glance, e.g. chiefs of staff. No filter, no sorting.
+const HIGHLIGHT = "#a78bfa";
+function toggleHighlight(address) {
+  saveMarks((x) => ({ ...x, highlighted: x.highlighted.includes(address) ? x.highlighted.filter((k) => k !== address) : [...x.highlighted, address] }));
+}
 
 // Marked: the user's own flag on an agent, for the Marked filter. Separate
 // from `kept`, which only keeps an agent in the active view.
@@ -109,7 +116,7 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const MENU_FIXED = 5 * 28 + 9 + 22 + 10; // new, copy, mark, read, hide, divider, label, padding
+const MENU_FIXED = 6 * 28 + 9 + 22 + 10; // new, copy, mark, highlight, read, hide, divider, label, padding
 const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Where a new tab or space can go for a project (null: Other): a tab in each of
@@ -615,6 +622,7 @@ export default class SheprdSidebar extends View {
       .child(item("m-new", "New tab or space here…", () => openNew(space ? projectOf(space, projects)?.name ?? null : null, space?.id ?? null)))
       .child(item("m-copy", `Copy address ${pingAddress(address)}`, () => copyAddress(address)))
       .child(item("m-mark", marked ? "Unmark" : "Mark", () => toggleMarked(address)))
+      .child(item("m-hl", m.highlighted.includes(address) ? "Remove highlight" : "Highlight", () => toggleHighlight(address)))
       // Read: out of Needs you until its next change. Unread: in it until opened.
       .child(p.menu.needs
         ? item("m-read", "Mark read", () => saveMarks((x) => ({ ...x, unread: x.unread.filter((u) => u !== address), dismissed: [...x.dismissed.filter((d) => !d.startsWith(`${address}@`)), `${address}@${seq}`].slice(-200) })))
@@ -820,7 +828,7 @@ export default class SheprdSidebar extends View {
         // The circle follows read state: a finished agent marked read shows
         // idle, an idle one marked unread shows finished.
         const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
-        return { a, space, dot, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary, marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
@@ -919,6 +927,8 @@ export default class SheprdSidebar extends View {
       const work = workOf(r, space);
       const base = h_flex().id(`ag-${a.address}`).px(8).flex_none().rounded(8).items_center().gap(8)
         .when(a.focused, (el) => el.bg(t.selected))
+        // Highlighted: a bar on the left and a tint (the focus colour wins).
+        .when(r.highlighted, (el) => el.border_l_2().border_color(HIGHLIGHT).when(!a.focused, (x) => x.bg(HIGHLIGHT + "1a")))
         .cursor_pointer().hover((s) => s.bg(t.hover))
         // Hover: the details (Shift-hover never worked: a held Shift sends no
         // event to a row the pointer rests on). Only the hovered row builds them.
