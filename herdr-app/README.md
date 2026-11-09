@@ -6,8 +6,8 @@ Herdr: it survives Herdr updates.
 
 | Piece | What it does |
 |---|---|
-| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / Marked / All, ★ marks, right-click: mark, highlight (a coloured bar, only a look), mark read, move a space to a project, new project, hide. Plays the attention sound when an agent turns blocked or done, and a desktop notification when the app isn't in front; drag a project header onto another project, or right-click it, to reorder; drag an agent onto a project to move its space there, or onto another agent of its project to reorder; right-click also mutes it; hover an agent for its details; agents show their hc name when they have one; hold Shift over the list (or ctrl+space d to switch it on) to show each agent's current card summary and terminal code (t1d) instead (turn Herdr's own sounds off in Settings so you don't hear both). Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
-| `mods/sheprd-panel` | The focused agent's cards: summary first, then its latest decisions, then open questions with answer buttons (★ = recommended, ✎ = your own text) and Send; its last output folded below. "All cards" shows every agent's open cards. |
+| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / Marked / All, ★ marks, right-click: mark, highlight (a coloured bar; in a project, the other agents fold under its highlighted ones, its chiefs of staff, behind "N agents · M need you"), mark read, move a space to a project, new project, hide. Plays the attention sound when an agent turns blocked or done, and a desktop notification when the app isn't in front; drag a project header onto another project, or right-click it, to reorder; drag an agent onto a project to move its space there, or onto another agent of its project to reorder; right-click also mutes it; hover an agent for its details; agents show their hc name when they have one; hold Shift over the list (or ctrl+space d to switch it on) to show each agent's current card summary and terminal code (t1d) instead (turn Herdr's own sounds off in Settings so you don't hear both). Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
+| `mods/sheprd-panel` | The focused agent's cards: summary first, then its latest decisions, then open questions with answer buttons (★ = recommended, ✎ = your own text) and Send; its last output folded below. Inbox: every agent's open questions with their context. Click a card id to read the card. |
 | `mods/sheprd-chrome` | The sidebar's header: Herdr's own with the sheprd name and mark, with Search, Settings, detailed/compact rows and Add machine as icons next to the sidebar toggle; icons drop out as the sidebar narrows instead of being cut. No footer. |
 | `mods/sheprd-tabs` | Herdr's tab bar with a third panel button, **Work** (the sheprd panel), next to Files and Changes. A space opens with Work until you choose another panel or close it. |
 | `mods/sheprd-leader` | sheprd's prefix key, which Herdr doesn't have: ctrl+space opens a key list and the next key runs sheprd's `prefix+<key>` action (c new tab, x close pane, z zoom, n/p tabs, N/P spaces, a next agent, d agent work and codes, g go to, b sidebar, s settings, ?). `install.sh` binds ctrl+space in `keys.json` unless it's already bound. |
@@ -59,9 +59,12 @@ card back to its task file with the same `[ledger.writeback]` section of
 - The sidebar has no per-project notification setting.
 - Cards refresh every 5 s (herdr-core has no doc events through `exec`).
 
-The panel's chips (Needs me, Working, Review, Blocked, Done, All) filter by the card's status; the
-mapping is one table at the top of `mods/sheprd-panel/main.js`, Done is hidden under All, and the
-choice is remembered. Evidence images are shown as thumbnails drawn from a `data:` URI; where the
+The panel has two tabs: This agent (its cards, done ones hidden) and Inbox (every open question,
+oldest first, each with the agent's hc name, project, space and machine, and per card its id,
+title and latest summary; a long question folds behind "more"). A ticket id (HZ-018) in the
+panel or on a sidebar row opens the card in a reader, through the `[[refs]]` sources of sheprd's
+`~/.config/herdr/sheprd-refs.toml` (pattern and command, e.g. `pt-show {id}`); only an id that
+matches a source's whole pattern is run. Evidence images are shown as thumbnails drawn from a `data:` URI; where the
 app's `image()` does not accept one, the label shows instead.
 
 Answers typed in the chat: when you send a message while a terminal has open questions, the hook

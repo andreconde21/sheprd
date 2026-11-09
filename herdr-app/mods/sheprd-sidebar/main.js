@@ -30,6 +30,11 @@ const EMPTY_VIEW = { projects: [], hidden: [], filter: "all", active_only: false
 const view = () => ({ ...EMPTY_VIEW, .../** @type {object} */ (shared("sheprd.view") ?? {}) });
 const marks = () => ({ unread: [], kept: [], dismissed: [], marked: [], highlighted: [], ...(view().marks ?? {}) });
 
+// A ticket-like card id (HZ-018, CAL-1189); "session" and other made-up ids are not.
+const TICKET = /^[A-Z][A-Z0-9]{1,5}-\d+$/;
+// The card reader lives in the panel mod (props { reader: { id } }).
+const openReader = (id) => openOverlay({ mod: "sheprd-panel", kind: "dialog", width: 680, height: 620, props: { reader: { id } } });
+
 // Highlighted: only a look (a coloured bar and tint on the row), to tell some
 // agents apart at a glance, e.g. chiefs of staff. No filter, no sorting.
 const HIGHLIGHT = "#a78bfa";
@@ -639,6 +644,46 @@ export default class SheprdSidebar extends View {
         .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
   }
 
+  // ---- chiefs of staff ---------------------------------------------------------
+
+  // A project with highlighted agents (its chiefs of staff) and others: the
+  // chiefs, then one line for the rest ("6 agents · 2 need you"), which opens
+  // them below, indented. Open teams are remembered on this computer.
+  teamRows(t, g, row) {
+    const chiefs = g.other ? [] : g.rows.filter((r) => r.highlighted);
+    if (!chiefs.length || chiefs.length === g.rows.length) return g.rows.map(row);
+    if (!this.teamOpen) {
+      try {
+        this.teamOpen = new Set(JSON.parse(localStorage.getItem("teams.open") ?? "[]"));
+      } catch {
+        this.teamOpen = new Set();
+      }
+    }
+    const name = g.project.name;
+    const team = g.rows.filter((r) => !r.highlighted);
+    const open = this.teamOpen.has(name);
+    const needs = team.filter((r) => r.needs).length;
+    const top = team.reduce((best, r) => (r.rank > best.rank ? r : best), { rank: 0 });
+    const line = h_flex().id(`tm-${name}`).h(24).pl(10).pr(8).flex_none().gap(6).rounded(6).items_center()
+      .text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(open ? "Fold the team under its chief of staff" : "Show the team")
+      .on_click((_e, cx) => {
+        open ? this.teamOpen.delete(name) : this.teamOpen.add(name);
+        try {
+          localStorage.setItem("teams.open", JSON.stringify([...this.teamOpen]));
+        } catch {
+          // not remembered
+        }
+        cx.notify();
+      })
+      .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(10).flex_none())
+      .child(div().flex_none().child(`${team.length} agent${team.length === 1 ? "" : "s"}`))
+      .when(needs > 0, (el) => el.child(div().flex_none().text_color(t.blocked).child(`· ${needs} need${needs === 1 ? "s" : ""} you`)))
+      .child(div().flex_1())
+      .when(!open && top.rank >= 3, (el) => el.child(this.status(t, top.dot ?? "done", top.questions ?? 0)));
+    return [...chiefs.map(row), line, ...(open ? team.map((r) => v_flex().w_full().flex_none().pl(12).child(row(r))) : [])];
+  }
+
   // ---- dragging a project or an agent -------------------------------------
 
   // A project's header and rows: where a drag lands. A dragged header shows a
@@ -852,10 +897,13 @@ export default class SheprdSidebar extends View {
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
         const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
+        // The ticket it works on: its open card with a ticket id, latest first.
+        const ticket = (cards.get(a.address) ?? []).filter((c) => !c.dismissed && !c.done && TICKET.test(c.id))
+          .sort((x, y) => String(y.updated_at ?? "").localeCompare(String(x.updated_at ?? "")))[0];
         // The circle follows read state: a finished agent marked read shows
         // idle, an idle one marked unread shows finished.
         const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
-        return { a, space, dot, key: spaceKey(space), questions, needs, summary, name: hcName.get(a.address), marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary, ticket: ticket ? { id: ticket.id, title: ticket.title ?? "" } : null, name: hcName.get(a.address), marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
@@ -1056,7 +1104,13 @@ export default class SheprdSidebar extends View {
           .child(h_flex().gap(6).items_center()
             .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).when(r.needs, (el) => el.font_semibold()).child(r.name || work))
             .child(age))
-          .child(div().truncate().text_size(11).text_color(t.dim).child(machine ? `${space} · ${machine}` : space)));
+          .child(h_flex().gap(4).min_w(0).text_size(11).text_color(t.dim)
+            // The ticket first; click it to read the card.
+            .when(Boolean(r.ticket), (el) => el.child(div().id(`tk-${a.address}`).flex_none().text_color(t.accent).cursor_pointer()
+              .hover((s) => s.underline()).tooltip(`${r.ticket.id}${r.ticket.title ? ` — ${r.ticket.title}` : ""}\nClick to read the card`)
+              .on_click((_e, cx) => { cx.stop_propagation(); openReader(r.ticket.id); })
+              .child(r.ticket.id)).child(div().flex_none().child("·")))
+            .child(div().flex_1().min_w(0).truncate().child(machine ? `${space} · ${machine}` : space))));
     };
 
     // Narrower than the default width: short labels, and chips shrink before
@@ -1105,7 +1159,7 @@ export default class SheprdSidebar extends View {
           this.shiftInfo = false;
           cx.notify();
         })
-        .children(list.map((g) => this.dropTarget(t, g, [header(g), ...(g.project.collapsed ? [] : g.rows.map(row))])))
+        .children(list.map((g) => this.dropTarget(t, g, [header(g), ...(g.project.collapsed ? [] : this.teamRows(t, g, row))])))
         .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow))));
   }
 }

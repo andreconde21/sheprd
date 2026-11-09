@@ -56,6 +56,11 @@ class CardLedgerTests(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
+    def test_an_open_question_keeps_its_whole_text_for_cards(self):
+        question = "My top three are #2 (approvals inbox), #1 (chief-of-staff rollup) and #4 (stalled warning), which ones should I build?"
+        self.assertEqual(hook.open_questions(f"Ideas.\n\n{question}"), [question])
+        self.assertEqual(len(hook.fit(question)), hook.MAX_VALUE)
+
     def test_an_older_herdr_pauses_the_ledger(self):
         self.fake_herdr('echo "error: unknown command: card" >&2; exit 2')
         tasks = {"SHE-1": ["--title", "one", "--status", "running"],

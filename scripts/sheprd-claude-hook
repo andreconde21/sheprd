@@ -877,7 +877,8 @@ def open_questions(text):
     for line in text.splitlines():
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line).strip().strip("*_ ")
         if line.endswith("?") and real_question(line) and line not in found:
-            found.append(fit(line))
+            # Whole (cards keeps 300 characters); the sheprd pane tokens are cut to 80 below.
+            found.append(fit(line, 300))
     return found[:3]
 
 
@@ -1189,7 +1190,7 @@ def main():
     elif event == "PostToolUse":
         cache["questions"] = []  # working again: not waiting on the user
     for i, question in enumerate(cache.get("questions", []), 1):
-        current[f"sheprd_q_{i}"] = question
+        current[f"sheprd_q_{i}"] = fit(question)
     current.update(summary_tokens(session))
     if pane:
         maybe_summarize(cache, session, transcript, pane, event)
