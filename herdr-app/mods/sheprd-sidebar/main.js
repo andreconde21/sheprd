@@ -63,6 +63,17 @@ function moveProject(name, target, after) {
   saveView({ projects: rest });
 }
 
+// Puts [space] in project [name] (null: Other), out of every other project.
+function moveSpace(space, name) {
+  if (!space) return;
+  saveView({
+    projects: view().projects.map((x) => {
+      const members = untie(x.members ?? [], space);
+      return x.name === name ? { ...x, members: [...members, spaceRef(space)] } : { ...x, members };
+    }),
+  });
+}
+
 // A space's name key: its machine (`local` for this one) and its name. Two
 // spaces can share it, so the sidebar writes `spaceRef` (name key + `#` + the
 // space's id) and still reads plain name keys from older views.
@@ -574,14 +585,7 @@ export default class SheprdSidebar extends View {
     const item = (id, label, action, dim = false) => h_flex().id(id).h(28).px(8).rounded(6).items_center()
       .text_color(dim ? t.muted : t.foreground).hover((el) => el.bg(t.hover)).cursor_pointer()
       .on_click(() => { closeOverlay(p.overlay); action(); }).child(label);
-    const moveTo = (name) => {
-      if (!space) return;
-      const list = projects.map((x) => {
-        const members = untie(x.members ?? [], space);
-        return x.name === name ? { ...x, members: [...members, spaceRef(space)] } : { ...x, members };
-      });
-      saveView({ projects: list });
-    };
+    const moveTo = (name) => moveSpace(space, name);
     if (p.menu.project !== undefined) {
       const name = p.menu.project;
       const other = name === null;
@@ -627,23 +631,29 @@ export default class SheprdSidebar extends View {
         .child(item("m-new", "New project…", () => openOverlay({ mod: "sheprd-sidebar", kind: "dialog", width: 360, height: 190, props: { newProject: { key, space: p.menu.space } } }))));
   }
 
-  // ---- dragging a project ---------------------------------------------------
+  // ---- dragging a project or an agent -------------------------------------
 
-  // A project's header and rows: where a dragged header lands, with a line
-  // where it will go (above when dragged up, below when dragged down).
+  // A project's header and rows: where a drag lands. A dragged header shows a
+  // line where it will go (above when dragged up, below when dragged down); a
+  // dragged agent tints the project its space will join (Other included).
+  // this.drag: { name } for a project, { space, from } for an agent's space;
+  // `over` is the project under the pointer (null: Other, undefined: none).
   dropTarget(t, g, children) {
     const d = this.drag?.moved ? this.drag : null;
     const name = g.other ? null : g.project.name;
-    const over = Boolean(d && name && d.over === name && name !== d.name);
-    const down = over && this.shownOrder.indexOf(name) > this.shownOrder.indexOf(d.name);
-    return v_flex().id(`dt-${g.project.name}`).w_full().flex_none()
-      .when(over && !down, (el) => el.border_t_2().border_color(t.solid))
-      .when(over && down, (el) => el.border_b_2().border_color(t.solid))
+    const isOver = Boolean(d) && d.over === name;
+    const line = isOver && d.space === undefined && name !== null && name !== d.name;
+    const down = line && this.shownOrder.indexOf(name) > this.shownOrder.indexOf(d.name);
+    const tint = isOver && d.space !== undefined && name !== d.from;
+    return v_flex().id(`dt-${g.project.name}`).w_full().flex_none().rounded(8)
+      .when(line && !down, (el) => el.border_t_2().border_color(t.solid))
+      .when(line && down, (el) => el.border_b_2().border_color(t.solid))
+      .when(tint, (el) => el.bg(t.hover).border_1().border_color(t.solid))
       .on_mouse_move((e, cx) => {
         const x = this.drag;
         if (!x) return;
         if (!x.moved && Math.abs(e.position.y - x.y) < 5) return;
-        const was = x.moved && x.over;
+        const was = x.moved ? x.over : undefined;
         x.moved = true;
         x.over = name;
         if (was !== name) cx.notify();
@@ -656,8 +666,12 @@ export default class SheprdSidebar extends View {
     this.drag = null;
     if (!d?.moved) return;
     this.droppedAt = Date.now();
-    const order = this.shownOrder ?? [];
-    if (d.over && d.over !== d.name) moveProject(d.name, d.over, order.indexOf(d.over) > order.indexOf(d.name));
+    if (d.space !== undefined) {
+      if (d.over !== undefined && d.over !== d.from) moveSpace(spaces().find((s) => s.id === d.space), d.over);
+    } else {
+      const order = this.shownOrder ?? [];
+      if (d.over && d.over !== d.name) moveProject(d.name, d.over, order.indexOf(d.over) > order.indexOf(d.name));
+    }
     cx.notify();
   }
 
@@ -870,7 +884,7 @@ export default class SheprdSidebar extends View {
         .on_click(() => fold(g))
         // Press and drag a header onto another project to move it there.
         .on_mouse_down("left", (e) => {
-          if (!g.other) this.drag = { name: g.project.name, y: e.position.y, moved: false, over: null };
+          if (!g.other) this.drag = { name: g.project.name, y: e.position.y, moved: false, over: undefined };
         })
         .when(this.drag?.moved && this.drag.name === g.project.name, (el) => el.opacity(0.5))
         .on_mouse_down("right", (_e, cx) => {
@@ -912,7 +926,14 @@ export default class SheprdSidebar extends View {
           if (on) this.loadFacts(a.address.includes("/") ? a.address.split("/")[0] : null, cx);
           cx.notify();
         })
+        // Press and drag onto another project: the agent's space joins it
+        // (like right-click > Move to). The click that ends a drag does nothing.
+        .on_mouse_down("left", (e) => {
+          if (r.space) this.drag = { space: r.space.id, from: projectOf(r.space, v.projects)?.name ?? null, y: e.position.y, moved: false, over: undefined };
+        })
+        .when(Boolean(this.drag?.moved && r.space && this.drag.space === r.space.id), (el) => el.opacity(0.5))
         .on_click((e) => {
+          if (this.drag?.moved || Date.now() - (this.droppedAt ?? 0) < 400) return;
           if (e.modifiers.shift) return copyAddress(a.address);
           if (v.filter === "needs-you" && !r.held) this.held = { address: a.address, ...placed(r) };
           run("pane.focus", { pane: a.pane });
