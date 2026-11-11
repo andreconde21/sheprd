@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Installs sheprd's pieces for the Herdr app (herdr-app + herdr-core):
 #   cards                      -> ~/.local/bin/cards (every machine with agents)
+#   hc-inbox + hc wrapper      -> ~/.local/bin, plus Stop/SessionStart hooks in ~/.claude/settings.json
+#                                 (agent messages delivered in the background, not typed)
 #   mods/sheprd-sidebar, -panel, -chrome, -tabs, -leader -> ~/.config/herdr-app/mods/ (the machine running the app)
 #   layouts/sheprd.json         -> ~/.config/herdr-app/layouts/
 #
@@ -43,6 +45,24 @@ place "$here/bin/cards" "$HOME/.local/bin/cards"
 if [ -d /usr/local/bin ] && [ -w /usr/local/bin ] && { [ ! -e /usr/local/bin/cards ] || [ -L /usr/local/bin/cards ]; }; then
   ln -sfn "$HOME/.local/bin/cards" /usr/local/bin/cards
   echo "  /usr/local/bin/cards -> $HOME/.local/bin/cards"
+fi
+# Agent messages in the background (hc-inbox): `hc send` to a Claude agent goes to its inbox,
+# not its prompt box. The wrapper replaces ~/.local/bin/hc only when that is herdr-core's own
+# symlink (or already our wrapper); `hc update` may put the symlink back: rerun this then.
+chmod +x "$here/bin/hc-inbox" "$here/bin/hc"
+place "$here/bin/hc-inbox" "$HOME/.local/bin/hc-inbox"
+hc_path="$HOME/.local/bin/hc"
+if [ -x "$HOME/.local/bin/herdr-core" ] && { [ ! -e "$hc_path" ] || [ "$(readlink "$hc_path")" = herdr-core ] \
+     || [ "$(readlink -f "$hc_path")" = "$(readlink -f "$HOME/.local/bin/herdr-core")" ] \
+     || head -c 200 "$hc_path" 2>/dev/null | command grep -q 'hc wrapper (sheprd)'; }; then
+  rm -f "$hc_path"
+  cp "$here/bin/hc" "$hc_path"
+  echo "  $hc_path (wrapper: send -> hc-inbox, the rest -> herdr-core)"
+else
+  echo "  note: $hc_path is not herdr-core's symlink; left as is (agent messages keep being typed)"
+fi
+if [ -d "$HOME/.claude" ]; then
+  python3 "$HOME/.local/bin/hc-inbox" install-hooks "$HOME/.claude/settings.json" "$HOME/.local/bin/hc-inbox"
 fi
 # Agents learn the ledger (and that `cards` is the command in the app) from these skills.
 if [ -d "$HOME/.claude" ]; then
