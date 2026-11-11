@@ -120,6 +120,28 @@ class SendRoutingTests(Base):
         self.assertEqual(env, '<hc from="me" reach="hc send me when done or stuck">hello</hc>')
 
 
+class LogTests(Base):
+    def test_parse_envelope(self):
+        self.assertEqual(hci.parse_envelope('<hc from="t3c tc-ss" reach="hc send t3c when done">a\nb</hc>'),
+                         {"from": "t3c", "from_name": "tc-ss", "body": "a\nb"})
+        self.assertEqual(hci.parse_envelope('<hc from="dev/t1">x &lt; y</hc>')["from"], "dev/t1")
+        self.assertEqual(hci.parse_envelope("plain")["body"], "plain")
+
+    def test_log_json_all_since(self):
+        os.makedirs(hci.term_dir("t1"))
+        os.makedirs(hci.term_dir("t2"))
+        with unittest.mock.patch.object(hci.time, "time", return_value=100):
+            hci.append_log("t1", '<hc from="t9">old</hc>')
+        with unittest.mock.patch.object(hci.time, "time", return_value=200):
+            hci.append_log("t2", '<hc from="t9 boss">new</hc>')
+        out = []
+        with unittest.mock.patch("builtins.print", side_effect=out.append):
+            hci.cmd_log(["--json", "--all", "--since", "150"])
+        doc = json.loads(out[0])
+        self.assertEqual(doc["mode"], "compact")
+        self.assertEqual(doc["messages"], [{"to": "t2", "ts": 200, "from": "t9", "from_name": "boss", "body": "new"}])
+
+
 class HookConfigTests(Base):
     def test_merge_is_idempotent_and_keeps_others(self):
         s = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]}, "x": 1}

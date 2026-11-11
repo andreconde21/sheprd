@@ -14,6 +14,7 @@ agent with it: nothing is typed, and the transcript shows one line.
   hc-inbox mode [compact|full]  compact: the inbox (default); full: always type, as before
   hc-inbox status               waiters and queued messages on this machine
   hc-inbox log [address]        the messages delivered to a terminal (default: this one)
+  hc-inbox log --json --all     every terminal's messages as JSON (the Messages panel)
   hc-inbox hook-config          the hooks block install.sh merges into ~/.claude/settings.json
 
 The wrapper only takes plain sends: any option (--wait, --if, --force, --json) goes to
@@ -21,6 +22,7 @@ the real `hc send`, and so does a target that isn't a Claude agent with a live w
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -241,10 +243,59 @@ def append_log(address, text):
         pass
 
 
+ENVELOPE = re.compile(r'^<hc(?: from="([^"]*)")?(?: reach="[^"]*")?>(.*)</hc>\s*$', re.S)
+
+
+def unescape(s):
+    return s.replace("&lt;", "<").replace("&quot;", '"').replace("&amp;", "&")
+
+
+def parse_envelope(text):
+    """'<hc from="t3c tc-ss">hi</hc>' -> {"from": "t3c", "from_name": "tc-ss", "body": "hi"}."""
+    m = ENVELOPE.match(text.strip())
+    if not m:
+        return {"from": "", "from_name": "", "body": text}
+    who = unescape(m.group(1) or "").split(" ", 1)
+    return {"from": who[0], "from_name": who[1] if len(who) > 1 else "", "body": m.group(2)}
+
+
+def log_entries(address):
+    try:
+        lines = open(os.path.join(term_dir(address), "log.jsonl"), encoding="utf-8").readlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            m = json.loads(ln)
+        except ValueError:
+            continue
+        out.append({"to": address, "ts": m.get("ts", 0), **parse_envelope(m.get("text", ""))})
+    return out
+
+
+def log_json(args):
+    """`log --json [--all | <address>] [--since TS] [--limit N]`: for the Messages panel."""
+    since = int(args[args.index("--since") + 1]) if "--since" in args else 0
+    limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 200
+    if "--all" in args:
+        addrs = [a for a in (os.listdir(STATE) if os.path.isdir(STATE) else [])
+                 if os.path.isdir(os.path.join(STATE, a))]
+    else:
+        pos = [a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] not in ("--since", "--limit"))]
+        addrs = pos[:1] or [os.environ.get("HC_TERMINAL_ID", "")]
+    entries = [e for a in addrs if a for e in log_entries(a) if e["ts"] > since]
+    entries.sort(key=lambda e: e["ts"])
+    print(json.dumps({"mode": mode(), "messages": entries[-limit:]}, ensure_ascii=False))
+    return 0
+
+
 def cmd_log(args):
+    if "--json" in args:
+        return log_json([a for a in args if a != "--json"])
     address = args[0] if args else os.environ.get("HC_TERMINAL_ID", "")
     if not address:
-        sys.exit("usage: hc-inbox log <address> [--lines N]")
+        sys.exit("usage: hc-inbox log <address> [--lines N] | log --json [--all|<address>] [--since TS]")
     n = int(args[args.index("--lines") + 1]) if "--lines" in args else 20
     try:
         lines = open(os.path.join(term_dir(address), "log.jsonl"), encoding="utf-8").readlines()[-n:]
