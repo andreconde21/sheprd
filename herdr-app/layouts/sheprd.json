@@ -131,6 +131,13 @@
                       }
                     },
                     {
+                      "id": "sheprd-messages",
+                      "type": "block",
+                      "content": {
+                        "mod": "sheprd-messages"
+                      }
+                    },
+                    {
                       "id": "files",
                       "type": "block",
                       "content": {

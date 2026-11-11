@@ -3,7 +3,7 @@
 #   cards                      -> ~/.local/bin/cards (every machine with agents)
 #   hc-inbox + hc wrapper      -> ~/.local/bin, plus Stop/SessionStart hooks in ~/.claude/settings.json
 #                                 (agent messages delivered in the background, not typed)
-#   mods/sheprd-sidebar, -panel, -chrome, -tabs, -leader -> ~/.config/herdr-app/mods/ (the machine running the app)
+#   mods/sheprd-sidebar, -panel, -messages, -chrome, -tabs, -leader -> ~/.config/herdr-app/mods/ (the machine running the app)
 #   layouts/sheprd.json         -> ~/.config/herdr-app/layouts/
 #
 #   ./install.sh               everything (run on the machine with the app)
@@ -78,6 +78,7 @@ fi
 if ! $cards_only; then
   place "$here/mods/sheprd-sidebar" "$app/mods/sheprd-sidebar"
   place "$here/mods/sheprd-panel" "$app/mods/sheprd-panel"
+  place "$here/mods/sheprd-messages" "$app/mods/sheprd-messages"
   place "$here/mods/sheprd-chrome" "$app/mods/sheprd-chrome"
   place "$here/mods/sheprd-tabs" "$app/mods/sheprd-tabs"
   place "$here/mods/sheprd-leader" "$app/mods/sheprd-leader"
@@ -105,6 +106,7 @@ PY
   if command -v herdr-app >/dev/null; then
     herdr-app check "$app/mods/sheprd-sidebar"
     herdr-app check "$app/mods/sheprd-panel"
+    herdr-app check "$app/mods/sheprd-messages"
     herdr-app check "$app/mods/sheprd-chrome"
     herdr-app check "$app/mods/sheprd-tabs"
     herdr-app check "$app/mods/sheprd-leader"

@@ -1,5 +1,6 @@
-// Herdr's tab bar (the tabs mod from herdr-app, Apache-2.0) with a third panel
-// button, Work, for the sheprd-panel: the focused agent's cards. Work is the
+// Herdr's tab bar (the tabs mod from herdr-app, Apache-2.0) with two more panel
+// buttons: Work, for the sheprd-panel (the focused agent's cards), and Messages,
+// for sheprd-messages (what agents sent each other). Work is the
 // panel a space opens with until you choose another or close it.
 
 import { View, div, svg, image } from "gpui-kit";
@@ -80,7 +81,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / /** @type {any} */ (settings()).zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = ["sheprd-panel", .../** @type {string[]} */ (shared("workspace.panels") ?? ["files", "changes"])];
+    const enabled = ["sheprd-panel", "sheprd-messages", .../** @type {string[]} */ (shared("workspace.panels") ?? ["files", "changes"])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -98,6 +99,7 @@ export default class Tabs extends View {
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .child(panelButton("sheprd-panel", "Work", "mods/sheprd-tabs/work.svg"))
+      .child(panelButton("sheprd-messages", "Messages", "mods/sheprd-tabs/messages.svg"))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/sheprd-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
