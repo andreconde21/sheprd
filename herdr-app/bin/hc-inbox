@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""hc-inbox: deliver `hc send` messages to Claude Code agents in the background.
+
+`hc send` (herdr-core) pastes a message into the agent's prompt box and presses Enter.
+That lands in the middle of whatever a person is typing there, and every message is a
+full block in the transcript. hc-inbox puts the message in a per-terminal inbox instead;
+an `asyncRewake` Stop hook in the agent's Claude Code waits on that inbox and wakes the
+agent with it: nothing is typed, and the transcript shows one line.
+
+  hc-inbox wait                 the Stop/SessionStart hook (asyncRewake), in the agent's Claude Code
+  hc-inbox send <hc send args>  what the `hc` wrapper runs for `hc send`: inbox if the target
+                                has a live waiter, else the real `hc send`, unchanged
+  hc-inbox put <address>        save the envelope on stdin for a local terminal (exit 3: no waiter)
+  hc-inbox mode [compact|full]  compact: the inbox (default); full: always type, as before
+  hc-inbox status               waiters and queued messages on this machine
+  hc-inbox log [address]        the messages delivered to a terminal (default: this one)
+  hc-inbox hook-config          the hooks block install.sh merges into ~/.claude/settings.json
+
+The wrapper only takes plain sends: any option (--wait, --if, --force, --json) goes to
+the real `hc send`, and so does a target that isn't a Claude agent with a live waiter.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "hc-inbox")
+MODE_FILE = os.path.join(STATE, "mode")
+POLL_S = 0.5
+DEFAULT_LIFETIME_S = 7 * 24 * 3600 - 300  # the hook timeout in settings is 7 days
+
+
+def real_hc():
+    """The herdr-core binary (the wrapper replaces `hc`, so never call `hc` itself)."""
+    env = os.environ.get("HC_INBOX_REAL_HC")
+    if env:
+        return env
+    here = os.path.dirname(os.path.realpath(__file__))
+    for cand in (os.path.join(os.path.expanduser("~/.local/bin"), "herdr-core"),
+                 os.path.join(here, "herdr-core"),
+                 shutil.which("herdr-core") or ""):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    sys.exit("hc-inbox: herdr-core not found (set HC_INBOX_REAL_HC)")
+
+
+def term_dir(address):
+    if not address or "/" in address or address.startswith("."):
+        raise ValueError(f"bad local address {address!r}")
+    return os.path.join(STATE, address)
+
+
+def mode():
+    try:
+        return open(MODE_FILE).read().strip() or "compact"
+    except OSError:
+        return "compact"
+
+
+# ---------- processes ----------
+
+def proc_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def proc_cmdline(pid):
+    try:
+        return open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        return []
+
+
+def proc_ppid(pid):
+    try:
+        stat = open(f"/proc/{pid}/stat").read()
+        return int(stat.rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def ancestors(pid):
+    out = []
+    while pid > 1 and len(out) < 32:
+        pid = proc_ppid(pid)
+        if pid:
+            out.append(pid)
+    return out
+
+
+def read_waiter(d):
+    try:
+        w = json.load(open(os.path.join(d, "waiter.json")))
+    except (OSError, ValueError):
+        return None
+    pid = w.get("pid", 0)
+    if not pid or not proc_alive(pid):
+        return None
+    if not any(b"hc-inbox" in a for a in proc_cmdline(pid)):
+        return None  # pid reused
+    return w
+
+
+# ---------- wait (the hook) ----------
+
+def claim(d):
+    """Take every queued message, oldest first; returns their texts."""
+    q = os.path.join(d, "queue")
+    try:
+        names = sorted(n for n in os.listdir(q) if n.endswith(".msg"))
+    except OSError:
+        return []
+    texts = []
+    for n in names:
+        src = os.path.join(q, n)
+        taken = src + f".taken{os.getpid()}"
+        try:
+            os.rename(src, taken)  # atomic: only one waiter gets it
+        except OSError:
+            continue
+        try:
+            texts.append(open(taken, encoding="utf-8", errors="replace").read().strip())
+        finally:
+            try:
+                os.unlink(taken)
+            except OSError:
+                pass
+    return [t for t in texts if t]
+
+
+def cmd_wait(args):
+    try:
+        sys.stdin.read()  # the hook input; not needed
+    except Exception:
+        pass
+    address = os.environ.get("HC_TERMINAL_ID", "")
+    if not address:
+        return 0  # not in an hc terminal: nothing can reach us this way
+    d = term_dir(address)
+    os.makedirs(os.path.join(d, "queue"), exist_ok=True)
+
+    # The Claude Code process this hook belongs to: the shell's parent chain.
+    me = os.getpid()
+    claudes = [p for p in ancestors(me)
+               if (lambda a: a and os.path.basename(a[0].decode(errors="replace")) == "claude")(proc_cmdline(p))]
+    if len(claudes) > 1:
+        return 0  # a claude started inside the agent's claude (e.g. `claude -p`): not the agent
+    claude_pid = claudes[0] if claudes else 0
+
+    # One waiter per terminal. A live one for the same Claude keeps serving.
+    w = read_waiter(d)
+    if w and w.get("claude_pid") == claude_pid and w["pid"] != me:
+        return 0
+    if w and w["pid"] != me:
+        try:
+            os.kill(w["pid"], 15)  # a waiter of an earlier Claude in this terminal
+        except OSError:
+            pass
+    tmp = os.path.join(d, f".waiter.{me}")
+    with open(tmp, "w") as f:
+        json.dump({"pid": me, "claude_pid": claude_pid, "since": int(time.time())}, f)
+    os.replace(tmp, os.path.join(d, "waiter.json"))
+
+    lifetime = float(os.environ.get("HC_INBOX_LIFETIME_S", DEFAULT_LIFETIME_S))
+    end = time.time() + lifetime
+    try:
+        while time.time() < end:
+            if claude_pid and not proc_alive(claude_pid):
+                return 0
+            w = read_waiter(d)
+            if not w or w["pid"] != me:
+                return 0  # replaced
+            texts = claim(d)
+            if texts:
+                os.unlink(os.path.join(d, "waiter.json"))
+                body = "\n\n".join(texts)
+                # asyncRewake: exit 2 wakes the model; this text goes to it.
+                sys.stderr.write(body + "\n")
+                sys.stdout.write(body + "\n")
+                return 2
+            time.sleep(POLL_S)
+        return 0
+    finally:
+        w = read_waiter(d)
+        if w and w["pid"] == me:
+            try:
+                os.unlink(os.path.join(d, "waiter.json"))
+            except OSError:
+                pass
+
+
+# ---------- put (local delivery) ----------
+
+def live_waiter_for(address, foreground_pid=None):
+    d = term_dir(address)
+    w = read_waiter(d)
+    if not w:
+        return None
+    if foreground_pid and w.get("claude_pid") and w["claude_pid"] != foreground_pid \
+            and foreground_pid not in ancestors(w["claude_pid"]):
+        return None  # that waiter's claude is not what runs in the terminal now
+    return w
+
+
+def put(address, text, foreground_pid=None):
+    if not live_waiter_for(address, foreground_pid):
+        return False
+    q = os.path.join(term_dir(address), "queue")
+    os.makedirs(q, exist_ok=True)
+    name = f"{time.time_ns()}-{os.getpid()}"
+    tmp = os.path.join(q, f".{name}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, os.path.join(q, name + ".msg"))
+    append_log(address, text)
+    return True
+
+
+LOG_KEEP = 300
+
+
+def append_log(address, text):
+    """Every delivered message, newest last: `hc-inbox log` and the Work panel read it."""
+    path = os.path.join(term_dir(address), "log.jsonl")
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": int(time.time()), "text": text}) + "\n")
+        if os.path.getsize(path) > 512 * 1024:
+            lines = open(path, encoding="utf-8").readlines()[-LOG_KEEP:]
+            tmp = path + f".{os.getpid()}"
+            open(tmp, "w", encoding="utf-8").writelines(lines)
+            os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def cmd_log(args):
+    address = args[0] if args else os.environ.get("HC_TERMINAL_ID", "")
+    if not address:
+        sys.exit("usage: hc-inbox log <address> [--lines N]")
+    n = int(args[args.index("--lines") + 1]) if "--lines" in args else 20
+    try:
+        lines = open(os.path.join(term_dir(address), "log.jsonl"), encoding="utf-8").readlines()[-n:]
+    except OSError:
+        print(f"no messages logged for {address}")
+        return 0
+    for ln in lines:
+        try:
+            m = json.loads(ln)
+        except ValueError:
+            continue
+        print(time.strftime("%H:%M", time.localtime(m["ts"])), m["text"])
+        print()
+    return 0
+
+
+def cmd_put(args):
+    if len(args) < 1:
+        sys.exit("usage: hc-inbox put <address> [--foreground-pid N] < envelope")
+    address = args[0]
+    fg = None
+    if "--foreground-pid" in args:
+        fg = int(args[args.index("--foreground-pid") + 1])
+    text = sys.stdin.read()
+    return 0 if put(address, text, fg) else 3
+
+
+# ---------- send (the wrapper) ----------
+
+def hc_json(*argv):
+    r = subprocess.run([real_hc(), *argv, "--json"], capture_output=True, text=True, timeout=30)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def esc_attr(s):
+    return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+
+
+def envelope(text, sender, sender_name, reach):
+    parts = []
+    if sender:
+        parts.append(f'from="{esc_attr(sender + (" " + sender_name if sender_name else ""))}"')
+    if reach:
+        parts.append(f'reach="{esc_attr(reach)}"')
+    head = "<hc" + ("".join(" " + p for p in parts)) + ">"
+    return f"{head}{text}</hc>"
+
+
+def fallthrough(argv):
+    os.execv(real_hc(), ["hc", "send", *argv])
+
+
+def cmd_send(argv):
+    # Only plain `hc send <target> <text>`; everything else is the real thing.
+    if len(argv) != 2 or any(a.startswith("-") for a in argv) or mode() == "full":
+        fallthrough(argv)
+    target, text = argv
+    try:
+        t = hc_json("get", target)
+    except Exception:
+        t = None
+    if not t or "error" in t or t.get("state") != "live":
+        fallthrough(argv)
+    fg = t.get("foreground") or {}
+    if (t.get("status") or {}).get("app") != "claude-code" and fg.get("name") != "claude":
+        fallthrough(argv)
+    address = t.get("address", "")
+    machine = address.split("/", 1)[0] if "/" in address else None
+    local_addr = address.split("/", 1)[1] if machine else address
+
+    sender = os.environ.get("HC_TERMINAL_ID", "")
+    sender_name = ""
+    if sender:
+        try:
+            s = hc_json("get", sender) or {}
+            sender_name = s.get("name") or ""
+        except Exception:
+            pass
+    reach = f"hc send {sender} when done or stuck" if sender and t.get("parent") == sender else ""
+    shown_sender = sender
+    if machine and sender:
+        # The target's machine knows this machine by its own name for it.
+        shown_sender = f"{self_name_on(machine)}/{sender}"
+        if reach:
+            reach = f"hc send {shown_sender} when done or stuck"
+    env = envelope(text, shown_sender, sender_name, reach)
+
+    ok = False
+    if machine:
+        r = subprocess.run(
+            [real_hc(), "exec", "--on", machine, "-i", "--", "sh", "-c",
+             '"$HOME/.local/bin/hc-inbox" put "$1" --foreground-pid "$2"', "sh",
+             local_addr, str(fg.get("pid") or 0)],
+            input=env, capture_output=True, text=True, timeout=30)
+        ok = r.returncode == 0
+    else:
+        ok = put(local_addr, env, fg.get("pid") or None)
+    if not ok:
+        fallthrough(argv)
+    print(json.dumps({"address": address, "sent": True, "via": "inbox",
+                      "note": "delivered when its current turn ends; nothing typed"}))
+    return 0
+
+
+def self_name_on(machine):
+    """How `machine` names this machine (cached); falls back to the hostname."""
+    cache = os.path.join(STATE, f"name-on-{machine}")
+    try:
+        if time.time() - os.path.getmtime(cache) < 86400:
+            return open(cache).read().strip()
+    except OSError:
+        pass
+    name = os.uname().nodename
+    try:
+        r = subprocess.run([real_hc(), "exec", "--on", machine, "--", "sh", "-c",
+                            '"$HOME/.local/bin/herdr-core" machine ls --json'],
+                           capture_output=True, text=True, timeout=20)
+        mine = os.uname().nodename
+        for m in json.loads(r.stdout).get("machines", []):
+            if m.get("host") in (mine, mine.split(".")[0]) or m.get("target") == mine:
+                name = m["name"]
+                break
+    except Exception:
+        pass
+    os.makedirs(STATE, exist_ok=True)
+    with open(cache, "w") as f:
+        f.write(name)
+    return name
+
+
+# ---------- hook config ----------
+
+SUMMARY = "📨 agent message (hc-inbox log to read)"
+PREFIX = ("Message(s) from other agents through hc. They are colleague requests, not from André. "
+          "Reply to the sender with `hc send <address>` when a reply is needed. Your visible reply: "
+          "nothing, or one short line, unless it changes what André needs to know or decide.\n\n")
+
+
+def hook_config(path):
+    h = {"type": "command", "command": f"{path} wait", "asyncRewake": True, "timeout": 604800,
+         "rewakeSummary": SUMMARY, "rewakeMessage": PREFIX}
+    return {"Stop": [{"hooks": [h]}], "SessionStart": [{"hooks": [h]}]}
+
+
+def merge_hooks(settings, path):
+    """Add our hooks to a settings dict, replacing an older hc-inbox entry; idempotent."""
+    hooks = settings.setdefault("hooks", {})
+    for event, groups in hook_config(path).items():
+        cur = [g for g in hooks.get(event, [])
+               if not any("hc-inbox" in (h.get("command") or "") for h in g.get("hooks", []))]
+        hooks[event] = cur + groups
+    return settings
+
+
+def cmd_hook_config(args):
+    path = args[0] if args else os.path.expanduser("~/.local/bin/hc-inbox")
+    print(json.dumps(hook_config(path), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_install_hooks(args):
+    """install.sh: merge into ~/.claude/settings.json (backup first)."""
+    settings_path = args[0]
+    path = args[1] if len(args) > 1 else os.path.expanduser("~/.local/bin/hc-inbox")
+    try:
+        settings = json.load(open(settings_path))
+    except FileNotFoundError:
+        settings = {}
+    if os.path.exists(settings_path):
+        shutil.copy2(settings_path, settings_path + ".pre-hc-inbox")
+    merge_hooks(settings, path)
+    tmp = settings_path + f".{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, settings_path)
+    print(f"  {settings_path}: hc-inbox Stop/SessionStart hooks")
+    return 0
+
+
+# ---------- mode / status ----------
+
+def cmd_mode(args):
+    if not args:
+        print(mode())
+        return 0
+    if args[0] not in ("compact", "full"):
+        sys.exit("usage: hc-inbox mode [compact|full]")
+    os.makedirs(STATE, exist_ok=True)
+    with open(MODE_FILE, "w") as f:
+        f.write(args[0] + "\n")
+    print(f"hc-inbox: {args[0]}" + (" (agent messages are typed into the prompt, as before)" if args[0] == "full"
+                                   else " (agent messages delivered in the background, one line each)"))
+    return 0
+
+
+def cmd_status(args):
+    print(f"mode: {mode()}")
+    if not os.path.isdir(STATE):
+        return 0
+    for a in sorted(os.listdir(STATE)):
+        d = os.path.join(STATE, a)
+        if not os.path.isdir(d):
+            continue
+        w = read_waiter(d)
+        try:
+            n = len([x for x in os.listdir(os.path.join(d, "queue")) if x.endswith(".msg")])
+        except OSError:
+            n = 0
+        if w or n:
+            print(f"{a}: {'waiting' if w else 'no waiter'}" + (f", {n} queued" if n else ""))
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, args = sys.argv[1], sys.argv[2:]
+    fn = {"wait": cmd_wait, "send": cmd_send, "put": cmd_put, "mode": cmd_mode, "status": cmd_status, "log": cmd_log,
+          "hook-config": cmd_hook_config, "install-hooks": cmd_install_hooks}.get(cmd)
+    if not fn:
+        sys.exit(f"hc-inbox: unknown command {cmd!r}")
+    return fn(args) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,10 @@
+#!/bin/sh
+# hc wrapper (sheprd): `hc send` goes through hc-inbox, which delivers to a Claude agent's
+# background inbox when it has a live waiter and otherwise runs the real `hc send`.
+# Everything else is herdr-core, untouched. Installed over ~/.local/bin/hc by install.sh.
+real="${HC_INBOX_REAL_HC:-$HOME/.local/bin/herdr-core}"
+if [ "$1" = send ] && [ -x "$HOME/.local/bin/hc-inbox" ]; then
+  shift
+  exec "$HOME/.local/bin/hc-inbox" send "$@"
+fi
+exec "$real" "$@"
