@@ -65,12 +65,17 @@ fi
 # Update the copy agents find first on PATH too, when it is sheprd's.
 chmod +x "$here/../scripts/sheprd-doc"
 place "$here/../scripts/sheprd-doc" "$HOME/.local/bin/sheprd-doc"
-found="$(command -v sheprd-doc || true)"
-if [ -n "$found" ] && [ "$found" != "$HOME/.local/bin/sheprd-doc" ] && [ -w "$found" ] \
-   && head -c 300 "$found" | command grep -q 'sheprd-doc'; then
-  cp "$here/../scripts/sheprd-doc" "$found"
-  echo "  $found"
-fi
+# Every sheprd copy on PATH (agents' shells may put the TUI's mise folder first).
+IFS=: read -r -a path_dirs <<< "$PATH"
+for dir in "${path_dirs[@]}" "$HOME/.local/share/mise/installs/herdr/latest"; do
+  found="$dir/sheprd-doc"
+  if [ -f "$found" ] && [ "$found" != "$HOME/.local/bin/sheprd-doc" ] && [ -w "$found" ] \
+     && head -c 300 "$found" | command grep -q 'sheprd-doc' \
+     && ! cmp -s "$found" "$here/../scripts/sheprd-doc"; then
+    cp "$here/../scripts/sheprd-doc" "$found"
+    echo "  $found"
+  fi
+done
 if [ -d "$HOME/.claude" ]; then
   python3 "$HOME/.local/bin/hc-inbox" install-hooks "$HOME/.claude/settings.json" "$HOME/.local/bin/hc-inbox"
 fi
