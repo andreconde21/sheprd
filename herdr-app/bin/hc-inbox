@@ -169,6 +169,10 @@ def cmd_wait(args):
     with open(tmp, "w") as f:
         json.dump({"pid": me, "claude_pid": claude_pid, "since": int(time.time())}, f)
     os.replace(tmp, os.path.join(d, "waiter.json"))
+    try:
+        os.unlink(os.path.join(d, "resume.json"))  # a waiter again: the marker's job is done
+    except OSError:
+        pass
 
     lifetime = float(os.environ.get("HC_INBOX_LIFETIME_S", DEFAULT_LIFETIME_S))
     end = time.time() + lifetime
@@ -181,6 +185,12 @@ def cmd_wait(args):
                 return 0  # replaced
             texts = claim(d)
             if texts:
+                # The model wakes for these; until that turn ends nobody waits. The marker lets
+                # `put` keep queueing for this Claude meanwhile; the next Stop hook claims them.
+                rtmp = os.path.join(d, f".resume.{me}")
+                with open(rtmp, "w") as f:
+                    json.dump({"claude_pid": claude_pid, "since": int(time.time())}, f)
+                os.replace(rtmp, os.path.join(d, "resume.json"))
                 os.unlink(os.path.join(d, "waiter.json"))
                 body = "\n\n".join(texts)
                 # asyncRewake: exit 2 wakes the model; this text goes to it.
@@ -200,9 +210,27 @@ def cmd_wait(args):
 
 # ---------- put (local delivery) ----------
 
+RESUME_MAX_S = 12 * 3600  # a turn longer than this: give up on the marker, type instead
+
+
+def read_resume(d):
+    """The marker a waiter leaves when it wakes its Claude: queue for it until its next Stop."""
+    try:
+        r = json.load(open(os.path.join(d, "resume.json")))
+    except (OSError, ValueError):
+        return None
+    pid = r.get("claude_pid", 0)
+    if not pid or not proc_alive(pid) or time.time() - r.get("since", 0) > RESUME_MAX_S:
+        return None
+    a = proc_cmdline(pid)
+    if not a or os.path.basename(a[0].decode(errors="replace")) != "claude":
+        return None  # pid reused
+    return r
+
+
 def live_waiter_for(address, foreground_pid=None):
     d = term_dir(address)
-    w = read_waiter(d)
+    w = read_waiter(d) or read_resume(d)
     if not w:
         return None
     if foreground_pid and w.get("claude_pid") and w["claude_pid"] != foreground_pid \
@@ -518,8 +546,10 @@ def cmd_status(args):
             n = len([x for x in os.listdir(os.path.join(d, "queue")) if x.endswith(".msg")])
         except OSError:
             n = 0
-        if w or n:
-            print(f"{a}: {'waiting' if w else 'no waiter'}" + (f", {n} queued" if n else ""))
+        r = None if w else read_resume(d)
+        if w or r or n:
+            state = "waiting" if w else "in a turn, queueing until it ends" if r else "no waiter"
+            print(f"{a}: {state}" + (f", {n} queued" if n else ""))
     return 0
 
 
