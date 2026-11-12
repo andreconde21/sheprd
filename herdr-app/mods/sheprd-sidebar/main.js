@@ -401,11 +401,38 @@ export default class SheprdSidebar extends View {
       try {
         setShared("sheprd.cards", await fetchCards(machines()));
         setShared("sheprd.cards.at", Date.now());
+        this.openDocs();
       } finally {
         this.loading = false;
       }
       cx.notify();
     });
+  }
+
+  // sheprd-doc: an agent recorded a document to show (`cards doc`). Each new one
+  // opens a split right of that agent with the sheprd-doc mod, unless the
+  // agent's document pane is still open (it beats sheprd.doc.open), which then
+  // shows the new file itself. A fresh install marks what is there as seen.
+  openDocs() {
+    let seen = null;
+    try { seen = JSON.parse(localStorage.getItem("docsSeen") ?? "null"); } catch { seen = null; }
+    const fresh = seen === null;
+    seen = seen ?? {};
+    const open = /** @type {Record<string, number>} */ (shared("sheprd.doc.open") ?? {});
+    let changed = fresh;
+    for (const [machine, doc] of Object.entries(/** @type {Record<string, any>} */ (shared("sheprd.cards") ?? {}))) {
+      for (const [terminal, d] of Object.entries(doc?.docs ?? {})) {
+        const address = machine === "local" ? terminal : `${machine}/${terminal}`;
+        const key = `${d.seq}@${d.at}`;
+        if (seen[address] === key) continue;
+        seen[address] = key;
+        changed = true;
+        if (fresh || Date.now() - (open[address] ?? 0) < 6000) continue;
+        const a = agents().find((x) => x.address === address);
+        if (a) run("pane.split", { direction: "right", pane: a.pane, mod: "sheprd-doc", props: { address } });
+      }
+    }
+    if (changed) try { localStorage.setItem("docsSeen", JSON.stringify(seen)); } catch { /* not remembered */ }
   }
 
   // Stamps agents whose state changed (for the age column and the sort); done

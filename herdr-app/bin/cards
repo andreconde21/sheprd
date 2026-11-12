@@ -199,6 +199,10 @@ def prune(doc, hard=False):
             doc["inbox"][terminal] = entries
         else:
             del doc["inbox"][terminal]
+    # Shown documents (`cards doc`): only the latest per terminal, for a week.
+    for terminal in list(doc.get("docs") or {}):
+        if age_days(doc["docs"][terminal].get("at")) >= (1 if hard else 7):
+            del doc["docs"][terminal]
 
 
 def live(question):
@@ -445,6 +449,23 @@ def cmd_decide(args):
 
     change(mutate)
     print(f"{args.id} decision recorded")
+
+
+def cmd_doc(args):
+    """Ask the app to show a document beside this agent (sheprd-doc in the Herdr app)."""
+    terminal = my_terminal(args)
+    path = os.path.abspath(os.path.expanduser(args.path))
+    if not os.path.isfile(path):
+        fail(f"no such file: {path}")
+    line = args.line if args.line and args.line > 0 else None
+
+    def mutate(doc):
+        docs = doc.setdefault("docs", {})
+        seq = (docs.get(terminal) or {}).get("seq", 0) + 1
+        docs[terminal] = {"path": path, "line": line, "at": now(), "seq": seq}
+
+    change(mutate)
+    print(f"showing {path} beside {terminal} (the app opens it within a few seconds)")
 
 
 def cmd_done(args):
@@ -1084,6 +1105,11 @@ def main():
     p.add_argument("id")
     p.add_argument("--summary")
     p.set_defaults(func=cmd_done)
+
+    p = agent("doc", help="show a document you wrote beside your pane, in the app")
+    p.add_argument("path")
+    p.add_argument("--line", type=int, help="scroll to this line")
+    p.set_defaults(func=cmd_doc)
 
     p = agent("answers", help="answers the user sent you")
     p.add_argument("--peek", action="store_true", help="don't mark them read")

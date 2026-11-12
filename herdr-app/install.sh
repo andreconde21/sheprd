@@ -3,7 +3,7 @@
 #   cards                      -> ~/.local/bin/cards (every machine with agents)
 #   hc-inbox + hc wrapper      -> ~/.local/bin, plus Stop/SessionStart hooks in ~/.claude/settings.json
 #                                 (agent messages delivered in the background, not typed)
-#   mods/sheprd-sidebar, -panel, -messages, -chrome, -tabs, -leader -> ~/.config/herdr-app/mods/ (the machine running the app)
+#   mods/sheprd-sidebar, -panel, -messages, -doc, -chrome, -tabs, -leader -> ~/.config/herdr-app/mods/ (the machine running the app)
 #   layouts/sheprd.json         -> ~/.config/herdr-app/layouts/
 #
 #   ./install.sh               everything (run on the machine with the app)
@@ -61,6 +61,16 @@ if [ -x "$HOME/.local/bin/herdr-core" ] && { [ ! -e "$hc_path" ] || [ "$(readlin
 else
   echo "  note: $hc_path is not herdr-core's symlink; left as is (agent messages keep being typed)"
 fi
+# sheprd-doc: the same script serves the TUI and the app (it hands off to `cards doc` there).
+# Update the copy agents find first on PATH too, when it is sheprd's.
+chmod +x "$here/../scripts/sheprd-doc"
+place "$here/../scripts/sheprd-doc" "$HOME/.local/bin/sheprd-doc"
+found="$(command -v sheprd-doc || true)"
+if [ -n "$found" ] && [ "$found" != "$HOME/.local/bin/sheprd-doc" ] && [ -w "$found" ] \
+   && head -c 300 "$found" | command grep -q 'sheprd-doc'; then
+  cp "$here/../scripts/sheprd-doc" "$found"
+  echo "  $found"
+fi
 if [ -d "$HOME/.claude" ]; then
   python3 "$HOME/.local/bin/hc-inbox" install-hooks "$HOME/.claude/settings.json" "$HOME/.local/bin/hc-inbox"
 fi
@@ -79,6 +89,7 @@ if ! $cards_only; then
   place "$here/mods/sheprd-sidebar" "$app/mods/sheprd-sidebar"
   place "$here/mods/sheprd-panel" "$app/mods/sheprd-panel"
   place "$here/mods/sheprd-messages" "$app/mods/sheprd-messages"
+  place "$here/mods/sheprd-doc" "$app/mods/sheprd-doc"
   place "$here/mods/sheprd-chrome" "$app/mods/sheprd-chrome"
   place "$here/mods/sheprd-tabs" "$app/mods/sheprd-tabs"
   place "$here/mods/sheprd-leader" "$app/mods/sheprd-leader"
@@ -107,6 +118,7 @@ PY
     herdr-app check "$app/mods/sheprd-sidebar"
     herdr-app check "$app/mods/sheprd-panel"
     herdr-app check "$app/mods/sheprd-messages"
+    herdr-app check "$app/mods/sheprd-doc"
     herdr-app check "$app/mods/sheprd-chrome"
     herdr-app check "$app/mods/sheprd-tabs"
     herdr-app check "$app/mods/sheprd-leader"
