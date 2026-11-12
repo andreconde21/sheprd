@@ -9,6 +9,9 @@ workspace already has one and it is still open, the file is opened in it (Esc, `
 of splitting again. Quitting the editor closes the split. --line opens the file at that line
 (`+<n>`, which vim, nvim, nano, micro and emacs understand).
 
+In the Herdr app (no $HERDR_PANE_ID, $HC_TERMINAL_ID set) it runs `cards doc <path>` instead: the
+app's sidebar opens the document rendered in a split beside the agent (mods/sheprd-doc).
+
 Runs on the machine that hosts the pane, with stock herdr or sheprd. sheprd's Ctrl+click on a
 file path calls it there; agents call it to show you the plans and reports they write.
 """
@@ -87,6 +90,18 @@ def main(argv):
             return 0
         else:
             path = arg
+    if path and not pane and os.environ.get("HC_TERMINAL_ID"):
+        # The Herdr app: the card ledger carries the request, the app's sidebar opens the split.
+        full = os.path.expanduser(path)
+        if not os.path.isabs(full):
+            full = os.path.normpath(os.path.join(os.path.expanduser(cwd), full))
+        cards = next((c for c in ("cards", os.path.expanduser("~/.local/bin/cards"))
+                      if subprocess.run(["sh", "-c", f"command -v {shlex.quote(c)}"],
+                                        capture_output=True).returncode == 0), None)
+        if not cards:
+            print("sheprd-doc: `cards` is not installed here; give the user the path", file=sys.stderr)
+            return 1
+        return subprocess.run([cards, "doc", full, *(["--line", line] if line else [])]).returncode
     if not path or not pane:
         print("usage: sheprd-doc <path> [--line <n>] [--pane <pane id>] [--cwd <folder>]", file=sys.stderr)
         return 2

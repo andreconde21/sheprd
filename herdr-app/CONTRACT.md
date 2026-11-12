@@ -33,7 +33,8 @@ by apps through `cards stage / dismiss / send`.
       "created_at": "…", "updated_at": "…"
     }
   },
-  "inbox": { "t7": [ { "line": "SHE-12 Q1 (Which provider?) → Stripe", "at": "…", "read": false } ] }
+  "inbox": { "t7": [ { "line": "SHE-12 Q1 (Which provider?) → Stripe", "at": "…", "read": false } ] },
+  "docs": { "t7": { "path": "/abs/plan.md", "line": null, "at": "…", "seq": 3 } }
 }
 ```
 
@@ -95,6 +96,10 @@ by apps through `cards stage / dismiss / send`.
   1 MiB cap prunes hard (no done or dismissed cards, not-done cards older than
   7 days, last 5 answered questions, last 20 decisions, no read entries) and
   is retried once.
+
+- `docs`: the latest document each terminal asked to show (`cards doc`, which
+  `sheprd-doc` runs in the app). `seq` grows per request; the sidebar opens a
+  sheprd-doc split for each new (`seq`, `at`) and the open pane follows it. Kept a week.
 
 ## `sheprd-view`: the sidebar layout
 
