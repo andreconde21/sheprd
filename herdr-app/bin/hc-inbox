@@ -352,10 +352,20 @@ def fallthrough(argv):
 
 
 def cmd_send(argv):
-    # Only plain `hc send <target> <text>`; everything else is the real thing.
-    if len(argv) != 2 or any(a.startswith("-") for a in argv) or mode() == "full":
+    # Only plain `hc send [--json] <target> [--] <text>`; any other option is the real thing.
+    pos, opts, rest = [], [], False
+    for a in argv:
+        if rest:
+            pos.append(a)
+        elif a == "--":
+            rest = True
+        elif a.startswith("-") and len(a) > 1:
+            opts.append(a)
+        else:
+            pos.append(a)
+    if len(pos) != 2 or any(o != "--json" for o in opts) or mode() == "full":
         fallthrough(argv)
-    target, text = argv
+    target, text = pos
     try:
         t = hc_json("get", target)
     except Exception:

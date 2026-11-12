@@ -112,6 +112,21 @@ class SendRoutingTests(Base):
         calls, _ = self.run_send(["t5", "x"], {"address": "t5", "state": "live", "status": {"app": "pi"}, "foreground": {"name": "pi"}})
         self.assertTrue(calls)
 
+    def test_double_dash_form_goes_to_inbox(self):
+        # the form agents actually use: hc send t5 -- "text"
+        calls, put = self.run_send(["t5", "--", "-starts with a dash"], self.CLAUDE)
+        self.assertEqual(calls, [])
+        self.assertIn(">-starts with a dash</hc>", put.call_args.args[1])
+
+    def test_json_flag_still_inbox(self):
+        calls, put = self.run_send(["--json", "t5", "--", "x"], self.CLAUDE)
+        self.assertEqual(calls, [])
+        put.assert_called_once()
+
+    def test_extra_words_fall_through(self):
+        calls, _ = self.run_send(["t5", "--", "a", "b"], self.CLAUDE)
+        self.assertTrue(calls)
+
     def test_claude_goes_to_inbox_with_reach(self):
         calls, put = self.run_send(["t5", "hello"], self.CLAUDE)
         self.assertEqual(calls, [])
