@@ -75,18 +75,34 @@ class PutTests(Base):
             self.assertFalse(hci.put("t9", "<hc>x</hc>", foreground_pid=222))
             self.assertTrue(hci.put("t9", "<hc>x</hc>", foreground_pid=111))
 
+    def test_resume_marker_keeps_queueing_for_same_claude(self):
+        # after a delivery the waiter is gone until the turn ends; its marker still accepts
+        d = hci.term_dir("t9")
+        os.makedirs(d)
+        with open(os.path.join(d, "resume.json"), "w") as f:
+            json.dump({"claude_pid": os.getpid(), "since": time.time()}, f)
+        with unittest.mock.patch.object(hci, "proc_cmdline", return_value=[b"/usr/bin/claude"]):
+            self.assertTrue(hci.put("t9", "<hc>mid-turn</hc>", foreground_pid=os.getpid()))
+            self.assertFalse(hci.put("t9", "<hc>x</hc>", foreground_pid=2**22 + 7))  # another program now
+        with unittest.mock.patch.object(hci, "proc_cmdline", return_value=[b"vim"]):
+            self.assertFalse(hci.put("t9", "<hc>x</hc>"))  # pid reused
+        with open(os.path.join(d, "resume.json"), "w") as f:
+            json.dump({"claude_pid": os.getpid(), "since": time.time() - hci.RESUME_MAX_S - 1}, f)
+        with unittest.mock.patch.object(hci, "proc_cmdline", return_value=[b"claude"]):
+            self.assertFalse(hci.put("t9", "<hc>x</hc>"))  # too old
+
     def test_bad_address(self):
         with self.assertRaises(ValueError):
             hci.term_dir("../x")
 
 
 class SendRoutingTests(Base):
-    def run_send(self, argv, target):
+    def run_send(self, argv, target, sender="me"):
         calls = []
         with unittest.mock.patch.object(hci, "hc_json", side_effect=lambda *a: target if a[1] != "me" else {}), \
                 unittest.mock.patch.object(hci, "fallthrough", side_effect=lambda a: calls.append(a) or (_ for _ in ()).throw(SystemExit(0))), \
                 unittest.mock.patch.object(hci, "put", return_value=True) as put, \
-                unittest.mock.patch.dict(os.environ, {"HC_TERMINAL_ID": "me"}), \
+                unittest.mock.patch.dict(os.environ, {"HC_TERMINAL_ID": sender}), \
                 unittest.mock.patch("builtins.print"):
             try:
                 hci.cmd_send(argv)
@@ -95,6 +111,12 @@ class SendRoutingTests(Base):
         return calls, put
 
     CLAUDE = {"address": "t5", "state": "live", "status": {"app": "claude-code"}, "foreground": {"name": "claude", "pid": 9}, "parent": "me"}
+
+    def test_no_sender_terminal_is_a_person_and_falls_through(self):
+        # André's phone app sends with no HC_TERMINAL_ID: it must be typed, not labelled as an agent's
+        calls, put = self.run_send(["t5", "--", "give me the table"], self.CLAUDE, sender="")
+        self.assertTrue(calls)
+        put.assert_not_called()
 
     def test_options_fall_through(self):
         calls, put = self.run_send(["--wait", "t5", "x"], self.CLAUDE)
@@ -171,9 +193,8 @@ class HookConfigTests(Base):
 class WaitTests(Base):
     def test_wait_delivers_and_exits_2(self):
         """Run the real `wait` as a subprocess (it registers itself), queue a message, expect exit 2."""
-        env = dict(os.environ, HC_TERMINAL_ID="t7", XDG_STATE_HOME=os.path.dirname(self.tmp.name),
-                   HC_INBOX_LIFETIME_S="20")
-        state = os.path.join(os.path.dirname(self.tmp.name), "hc-inbox")
+        env = dict(os.environ, HC_TERMINAL_ID="t7", XDG_STATE_HOME=self.tmp.name, HC_INBOX_LIFETIME_S="20")
+        state = os.path.join(self.tmp.name, "hc-inbox")
         p = subprocess.Popen([sys.executable, BIN, "wait"], env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         p.stdin.write("{}")
@@ -192,10 +213,11 @@ class WaitTests(Base):
         self.assertEqual(p.returncode, 2)
         self.assertIn("<hc>ping</hc>", err)
         self.assertFalse(os.path.exists(wfile))
-        r = subprocess.run([sys.executable, BIN, "put", "t7"], env=env, input="x", text=True)
-        self.assertEqual(r.returncode, 3)  # nobody waiting now
-        import shutil
-        shutil.rmtree(os.path.join(state, "t7"), ignore_errors=True)
+        # nobody waiting now; a resume marker exists only if this test runs under a claude,
+        # and it never accepts for a program that is not that claude
+        r = subprocess.run([sys.executable, BIN, "put", "t7", "--foreground-pid", str(2**22 + 7)],
+                           env=env, input="x", text=True)
+        self.assertEqual(r.returncode, 3)
 
 
 if __name__ == "__main__":
