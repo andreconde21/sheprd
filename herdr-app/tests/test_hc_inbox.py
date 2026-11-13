@@ -97,12 +97,12 @@ class PutTests(Base):
 
 
 class SendRoutingTests(Base):
-    def run_send(self, argv, target):
+    def run_send(self, argv, target, sender="me"):
         calls = []
         with unittest.mock.patch.object(hci, "hc_json", side_effect=lambda *a: target if a[1] != "me" else {}), \
                 unittest.mock.patch.object(hci, "fallthrough", side_effect=lambda a: calls.append(a) or (_ for _ in ()).throw(SystemExit(0))), \
                 unittest.mock.patch.object(hci, "put", return_value=True) as put, \
-                unittest.mock.patch.dict(os.environ, {"HC_TERMINAL_ID": "me"}), \
+                unittest.mock.patch.dict(os.environ, {"HC_TERMINAL_ID": sender}), \
                 unittest.mock.patch("builtins.print"):
             try:
                 hci.cmd_send(argv)
@@ -111,6 +111,12 @@ class SendRoutingTests(Base):
         return calls, put
 
     CLAUDE = {"address": "t5", "state": "live", "status": {"app": "claude-code"}, "foreground": {"name": "claude", "pid": 9}, "parent": "me"}
+
+    def test_no_sender_terminal_is_a_person_and_falls_through(self):
+        # André's phone app sends with no HC_TERMINAL_ID: it must be typed, not labelled as an agent's
+        calls, put = self.run_send(["t5", "--", "give me the table"], self.CLAUDE, sender="")
+        self.assertTrue(calls)
+        put.assert_not_called()
 
     def test_options_fall_through(self):
         calls, put = self.run_send(["--wait", "t5", "x"], self.CLAUDE)

@@ -393,6 +393,10 @@ def cmd_send(argv):
             pos.append(a)
     if len(pos) != 2 or any(o != "--json" for o in opts) or mode() == "full":
         fallthrough(argv)
+    if not os.environ.get("HC_TERMINAL_ID"):
+        # Not sent from an hc terminal, so not from an agent: André's phone app, a script.
+        # The inbox would label it "from other agents, not from André"; type it as before.
+        fallthrough(argv)
     target, text = pos
     try:
         t = hc_json("get", target)
