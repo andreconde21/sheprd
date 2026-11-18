@@ -31,6 +31,7 @@ For the app and Conductore (not agents):
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 import base64
@@ -964,6 +965,73 @@ def writeback_config():
     return config.get("ledger", {}).get("writeback")
 
 
+# HZ-100095: the board write path races. autosync (projectstasks-sync) and the dispatcher take
+# this flock around their git operations; git rewrites working-tree files wholesale during a
+# rebase/checkout, so a card is transiently EMPTY on disk mid-rewrite. `cards done` write-back
+# reads then rewrites a card .md, so it must take the SAME lock around its read->modify->write,
+# and must refuse to serialize back a card it read as empty / without an `id` (belt-and-braces).
+GIT_LOCK_FILE = os.environ.get(
+    "PROJECTSTASKS_GIT_LOCK_FILE",
+    "/var/lib/projectstasks-agents/locks/projectstasks-sync.lock",
+)
+
+
+def card_frontmatter_ok(text):
+    """True iff `text` is a card whose YAML frontmatter carries an `id:` with a value.
+    A card read mid git-rewrite is empty or truncated and fails this, so the caller
+    refuses to write it back and lose the body (HZ-100095)."""
+    if not text:
+        return False
+    s = text[1:] if text.startswith("﻿") else text
+    lines = s.replace("\r\n", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return False
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            fm = "\n".join(lines[1:i])
+            return bool(re.search(r"^\s*id\s*:\s*\S", fm, re.M))
+    return False  # unterminated frontmatter == truncated read
+
+
+class _GitLock:
+    """Bounded-wait exclusive flock on GIT_LOCK_FILE (the one autosync/dispatcher use).
+    Falls through to guard-only (unlocked) if the lock can't be taken within the budget or
+    isn't available, so `cards done` never hangs; the empty-card guard still prevents
+    corruption. GIT_LOCK_FILE="" disables locking (tests)."""
+
+    def __init__(self, budget_s=5.0):
+        self.budget_s = budget_s
+        self.fd = None
+
+    def __enter__(self):
+        if not GIT_LOCK_FILE:
+            return self
+        try:
+            self.fd = os.open(GIT_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o664)
+        except OSError:
+            self.fd = None
+            return self
+        deadline = time.monotonic() + self.budget_s
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return self  # proceed unlocked; the guard still protects
+                time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = None
+        return False
+
+
 def writeback(card):
     """Set the task file's status and add decisions + summary under ## Decisions."""
     try:
@@ -979,28 +1047,35 @@ def writeback(card):
     path = config["markdown_path"].format(root=config.get("root", ""), project=project, id=card["id"])
     if not os.path.exists(path):
         return {"ok": False, "message": f"file missing: {path}"}
-    with open(path, encoding="utf-8", newline="") as f:
-        original = f.read()
-    # Edit as LF without a BOM, then put the file's own line endings and BOM back.
-    bom = "\ufeff" if original.startswith("\ufeff") else ""
-    newline = "\r\n" if "\r\n" in original else "\n"
-    text = original[len(bom):].replace("\r\n", "\n")
-    new = set_status(text, config.get("done_status", "done"))
-    entries = [d["text"] for d in card.get("decisions", [])]
-    if card.get("summary"):
-        entries.append(f"Done {card['done_at'][:10]}: {card['summary']}")
-    new = add_decisions(new, entries)
     name = os.path.basename(path)
-    if new == text:
-        return {"ok": True, "message": f"{name} already up to date"}
-    new = bom + new.replace("\n", newline)
-    directory = os.path.dirname(path)
-    fd, temp = tempfile.mkstemp(prefix=f".{name}.cards-", dir=directory)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-        f.write(new)
-    os.chmod(temp, os.stat(path).st_mode & 0o7777)
-    os.replace(temp, path)
-    return {"ok": True, "message": f"wrote {name}"}
+    # HZ-100095: fence the whole read->modify->write under the SAME flock autosync/dispatcher
+    # hold around their git operations, so we never read a card while git is rewriting the tree.
+    with _GitLock():
+        with open(path, encoding="utf-8", newline="") as f:
+            original = f.read()
+        # Guard (belt-and-braces): a card read mid git-rewrite is empty/truncated; refuse to
+        # serialize that back and lose the body \u2014 even if the lock above was unavailable.
+        if not card_frontmatter_ok(original):
+            return {"ok": False, "message": f"{name}: read empty/no-id (git rewrite in progress?), refusing to write (HZ-100095)"}
+        # Edit as LF without a BOM, then put the file's own line endings and BOM back.
+        bom = "\ufeff" if original.startswith("\ufeff") else ""
+        newline = "\r\n" if "\r\n" in original else "\n"
+        text = original[len(bom):].replace("\r\n", "\n")
+        new = set_status(text, config.get("done_status", "done"))
+        entries = [d["text"] for d in card.get("decisions", [])]
+        if card.get("summary"):
+            entries.append(f"Done {card['done_at'][:10]}: {card['summary']}")
+        new = add_decisions(new, entries)
+        if new == text:
+            return {"ok": True, "message": f"{name} already up to date"}
+        new = bom + new.replace("\n", newline)
+        directory = os.path.dirname(path)
+        fd, temp = tempfile.mkstemp(prefix=f".{name}.cards-", dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new)
+        os.chmod(temp, os.stat(path).st_mode & 0o7777)
+        os.replace(temp, path)
+        return {"ok": True, "message": f"wrote {name}"}
 
 
 def set_status(text, status):
