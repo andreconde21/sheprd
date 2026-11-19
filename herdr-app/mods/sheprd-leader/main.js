@@ -4,7 +4,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, theme, props, closeOverlay, layout, shared, setShared, window, focused, agents, exec } from "herdr";
+import { run, theme, props, closeOverlay, layout, shared, setShared, window, focused, agents, exec, notify } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -66,6 +66,65 @@ function reply(text) {
   if (address) exec("hc", ["send", address, "--", text]).catch(() => {});
 }
 
+// The clipboard's text: the app's own clipboard when the mod may read it, else
+// the system tool (a double-click in a terminal copies the word on release).
+async function clipboardText(cx) {
+  try {
+    const text = cx?.read_from_clipboard?.();
+    if (typeof text === "string" && text.trim()) return text;
+  } catch {
+    // not granted to mods: ask the system
+  }
+  const tools = window()?.platform === "macos" ? [["pbpaste", []]] : [["wl-paste", ["-n"]], ["xclip", ["-o", "-selection", "clipboard"]]];
+  for (const [cmd, args] of tools) {
+    try {
+      const r = await exec(cmd, args);
+      if (r.code === 0 && r.stdout.trim()) return r.stdout;
+    } catch {
+      // next tool
+    }
+  }
+  return "";
+}
+
+// A file path in copied text: `src/x.ts:42`, `(/root/a.md)`, "~/notes.md" or
+// `Read(/root/a.md)`. The first token that looks like a path, without its
+// quotes and trailing punctuation; `:line[:col]` comes back as the line.
+function pathIn(text) {
+  const tokens = (text.split("\n")[0].match(/[\w~.@+\-/]+(?::\d+(?::\d+)?)?/g) ?? []).map((x) => x.replace(/[.,;:]+$/, ""));
+  const tok = tokens.find((x) => x.includes("/")) ?? tokens.find((x) => /\.[A-Za-z0-9]{1,8}(:\d+)*$/.test(x));
+  if (!tok) return null;
+  const m = tok.match(/^(.*?)(?::(\d+)(?::\d+)?)?$/);
+  return m && m[1] ? { path: m[1], line: m[2] ? Number(m[2]) : null } : null;
+}
+
+// Resolves [path] on the terminal's machine: absolute, ~/…, or relative to the
+// terminal's folder, then to that folder's git root. Prints the real path.
+const RESOLVE = 'p=$2; case $p in "~/"*) p="$HOME/${p#??}";; esac; ' +
+  'case $p in /*) ;; *) cd "$1" 2>/dev/null || exit 1; [ -e "$p" ] || cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)";; esac; ' +
+  '[ -f "$p" ] && realpath -- "$p"';
+
+// ctrl+space l: the path in the clipboard (double-click it in a terminal
+// first) opens beside the focused terminal with the sheprd-doc viewer,
+// read from that terminal's machine.
+async function openCopiedPath(cx) {
+  const f = focused();
+  const found = pathIn(await clipboardText(cx));
+  if (!found) return notify({ title: "No file path copied", body: "Double-click a path in the terminal, then ctrl+space l.", level: "info" });
+  const address = f?.terminal ?? "";
+  const i = address.indexOf("/");
+  const on = i < 0 ? null : address.slice(0, i);
+  let real = "";
+  try {
+    const r = await exec("sh", ["-c", RESOLVE, "sh", f?.cwd ?? ".", found.path], { on });
+    real = r.code === 0 ? r.stdout.trim().split("\n")[0] : "";
+  } catch {
+    real = "";
+  }
+  if (!real) return notify({ title: `Not a file${on ? ` on ${on}` : ""}`, body: found.path, level: "warning" });
+  run("pane.split", { direction: "right", pane: f?.pane ?? undefined, mod: "sheprd-doc", props: { file: { path: real, on, line: found.line } } });
+}
+
 // key (shifted letters in capitals) -> [label, action], grouped as shown.
 /** @type {[string, [string, string, (() => unknown) | null][]][]} */
 const GROUPS = [
@@ -101,6 +160,7 @@ const GROUPS = [
     ["f", "go to (picker)", () => run("mod.open", { name: "picker" })],
     ["b", "sidebar", toggleSidebar],
     ["s", "settings", () => run("app.settings")],
+    ["l", "open copied file path", null],
     ["?", "help", () => run("app.help")],
   ]],
   ["Quick replies", [
@@ -125,10 +185,12 @@ export default class SheprdLeader extends View {
       .child(div().text_size(12).text_color(t.muted).child(label));
     return v_flex().id("sheprd-leader").size_full().min_h(0).p(12).gap(2).bg(t.popover).text_color(t.foreground)
       .track_focus(this.handle)
-      .on_key_down((e) => {
+      .on_key_down((e, cx) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
         let key = e.key;
         if (key.length === 1 && e.modifiers.shift) key = key === "/" ? "?" : key.toUpperCase();
+        // Open path: the popup stays until it's done (closing it ends its tasks).
+        if (key === "l") return cx.spawn(async (cx) => { try { await openCopiedPath(cx); } finally { close(); } });
         close();
         if (/^[1-9]$/.test(key)) return run("tab.select", { index: Number(key) });
         ACTIONS.get(key)?.();
