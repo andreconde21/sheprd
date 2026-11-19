@@ -47,16 +47,24 @@ function split(address) {
   return i < 0 ? { on: null, terminal: address } : { on: address.slice(0, i), terminal: address.slice(i + 1) };
 }
 
-function cardsByAddress() {
-  const out = new Map();
+// Rebuilt only when a load stores new cards (sheprd.cards.rev, set by this
+// panel and the sidebar): ~2k cards per machine are too many to walk on every
+// render. Callers only read the map and its lists.
+let cardsMemo = { rev: undefined, byAddress: new Map(), waiting: 0 };
+function cardsMemoNow() {
+  const rev = shared("sheprd.cards.rev");
+  if (rev != null && rev === cardsMemo.rev) return cardsMemo;
+  const byAddress = new Map();
   for (const [machine, doc] of Object.entries(/** @type {Record<string, any>} */ (shared("sheprd.cards") ?? {}))) {
     for (const card of Object.values(doc?.cards ?? {})) {
       const address = machine === "local" ? card.terminal : `${machine}/${card.terminal}`;
-      if (!out.has(address)) out.set(address, []);
-      out.get(address).push(card);
+      if (!byAddress.has(address)) byAddress.set(address, []);
+      byAddress.get(address).push(card);
     }
   }
-  return out;
+  const waiting = [...byAddress.values()].flat().filter((c) => !c.dismissed).flatMap((c) => c.questions.filter(live)).length;
+  cardsMemo = { rev, byAddress, waiting };
+  return cardsMemo;
 }
 
 // The sidebar's short machine tag (CONTRACT.md: machine_tags, else the name's
@@ -328,6 +336,7 @@ export default class SheprdPanel extends View {
         }));
         for (const entry of got) if (entry) docs[entry[0]] = entry[1];
         setShared("sheprd.cards", docs);
+        setShared("sheprd.cards.rev", `${Date.now()}-${Math.random()}`);
         setShared("sheprd.cards.err", errs);
         if (full) setShared("sheprd.cards.at", Date.now());
       } finally {
@@ -634,13 +643,12 @@ export default class SheprdPanel extends View {
     this.cx = cx;
     this.fetchesLeft = FETCHES_PER_RENDER;
     const t = theme();
-    const byAddress = cardsByAddress();
+    const { byAddress, waiting } = cardsMemoNow();
     const visible = (cards) => cards.filter((c) => !c.dismissed).sort((x, y) => (x.done - y.done) || y.updated_at.localeCompare(x.updated_at));
     const address = focused()?.agent ?? null;
     const agent = address ? agents().find((x) => x.address === address) : null;
 
     // Two tabs (an underlined segmented control, unlike the buttons inside cards).
-    const waiting = [...byAddress.values()].flat().filter((c) => !c.dismissed).flatMap((c) => c.questions.filter(live)).length;
     const tab = (id, label, mode) => {
       const on = this.mode === mode;
       return div().id(id).px(4).pb(5).text_size(12.5).cursor_pointer()

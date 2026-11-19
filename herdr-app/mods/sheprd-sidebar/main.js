@@ -178,17 +178,39 @@ function openNew(project, space = null) {
   openOverlay({ mod: "sheprd-sidebar", kind: "dialog", frame: "none", width: 380, height, props: { newIn: { project, space, agents: agentsOn } } });
 }
 
-// Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere).
+// Cards of every machine, by agent address (`t7` here, `dev/t7` elsewhere),
+// with what a row shows of them: open questions, summary and ticket. Rebuilt
+// only when a load stores new cards (sheprd.cards.rev): team agents keep ~2k
+// cards (1 MB) per machine, too many to walk on every render (renders that
+// ran over the host's budget showed "This view could not be re-rendered").
+let cardsMemo = { rev: undefined, byAddress: new Map(), info: new Map() };
 function cardsByAddress() {
-  const out = new Map();
+  const rev = shared("sheprd.cards.rev");
+  if (rev != null && rev === cardsMemo.rev) return cardsMemo;
+  const byAddress = new Map();
   for (const [machine, doc] of Object.entries(/** @type {Record<string, any>} */ (shared("sheprd.cards") ?? {}))) {
     for (const card of Object.values(doc?.cards ?? {})) {
       const address = machine === "local" ? card.terminal : `${machine}/${card.terminal}`;
-      if (!out.has(address)) out.set(address, []);
-      out.get(address).push(card);
+      if (!byAddress.has(address)) byAddress.set(address, []);
+      byAddress.get(address).push(card);
     }
   }
-  return out;
+  const info = new Map();
+  for (const [address, cards] of byAddress) {
+    const summary = cards.find((c) => !c.dismissed && c.summary)?.summary;
+    // The ticket it works on: its open card with a ticket id, latest first.
+    const ticket = cards.filter((c) => !c.dismissed && !c.done && TICKET.test(c.id))
+      .sort((x, y) => String(y.updated_at ?? "").localeCompare(String(x.updated_at ?? "")))[0];
+    info.set(address, { questions: openQuestions(cards).length, summary, ticket: ticket ? { id: ticket.id, title: ticket.title ?? "" } : null });
+  }
+  cardsMemo = { rev, byAddress, info };
+  return cardsMemo;
+}
+
+// Stores freshly loaded cards and a new revision, so every mod's memo rebuilds.
+function storeCards(docs) {
+  setShared("sheprd.cards", docs);
+  setShared("sheprd.cards.rev", `${Date.now()}-${Math.random()}`);
 }
 
 const live = (q) => q.state === "open" || q.state === "staged" || q.state === "sending";
@@ -399,7 +421,7 @@ export default class SheprdSidebar extends View {
     this.loading = true;
     cx.spawn(async (cx) => {
       try {
-        setShared("sheprd.cards", await fetchCards(machines()));
+        storeCards(await fetchCards(machines()));
         setShared("sheprd.cards.at", Date.now());
         this.openDocs();
       } finally {
@@ -920,17 +942,14 @@ export default class SheprdSidebar extends View {
     const everyRow = all
       .map((a) => {
         const space = spaceById.get(a.space);
-        const questions = openQuestions(cards.get(a.address)).length;
+        const c = cards.info.get(a.address);
+        const questions = c?.questions ?? 0;
         const isDismissed = dismissed.has(`${a.address}@${a.seq}`);
         const needs = !isDismissed && (a.status === "blocked" || a.status === "done" || questions > 0 || m.unread.includes(a.address));
-        const summary = (cards.get(a.address) ?? []).find((c) => !c.dismissed && c.summary)?.summary;
-        // The ticket it works on: its open card with a ticket id, latest first.
-        const ticket = (cards.get(a.address) ?? []).filter((c) => !c.dismissed && !c.done && TICKET.test(c.id))
-          .sort((x, y) => String(y.updated_at ?? "").localeCompare(String(x.updated_at ?? "")))[0];
         // The circle follows read state: a finished agent marked read shows
         // idle, an idle one marked unread shows finished.
         const dot = a.status === "done" && isDismissed ? "idle" : a.status === "idle" && m.unread.includes(a.address) ? "done" : a.status;
-        return { a, space, dot, key: spaceKey(space), questions, needs, summary, ticket: ticket ? { id: ticket.id, title: ticket.title ?? "" } : null, name: hcName.get(a.address), marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
+        return { a, space, dot, key: spaceKey(space), questions, needs, summary: c?.summary, ticket: c?.ticket ?? null, name: hcName.get(a.address), marked: m.marked.includes(a.address), highlighted: m.highlighted.includes(a.address), rank: needs ? Math.max(RANK[a.status] ?? 0, 3) : RANK[a.status] ?? 0 };
       });
     const rows = everyRow.filter((r) => !isHiddenSpace(r.space, v.hidden));
 
