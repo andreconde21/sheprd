@@ -54,6 +54,10 @@ KEEP_DONE_DAYS = 14
 KEEP_PREVIOUS_DAYS = 7
 MAX_DECISIONS = 50
 MAX_INBOX = 50
+# Statuses that mean the card is over even when nobody ran `cards done`.
+FINISHED_STATUSES = {"done", "cancelled", "canceled", "verified", "merged", "closed"}
+FINISHED_STATUS_DAYS = 2
+HARD_STALE_DAYS = 3
 
 
 def now():
@@ -142,6 +146,7 @@ def change(mutate):
             except RpcError as err:
                 if "exceeds" in str(err):
                     # Past herdr-core's 1 MiB cap every write fails; drop history so this one lands.
+                    archive(doc)
                     prune(doc, hard=True)
                     try:
                         core.call("doc.set", {"name": DOC, "value": doc, "version": version})
@@ -174,22 +179,41 @@ def prune(doc, hard=False):
     """Keeps the document well under herdr-core's 1 MiB: old cards, answered
     questions and read answers go. `hard` (after a write hit the cap) keeps
     only what is still in play."""
-    done_days, dismissed_days, stale_days = (0, 0, 7) if hard else (KEEP_DONE_DAYS, 7, 30)
+    done_days, dismissed_days, stale_days = (0, 0, HARD_STALE_DAYS) if hard else (KEEP_DONE_DAYS, 7, 30)
+    finished_days = 0 if hard else FINISHED_STATUS_DAYS
     resolved_kept, decisions_kept, read_kept = (5, 20, 0) if hard else (20, MAX_DECISIONS, 5)
     for key in list(doc["cards"]):
         card = doc["cards"][key]
         if card.get("done") and age_days(card.get("done_at")) >= done_days:
             del doc["cards"][key]
-        elif card.get("dismissed") and age_days(card.get("updated_at")) >= dismissed_days:
+            continue
+        waiting = any(pending(q) for q in card.get("questions", []))
+        if finished_status(card) and age_days(card.get("updated_at")) >= finished_days and not waiting:
+            # Agents mostly close a card with `update --status done` (not `cards done`, which writes
+            # back to the task file), so `done` alone never fired and the document hit the cap.
             del doc["cards"][key]
-        elif not card.get("done") and age_days(card.get("updated_at")) >= stale_days:
+            continue
+        if card.get("dismissed") and age_days(card.get("updated_at")) >= dismissed_days:
+            del doc["cards"][key]
+        elif not card.get("done") and age_days(card.get("updated_at")) >= stale_days and not waiting:
             del doc["cards"][key]
         else:
             questions = card.get("questions", [])
-            resolved = [q for q in questions if not live(q)]
+            resolved = [q for q in questions if not pending(q)]
             keep = {id(q) for q in resolved[-resolved_kept:]} if resolved_kept else set()
-            card["questions"] = [q for q in questions if live(q) or id(q) in keep]
+            card["questions"] = [q for q in questions if pending(q) or id(q) in keep]
             card["decisions"] = card.get("decisions", [])[-decisions_kept:]
+    if hard:
+        # The same card id reported from several terminals (restarts, chief + lane): keep the
+        # newest copy, plus any older one with a question still waiting on the user or on its agent.
+        newest = {}
+        for key, card in doc["cards"].items():
+            if card["id"] not in newest or card.get("updated_at", "") > doc["cards"][newest[card["id"]]].get("updated_at", ""):
+                newest[card["id"]] = key
+        for key in list(doc["cards"]):
+            card = doc["cards"][key]
+            if newest[card["id"]] != key and not any(pending(q) for q in card.get("questions", [])):
+                del doc["cards"][key]
     for terminal in list(doc["inbox"]):
         entries = [a for a in doc["inbox"][terminal] if age_days(a.get("at")) < KEEP_DONE_DAYS]
         unread = [a for a in entries if not a.get("read")]
@@ -203,6 +227,33 @@ def prune(doc, hard=False):
     for terminal in list(doc.get("docs") or {}):
         if age_days(doc["docs"][terminal].get("at")) >= (1 if hard else 7):
             del doc["docs"][terminal]
+
+
+def finished_status(card):
+    return str(card.get("status") or "").strip().lower() in FINISHED_STATUSES
+
+
+def pending(question):
+    """Open for the user, or replied in the chat and not yet closed by its agent: the panel
+    still shows both, so no prune rule may drop a card that carries one."""
+    return live(question) or question.get("state") == "replied"
+
+
+ARCHIVE_DIR = os.environ.get("CARDS_ARCHIVE_DIR", os.path.expanduser("~/.local/state/sheprd-cards/archive"))
+ARCHIVE_KEEP = 20
+
+
+def archive(doc):
+    """Before a hard prune, keep the whole document on disk so nothing pruned is lost."""
+    try:
+        os.makedirs(ARCHIVE_DIR, mode=0o700, exist_ok=True)
+        path = os.path.join(ARCHIVE_DIR, dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
+        with open(path, "w") as out:
+            json.dump(doc, out)
+        for old in sorted(os.listdir(ARCHIVE_DIR))[:-ARCHIVE_KEEP]:
+            os.remove(os.path.join(ARCHIVE_DIR, old))
+    except OSError as err:
+        print(f"cards: could not archive the ledger before pruning: {err}", file=sys.stderr)
 
 
 def live(question):
