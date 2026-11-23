@@ -139,9 +139,14 @@ class LedgerTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         subprocess.run = run
+        self.archive_dir = tempfile.mkdtemp()
+        self.saved_archive = cards.ARCHIVE_DIR
+        cards.ARCHIVE_DIR = os.path.join(self.archive_dir, "archive")
 
     def tearDown(self):
         cards.Core, cards.born_of, subprocess.run = self.saved
+        cards.ARCHIVE_DIR = self.saved_archive
+        shutil.rmtree(self.archive_dir, ignore_errors=True)
 
     def doc(self):
         return cards.read_doc()
@@ -384,6 +389,9 @@ class LedgerTests(unittest.TestCase):
         quiet(cards.cmd_update, ns(id="SHE-99", status="dev"))
         self.assertIn("t7/SHE-99", self.doc()["cards"])
         self.assertFalse(any(c["done"] for c in self.doc()["cards"].values()))
+        (saved,) = os.listdir(cards.ARCHIVE_DIR)  # the pre-prune ledger is kept on disk
+        with open(os.path.join(cards.ARCHIVE_DIR, saved)) as f:
+            self.assertIn("t7/SHE-0", json.load(f)["cards"])
 
     def test_prune_bounds_answered_questions_and_read_answers(self):
         doc = cards.empty_doc()
@@ -421,6 +429,19 @@ class LedgerTests(unittest.TestCase):
         asking["questions"] = [{"n": 1, "state": "open"}]
         cards.prune(doc, hard=True)
         self.assertEqual(sorted(doc["cards"]), ["t1/SHE-1", "t3/SHE-1", "t4/SHE-3"])
+
+    def test_no_prune_rule_drops_a_question_replied_in_chat(self):
+        doc = cards.empty_doc()
+        old = "2020-01-01T00:00:00+00:00"
+        for terminal, card_id, status, stamp in [("t1", "SHE-1", "review", old), ("t2", "SHE-1", "review", cards.now()),
+                                                  ("t3", "SHE-2", "done", old), ("t4", "SHE-3", "review", old)]:
+            card = cards.get_card(doc, terminal, card_id, create=True)
+            card["status"], card["updated_at"] = status, stamp
+            card["questions"] = [{"n": n, "state": "answered"} for n in range(30)] + [{"n": 99, "state": "replied"}]
+        cards.prune(doc, hard=True)
+        self.assertEqual(sorted(doc["cards"]), ["t1/SHE-1", "t2/SHE-1", "t3/SHE-2", "t4/SHE-3"])
+        for card in doc["cards"].values():
+            self.assertEqual(card["questions"][-1], {"n": 99, "state": "replied"})
 
 
 import struct
