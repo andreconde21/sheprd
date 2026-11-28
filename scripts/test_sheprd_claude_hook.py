@@ -56,6 +56,20 @@ class CardLedgerTests(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
+    def test_seen_is_detached_and_at_most_every_ten_minutes_per_terminal(self):
+        cache = {}
+        with mock.patch.object(hook, "cards_bin", return_value="/bin/cards"), \
+                mock.patch.dict(os.environ, {"SHEPRD_HOOK_NO_SEEN": ""}), \
+                mock.patch.object(hook.subprocess, "Popen") as popen:
+            hook.note_seen(cache, "t1", "s1", "/t.jsonl", "/w")
+            hook.note_seen(cache, "t1", "s1", "/t.jsonl", "/w")
+            self.assertEqual(popen.call_count, 1)
+            hook.note_seen(cache, "t9", "s1", "/t.jsonl", "/w")  # resumed in a new terminal: at once
+        self.assertEqual(popen.call_count, 2)
+        args, kw = popen.call_args
+        self.assertEqual(args[0][:3], ["/bin/cards", "seen", "--session"])
+        self.assertTrue(kw["start_new_session"])
+
     def test_an_open_question_keeps_its_whole_text_for_cards(self):
         question = "My top three are #2 (approvals inbox), #1 (chief-of-staff rollup) and #4 (stalled warning), which ones should I build?"
         self.assertEqual(hook.open_questions(f"Ideas.\n\n{question}"), [question])
@@ -171,7 +185,7 @@ class HerdrAppLedgerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.log = self.root / "calls.log"
-        self.env = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.env = mock.patch.dict(os.environ, {"HOME": str(self.root), "SHEPRD_HOOK_NO_SEEN": "1"})
         self.env.start()
         for name in ("HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_BIN_PATH", "SHEPRD_CARDS_BIN", "HC_TERMINAL_ID"):
             os.environ.pop(name, None)

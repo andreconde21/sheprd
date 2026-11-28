@@ -121,7 +121,7 @@ function projectOf(space, projects) {
 // The agent menu's height: room for every project (28 px a line, plus mark,
 // read, hide, the divider, the label, Other and New project), capped so a long
 // list scrolls instead of leaving the window.
-const MENU_FIXED = 6 * 28 + 9 + 22 + 10; // new, copy, mark, highlight, read, hide, divider, label, padding
+const MENU_FIXED = 7 * 28 + 9 + 22 + 10; // new, copy, mark, highlight, read, hide, close, divider, label, padding
 const menuHeight = (projects) => Math.min(MENU_FIXED + 28 * (projects + 3), 560);
 
 // Where a new tab or space can go for a project (null: Other): a tab in each of
@@ -219,20 +219,138 @@ const openQuestions = (cards) => (cards ?? []).filter((c) => !c.dismissed).flatM
 // `cards` lives in ~/.local/bin, which the herdr-core of a machine reached over SSH often does not
 // have on its PATH. Try the PATH first, then that file. Resolves to the result, or null when it
 // could not be run at all.
-async function runCards(args, on) {
+async function runCards(args, on, timeout) {
   const missing = (r) => r.code === 127 || /not found|no such file/i.test(r.stderr ?? "");
   let first = null;
   try {
-    first = await exec("cards", args, { on });
+    first = await exec("cards", args, { on, timeout });
     if (first.code === 0 || !missing(first)) return first;
   } catch {
     first = null;
   }
   try {
-    return await exec("sh", ["-c", 'exec "$HOME/.local/bin/cards" "$@"', "cards", ...args], { on });
+    return await exec("sh", ["-c", 'exec "$HOME/.local/bin/cards" "$@"', "cards", ...args], { on, timeout });
   } catch {
     return first;
   }
+}
+
+// ---- closed agents -------------------------------------------------------------
+// Each machine's `cards closed`: agents whose terminal is gone (closed here, a tab
+// closed, a kill or a crash), kept until deleted. Bring back resumes the same
+// Claude session with the same hc name in its old space (`herdr.space` label),
+// or in a new space that then joins its project.
+const CLOSED_EVERY_MS = 30000;
+const machineOf = (key) => (key === "local" ? undefined : key);
+const closedId = (row) => `${row.machine}:${row.rec.key}`;
+
+async function fetchClosed(list) {
+  const out = { .../** @type {object} */ (shared("sheprd.closed") ?? {}) };
+  const present = new Set(machines().map((m) => m.name ?? "local"));
+  for (const key of Object.keys(out)) if (!present.has(key)) delete out[key];
+  await Promise.all(list.filter((m) => m.layout !== "unavailable").map(async (m) => {
+    const r = await runCards(["closed", "--json"], m.name).catch(() => null);
+    if (!r || r.code !== 0) return; // older cards there, or unreachable: keep the last list
+    try {
+      out[m.name ?? "local"] = JSON.parse(r.stdout).agents ?? [];
+    } catch {
+      // unreadable: keep the last list
+    }
+  }));
+  return out;
+}
+
+// Closed agents with their place: the live space their label names, else the
+// project whose members still name that space, else what was recorded at close.
+function closedRows(projects) {
+  const bySpace = new Map(spaces().map((x) => [x.id, x]));
+  const rows = [];
+  for (const [machine, list] of Object.entries(/** @type {Record<string, any[]>} */ (shared("sheprd.closed") ?? {}))) {
+    for (const rec of list ?? []) {
+      const raw = rec.labels?.["herdr.space"];
+      const id = raw ? (machine === "local" ? raw : `${machine}/${raw}`) : null;
+      const space = id ? bySpace.get(id) : null;
+      const member = id ? projects.flatMap((x) => (x.members ?? []).map((m) => [x.name, m])).find(([, m]) => m.endsWith(`#${id}`)) : null;
+      const project = (space ? projectOf(space, projects)?.name : null) ?? member?.[0] ?? rec.project ?? null;
+      const spaceName = space?.name ?? (member ? member[1].replace(/^[^/]*\//, "").replace(/#[^#]*$/, "") : null) ?? rec.space_name ?? null;
+      rows.push({ machine, rec, project, spaceName, spaceAlive: Boolean(space) });
+    }
+  }
+  return rows;
+}
+
+function closedBusy(id, text) {
+  const busy = { .../** @type {object} */ (shared("sheprd.closed.busy") ?? {}) };
+  if (text) busy[id] = text;
+  else delete busy[id];
+  setShared("sheprd.closed.busy", busy);
+}
+
+function dropClosed(row) {
+  const all = { .../** @type {object} */ (shared("sheprd.closed") ?? {}) };
+  all[row.machine] = (all[row.machine] ?? []).filter((r) => r.key !== row.rec.key);
+  setShared("sheprd.closed", all);
+}
+
+const firstLine = (r) => (r ? (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop().replace(/^cards: /, "").slice(0, 160) : "could not run cards");
+
+function bringBack(row) {
+  const id = closedId(row);
+  if (shared("sheprd.closed.busy")?.[id]) return;
+  closedBusy(id, "bringing back…");
+  runCards(["bring-back", row.rec.key], machineOf(row.machine), 60000).then((r) => {
+    closedBusy(id, null);
+    if (!r || r.code !== 0) {
+      notify({ title: `Could not bring back ${row.rec.name || row.rec.terminal}`, body: firstLine(r), level: "error" });
+      return;
+    }
+    let out = {};
+    try {
+      out = JSON.parse(r.stdout);
+    } catch {
+      // started, but no address: nothing to rename or join
+    }
+    dropClosed(row);
+    if (out.address) {
+      const address = row.machine === "local" ? out.address : `${row.machine}/${out.address}`;
+      const back = /** @type {any[]} */ (shared("sheprd.back") ?? []);
+      setShared("sheprd.back", [...back, { address, tab: row.rec.tab_name ?? null, project: row.project, at: Date.now() }]);
+    }
+  }, () => closedBusy(id, null));
+}
+
+function forgetClosed(row) {
+  runCards(["forget", row.rec.key], machineOf(row.machine)).then((r) => {
+    if (r?.code === 0) dropClosed(row);
+    else notify({ title: "Could not delete it from the list", body: firstLine(r), level: "error" });
+  }, () => {});
+}
+
+// Close an agent and keep it in the closed list: `cards close` on its machine
+// asks it to save its notes, waits until it stops, then ends it.
+function closeAgent(address, space, tabName, project) {
+  const at = address.indexOf("/");
+  const machine = at >= 0 ? address.slice(0, at) : undefined;
+  const terminal = at >= 0 ? address.slice(at + 1) : address;
+  const closing = new Set(/** @type {string[]} */ (shared("sheprd.closing") ?? []));
+  if (closing.has(address)) return;
+  setShared("sheprd.closing", [...closing, address]);
+  const args = ["close", terminal, "--save"];
+  if (tabName && !/^\d+$/.test(tabName)) args.push("--tab-name", tabName);
+  if (space?.name) args.push("--space-name", space.name);
+  if (project) args.push("--project", project);
+  const done = () => setShared("sheprd.closing", (shared("sheprd.closing") ?? []).filter((x) => x !== address));
+  runCards(args, machine, 300000).then((r) => {
+    done();
+    if (!r || r.code !== 0) notify({ title: "Not closed", body: firstLine(r), level: "warning" });
+    else setShared("sheprd.closed.refresh", Date.now());
+  }, done);
+}
+
+// What to run by hand for a resumable closed agent: on its machine, in its folder.
+function resumeCommand(rec) {
+  const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
+  return `${rec.cwd ? `cd ${q(rec.cwd)} && ` : ""}claude --resume ${rec.session}`;
 }
 
 // Why a machine's cards could not be read: a line to show instead of an empty list.
@@ -314,6 +432,12 @@ const workOf = (r, fallback) => r.summary || r.a.title || (r.a.tab_name && !/^\d
 // `t7` gets this machine's name (once known).
 const pingAddress = (address) => (address.includes("/") || !shared("sheprd.hostname") ? address : `${shared("sheprd.hostname")}/${address}`);
 
+function copyText(text, label) {
+  exec("wl-copy", [text]).then(
+    () => notify({ title: `Copied ${label}`, level: "success", timeout: 2000 }),
+    () => notify({ title: label, body: text, level: "info" }));
+}
+
 function copyAddress(address) {
   const text = pingAddress(address);
   exec("wl-copy", [text]).catch(() => exec("pbcopy", [])).then(
@@ -363,6 +487,9 @@ export default class SheprdSidebar extends View {
       exec("hostname", []).then((r) => r.code === 0 && setShared("sheprd.hostname", r.stdout.trim()), () => {});
     }
     cx.timer.every(CARDS_EVERY_MS, (cx) => this.loadCards(cx));
+    this.showClosed = localStorage.getItem("showClosed") === "1";
+    this.loadClosed(cx);
+    cx.timer.every(CLOSED_EVERY_MS, (cx) => this.loadClosed(cx));
     // What each machine can start, for the New tab or space dialog.
     const loadStartable = async () => {
       const list = machines().filter((x) => x.layout !== "unavailable");
@@ -429,6 +556,84 @@ export default class SheprdSidebar extends View {
       }
       cx.notify();
     });
+  }
+
+  loadClosed(cx) {
+    if (this.loadingClosed) return;
+    this.loadingClosed = true;
+    this.closedAt = Date.now();
+    cx.spawn(async (cx) => {
+      try {
+        setShared("sheprd.closed", await fetchClosed(machines()));
+      } finally {
+        this.loadingClosed = false;
+      }
+      cx.notify();
+    });
+  }
+
+  // An agent brought back shows up as a new terminal: give its tab its old
+  // name and, when its space was new, put that space in its old project.
+  welcomeBack(all, spaceById, projects) {
+    const back = /** @type {any[]} */ (shared("sheprd.back") ?? []);
+    if (!back.length) return;
+    const now = Date.now();
+    const left = back.filter((b) => {
+      const a = all.find((x) => x.address === b.address);
+      if (!a) return now - b.at < 60000;
+      if (b.tab && /^\d+$/.test(a.tab_name ?? "")) run("tab.rename", { id: a.tab, name: b.tab });
+      const space = spaceById.get(a.space);
+      if (b.project && space && projectOf(space, projects)?.name !== b.project) moveSpace(space, b.project);
+      return false;
+    });
+    if (left.length !== back.length) setShared("sheprd.back", left);
+  }
+
+  closedSection(t, crows) {
+    const open = this.showClosed;
+    const busy = /** @type {Record<string, string>} */ (shared("sheprd.closed.busy") ?? {});
+    const head = h_flex().id("pj-closed").px(8).pt(8).h(30).flex_none().gap(6).items_center()
+      .text_size(11).font_medium().text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+      .tooltip("Agents whose terminal is gone, kept until you delete them here. Bring back resumes the same session.")
+      .on_click((_e, cx) => {
+        this.showClosed = !open;
+        localStorage.setItem("showClosed", this.showClosed ? "1" : "0");
+        cx.notify();
+      })
+      .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
+      .child(div().child("Closed"))
+      .child(div().child(String(crows.length)));
+    if (!open) return [head];
+    const now = Date.now();
+    const line = (row) => {
+      const rec = row.rec;
+      const id = closedId(row);
+      const name = rec.name || rec.title || rec.terminal;
+      const closedAt = Date.parse(rec.closed_at ?? "");
+      const when = Number.isFinite(closedAt) ? `${duration(now - closedAt)} ago` : "";
+      const how = rec.superseded ? "replaced by a newer session" : rec.closed_by === "closed" ? "closed" : rec.closed_by === "exited" ? "exited" : "gone";
+      const sub = [row.project ?? "Other", row.spaceName, `${how} ${when}`.trim()].filter(Boolean).join(" · ");
+      const tip = [rec.title, rec.cwd, rec.superseded ? `${rec.name} runs a newer session now: only Delete` : rec.resumable ? `Claude session ${rec.session}` : `no session to resume: runs ${rec.program || "its command"} again`,
+        row.spaceAlive ? "back into its space" : "into a new space in its project"].filter(Boolean).join("\n");
+      return h_flex().id(`cl-${id}`).px(8).py(4).flex_none().rounded(8).items_center().gap(8)
+        .hover((s) => s.bg(t.hover)).tooltip(tip)
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 220, height: (row.rec.superseded ? 1 : row.rec.resumable ? 3 : 2) * 28 + 10, props: { menu: { closed: row } } });
+        })
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(div().truncate().text_color(t.muted).child(name))
+          .child(div().truncate().text_size(11).text_color(t.dim).child(sub)))
+        .when(row.machine !== "local", (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machineTag(row.machine))))
+        .when(!rec.superseded, (el) => el.child(div().id(`cb-${id}`).flex_none().px(6).h(20).rounded(5).flex().items_center().text_size(11)
+          .bg(t.raised).text_color(busy[id] ? t.dim : t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            bringBack(row);
+          })
+          .child(busy[id] ?? "Bring back")));
+    };
+    return [head, ...crows.map(line)];
   }
 
   // sheprd-doc: an agent recorded a document to show (`cards doc`). Each new one
@@ -666,6 +871,14 @@ export default class SheprdSidebar extends View {
         .when(at >= 0 && at < peers.length - 1, (el) => el.child(item("m-down", "Move down", () => moveProject(name, peers[at + 1], true))))
         .when(at >= 0 && at < peers.length - 2, (el) => el.child(item("m-bottom", "Move to bottom", () => moveProject(name, peers[peers.length - 1], true))));
     }
+    if (p.menu.closed) {
+      const row = p.menu.closed;
+      // Superseded: its name runs a newer session now; resuming this one would act on old state.
+      return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+        .when(!row.rec.superseded, (el) => el.child(item("m-back", "Bring back", () => bringBack(row))))
+        .when(!row.rec.superseded && Boolean(row.rec.resumable), (el) => el.child(item("m-cmd", "Copy resume command", () => copyText(resumeCommand(row.rec), "the resume command"))))
+        .child(item("m-forget", "Delete from this list", () => forgetClosed(row), true));
+    }
     if (unhideOnly) {
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
         .child(item("m-unhide", "Unhide this space", unhide));
@@ -684,6 +897,10 @@ export default class SheprdSidebar extends View {
       .child(isHidden
         ? item("m-unhide", "Unhide this space", unhide)
         : item("m-hide", "Hide this space", () => space && saveView({ hidden: [...view().hidden, spaceRef(space)] }), true))
+      .child(item("m-close", "Close, keep for later", () => {
+        const a = agents().find((x) => x.address === address);
+        closeAgent(address, space, a?.tab_name, space ? projectOf(space, projects)?.name ?? null : null);
+      }, true))
       .child(div().pt(4).pb(4).child(div().h(1).bg(t.border)))
       .child(div().px(8).pt(2).pb(4).text_size(11).text_color(t.dim).truncate().child(`Move ${key} to`))
       // An explicit height: a flex_1 list inside the popup collapsed to nothing.
@@ -933,6 +1150,10 @@ export default class SheprdSidebar extends View {
     const m = marks();
     const spaceById = new Map(spaces().map((s) => [s.id, s]));
     this.attend(all, spaceById);
+    this.welcomeBack(all, spaceById, v.projects);
+    if ((shared("sheprd.closed.refresh") ?? 0) > (this.closedAt ?? 0)) this.loadClosed(cx);
+    const crows = closedRows(v.projects);
+    const closing = new Set(/** @type {string[]} */ (shared("sheprd.closing") ?? []));
     const cards = cardsByAddress();
     const dismissed = new Set(m.dismissed);
 
@@ -1086,6 +1307,8 @@ export default class SheprdSidebar extends View {
           if (r.space) this.drag = { space: r.space.id, address: a.address, from: projectOf(r.space, v.projects)?.name ?? null, y: e.position.y, moved: false, over: undefined, overRow: null };
         })
         .when(Boolean(this.drag?.moved && r.space && this.drag.space === r.space.id), (el) => el.opacity(0.5))
+        // Being closed (saving its notes first): dimmed until it is gone.
+        .when(closing.has(a.address), (el) => el.opacity(0.45))
         // Another agent of the same project under a dragged agent: it goes
         // there (line above when dragged up, below when dragged down).
         .on_mouse_move((_e, cx) => {
@@ -1206,6 +1429,7 @@ export default class SheprdSidebar extends View {
           cx.notify();
         })
         .children(list.map((g) => this.dropTarget(t, g, [header(g), ...(g.project.collapsed ? [] : this.teamRows(t, g, row))])))
-        .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow))));
+        .when(v.hidden.length > 0, (el) => el.children(this.hiddenSection(t, v, everyRow)))
+        .when(crows.length > 0, (el) => el.children(this.closedSection(t, crows))));
   }
 }
