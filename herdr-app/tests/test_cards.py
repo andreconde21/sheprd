@@ -862,10 +862,12 @@ class ClosedAgentTests(unittest.TestCase):
     def test_a_brought_back_record_waits_out_the_start_then_returns_if_it_failed(self):
         self.record("t1", 5, "s1", brought_back_at=cards.now())
         self.assertEqual(self.closed([]), [])
-        self.record("t1", 5, "s1", brought_back_at="2026-01-01T00:00:00+00:00", brought_back_to="t7")
+        self.record("t1", 5, "s1", brought_back_at="2026-01-01T00:00:00+00:00", brought_back_to="t7", brought_back_born=9)
         self.assertEqual([r["key"] for r in self.closed([])], ["t1@5"])
         again = {"address": "t7", "created_ms": 9, "state": "live", "foreground": {"pid": 70, "argv": ["pi"]}}
         self.assertEqual(self.closed([again]), [])
+        reused = {**again, "created_ms": 10}  # the address after a core restart: another terminal
+        self.assertEqual([r["key"] for r in self.closed([reused])], ["t1@5"])
 
     def test_a_name_running_a_newer_session_supersedes_the_closed_one(self):
         self.record("t1", 5, "s-old")
@@ -876,6 +878,12 @@ class ClosedAgentTests(unittest.TestCase):
         with unittest.mock.patch.object(cards, "closed_records", return_value=[got]), \
                 self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cards.cmd_bring_back(argparse.Namespace(key="t1@5", force=False))
+
+    def test_of_two_closed_sessions_with_one_name_only_the_newer_comes_back(self):
+        self.record("t1", 5, "s-old", seen_at="2026-11-20T09:00:00+00:00")
+        self.record("t4", 8, "s-new", name="n-t1", seen_at="2026-11-27T09:00:00+00:00")
+        got = {r["key"]: r["superseded"] for r in self.closed([])}
+        self.assertEqual(got, {"t1@5": True, "t4@8": False})
 
     def test_a_second_bring_back_of_the_same_record_is_refused(self):
         with cards.claimed("t1@5"):
@@ -922,6 +930,9 @@ class ClosedAgentTests(unittest.TestCase):
 
     def test_close_kills_only_after_the_agent_saved(self):
         self.assertEqual(self.close(["working", "working", "idle"]), ("closed", ["send", "kill", "rm"]))
+
+    def test_a_turn_started_right_before_the_kill_keeps_it_alive(self):
+        self.assertEqual(self.close(["working", "idle", "working"]), ("refused", ["send"]))
 
     def test_close_leaves_alone_a_blocked_agent_a_refused_send_or_a_save_never_seen(self):
         self.assertEqual(self.close([], start="blocked")[0], "refused")

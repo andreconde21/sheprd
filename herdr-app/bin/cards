@@ -1217,7 +1217,7 @@ def cmd_seen(args):
     key = f"{terminal}@{t.get('created_ms') or 0}"
     old = next((r for r in read_records() if r["key"] == key), None)
     rec = record_from(t, args.session, args.cwd, args.transcript, args.app or "claude-code", old)
-    for field in ("closed_at", "closed_by", "brought_back_at", "brought_back_to"):
+    for field in ("closed_at", "closed_by", "brought_back_at", "brought_back_to", "brought_back_born"):
         rec.pop(field, None)
     write_record(rec)
     # The session now runs here: a record it was brought back from has done its job.
@@ -1287,7 +1287,8 @@ def closed_records():
         if rec.get("brought_back_at"):
             if age_seconds(rec["brought_back_at"]) < BACK_GRACE:
                 continue  # its new session is starting
-            if (live_addresses.get(rec.get("brought_back_to")) or {}).get("state") == "live":
+            target = live_addresses.get(rec.get("brought_back_to"))
+            if target and (target.get("created_ms") or 0) == rec.get("brought_back_born"):
                 continue  # running again (an agent without a session has no record of its own)
         if not rec.get("closed_at"):
             finished = (t or {}).get("finished_ms")
@@ -1297,7 +1298,9 @@ def closed_records():
         rec["resumable"] = bool(rec.get("session") and rec.get("transcript") and os.path.exists(rec["transcript"]))
         # Its name now runs another session (a fresh restart): resuming this one would act on old state.
         name = rec.get("name")
-        rec["superseded"] = bool(name and name in live_names and live_names[name] != rec.get("session"))
+        newer = any(o.get("name") == name and o.get("session") != rec.get("session")
+                    and (o.get("seen_at") or "") > (rec.get("seen_at") or "") for o in records) if name else False
+        rec["superseded"] = bool(name and (newer or (name in live_names and live_names[name] != rec.get("session"))))
         out.append(rec)
     out.sort(key=lambda r: r.get("closed_at") or "", reverse=True)
     return out
@@ -1411,6 +1414,13 @@ def cmd_close(args):
     jobs = running_jobs((t.get("foreground") or {}).get("pid") or t.get("pid"))
     if jobs and not args.force:
         fail(f"{terminal} still runs {len(jobs)} job(s) that closing would end: " + "; ".join(jobs[:3]), 3)
+    # Last look right before the kill: a message may have started a turn meanwhile.
+    last = hc_json("get", terminal, timeout=5) or {}
+    if agent_state(last) in ("working", "blocked") and not args.force:
+        fail(f"{terminal} started {'working' if agent_state(last) == 'working' else 'waiting on you'} again; not closed", 2)
+    jobs = running_jobs((last.get("foreground") or {}).get("pid") or last.get("pid"))
+    if jobs and not args.force:
+        fail(f"{terminal} now runs {len(jobs)} job(s) that closing would end: " + "; ".join(jobs[:3]), 3)
     rec["closed_at"] = now()
     rec["closed_by"] = "closed"
     for field in ("space_name", "tab_name", "project"):
@@ -1488,10 +1498,12 @@ def cmd_bring_back(args):
             address = json.loads(got.stdout).get("address")
         except json.JSONDecodeError:
             address = None
+        born = (hc_json("get", address, timeout=5) or {}).get("created_ms") if address else None
         # Kept until the new session's own record lands (`cards seen`), so nothing is lost if it
         # dies first; out of the list meanwhile. A resume that failed comes back after BACK_GRACE.
         rec["brought_back_at"] = now()
         rec["brought_back_to"] = address
+        rec["brought_back_born"] = born
         write_record(rec)
     print(json.dumps({"address": address, "name": name, "resumed": "--resume" in argv,
                       "tab_name": rec.get("tab_name"), "project": rec.get("project"),
