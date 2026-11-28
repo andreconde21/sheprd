@@ -6,6 +6,7 @@ Run: python3 -m unittest herdr-app/tests/test_cards.py
 import argparse
 import contextlib
 import copy
+import datetime as dt
 import importlib.machinery
 import importlib.util
 import io
@@ -977,6 +978,118 @@ class ClosedAgentTests(unittest.TestCase):
         for needle in ('"close", terminal, "--save"', '"bring-back", row.rec.key', '"forget", row.rec.key',
                        '"closed", "--json"', "Close, keep for later", "closedSection("):
             self.assertIn(needle, js)
+
+
+class ImportSessionsTests(unittest.TestCase):
+    """`cards import-sessions`: past Claude sessions into the closed list, one per agent."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home)
+        self.projects = os.path.join(self.home, ".claude", "projects", "-root-x")
+        os.makedirs(self.projects)
+        os.makedirs(os.path.join(self.home, ".claude", "sessions"))
+        for target, value in ((os.environ, {**os.environ, "HOME": self.home}),):
+            p = unittest.mock.patch.dict(target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = unittest.mock.patch.object(cards, "AGENTS_DIR", os.path.join(self.home, "agents"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.clock = 0
+
+    def transcript(self, sid, prompts=("a", "b", "c"), title=None, entrypoint="cli", mode="auto", sub=False, live=False):
+        self.clock += 60
+        stamp = dt.datetime.fromtimestamp(time.time() - 3600 + self.clock, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        lines = [{"type": "user", "entrypoint": entrypoint, "cwd": "/root/Projects/x", "sessionId": sid, "isMeta": True,
+                  "message": {"content": "<command-name>/clear</command-name>"}, "timestamp": stamp}]
+        lines += [{"type": "user", "entrypoint": entrypoint, "sessionId": sid, "message": {"content": [{"type": "text", "text": p}]},
+                   "timestamp": stamp} for p in prompts]
+        if title:
+            lines.append({"type": "custom-title", "customTitle": title, "sessionId": sid})
+        if mode:
+            lines.append({"type": "permission-mode", "permissionMode": mode, "sessionId": sid})
+        lines.append({"type": "assistant", "sessionId": sid, "timestamp": stamp})
+        folder = os.path.join(self.projects, "parent", "subagents") if sub else self.projects
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, f"{sid}.jsonl"), "w") as handle:
+            handle.write("\n".join(json.dumps(x) for x in lines) + "\n")
+        if live:
+            with open(os.path.join(self.home, ".claude", "sessions", f"{os.getpid()}.json"), "w") as handle:
+                json.dump({"sessionId": sid}, handle)
+
+    def test_one_session_per_agent_and_none_for_an_agent_running_now(self):
+        self.transcript("old-mida", title="LF · Mida")
+        self.transcript("new-mida", title="LF · Mida")
+        self.transcript("cos-1", prompts=("<pasted_content id='a'>You are the chief of staff</pasted_content>", "x", "y"))
+        self.transcript("cos-2", prompts=("<pasted_content id='b'>You are the chief of staff</pasted_content>", "x", "y"), live=True)
+        self.transcript("chat", prompts=("why is the sidebar slow", "ok", "thanks"))
+        got = {f["session"]: f for f in cards.import_candidates(14)}
+        self.assertEqual(set(got), {"new-mida", "chat"})
+        self.assertEqual(got["chat"]["first"], "why is the sidebar slow")
+
+    def test_not_subagents_print_runs_dispatcher_lanes_short_chats_or_recorded_sessions(self):
+        self.transcript("sub", sub=True)
+        self.transcript("print", entrypoint="sdk-cli")
+        self.transcript("lane", prompts=("You are a Claude Code orchestrator session on card X", "b", "c"))
+        self.transcript("short", prompts=("hi",))
+        self.transcript("kept", prompts=("already in the list", "b", "c"))
+        cards.write_record({"terminal": "t1", "born": 1, "session": "kept"})
+        self.assertEqual(cards.import_candidates(14), [])
+
+    def test_write_makes_a_resumable_record_without_the_prompt_in_argv(self):
+        self.transcript("pme", title="Pros · PME", mode="auto")
+        found = cards.import_candidates(14)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cards.cmd_import_sessions(argparse.Namespace(days=14, write=True))
+        (rec,) = cards.read_records()
+        self.assertEqual(rec["session"], "pme")
+        self.assertEqual(rec["closed_by"], "imported")
+        self.assertEqual(rec["argv"], ["claude", "--name", "Pros · PME", "--permission-mode", "auto"])
+        self.assertTrue(rec["labels"]["herdr.space"].startswith("sp"))
+        self.assertEqual(cards.resume_argv(rec)[-3:-1], ["--resume", "pme"])
+        self.assertEqual(found[0]["transcript"], rec["transcript"])
+
+    def test_a_dry_run_writes_nothing(self):
+        self.transcript("chat")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cards.cmd_import_sessions(argparse.Namespace(days=14, write=False))
+        self.assertIn("1 sessions would be added", out.getvalue())
+        self.assertEqual(cards.read_records(), [])
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the sidebar's relink block")
+class RelinkTests(unittest.TestCase):
+    """A space Herdr recreated takes over its dead ref, only when one project holds that name."""
+
+    def run_js(self, view, live, ready=("local",)):
+        with open(os.path.join(HERE, "..", "mods", "sheprd-sidebar", "main.js")) as handle:
+            source = handle.read()
+        block = source.split("// relink:begin", 1)[1].split("// relink:end", 1)[0].split("\n", 1)[1]
+        script = ("const spaces = () => [];\n" + block
+                  + f"\nconsole.log(JSON.stringify(relinked({json.dumps(view)}, {json.dumps(live)}, new Set({json.dumps(list(ready))}))));")
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_a_recreated_space_goes_back_to_the_one_project_that_had_it(self):
+        view = {"projects": [{"name": "Infra", "members": ["local/Bluehost#spOLD", "local/~#spX"]},
+                             {"name": "Cockpit", "members": ["local/~#spY"]}], "hidden": []}
+        live = [{"id": "spNEW", "name": "Bluehost", "machine": None}, {"id": "spH", "name": "~", "machine": None}]
+        out = self.run_js(view, live)
+        self.assertEqual(out["projects"][0]["members"], ["local/Bluehost#spNEW", "local/~#spX"])
+        self.assertEqual(out["projects"][1]["members"], ["local/~#spY"])  # ~ is in two projects: left alone
+
+    def test_nothing_moves_for_a_held_space_or_a_machine_whose_spaces_are_not_known(self):
+        view = {"projects": [{"name": "LF", "members": ["dev/lf#dev/spOLD", "local/A#spA"]}], "hidden": []}
+        self.assertIsNone(self.run_js(view, [{"id": "dev/spNEW", "name": "lf", "machine": "dev"}], ready=("local",)))
+        self.assertIsNone(self.run_js(view, [{"id": "spA", "name": "A", "machine": None}, {"id": "spB", "name": "A", "machine": None}]))
+
+    def test_a_hidden_space_stays_hidden_after_a_restart(self):
+        view = {"projects": [], "hidden": ["local/Scratch#spOLD"]}
+        out = self.run_js(view, [{"id": "spNEW", "name": "Scratch", "machine": None}])
+        self.assertEqual(out["hidden"], ["local/Scratch#spNEW"])
 
 if __name__ == "__main__":
     unittest.main()
