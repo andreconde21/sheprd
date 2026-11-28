@@ -86,6 +86,7 @@ function moveSpace(space, name) {
   });
 }
 
+// relink:begin (run in node by tests/test_cards.py)
 // A space's name key: its machine (`local` for this one) and its name. Two
 // spaces can share it, so the sidebar writes `spaceRef` (name key + `#` + the
 // space's id) and still reads plain name keys from older views.
@@ -116,6 +117,52 @@ function projectOf(space, projects) {
   if (byMember) return byMember;
   const hay = `${space.name} ${space.folder ?? ""}`.toLowerCase();
   return projects.find((p) => (p.match ?? []).some((m) => m && hay.includes(m.toLowerCase()))) ?? null;
+}
+
+// A space Herdr recreates (after a restart, say) gets a new id, so the ref the
+// sidebar saved for it names nobody and the space falls to Other. Each such
+// space takes over a dead ref with its name key, when exactly one project (or
+// the hidden list) holds dead refs with that key: `~` or `Projects` dead in
+// two projects stays in Other rather than guess. A ref is dead only when its
+// machine's spaces are known (layout "ready") and none has its id, so a
+// machine that is just offline keeps its refs. Returns the changed view
+// fields, or null when nothing moved.
+function relinked(v, live, ready) {
+  const ids = new Set(live.map((s) => s.id));
+  const dead = (key) => {
+    const at = key.indexOf("#");
+    if (at < 0) return false;
+    const machine = key.slice(0, key.indexOf("/"));
+    return ready.has(machine) && !ids.has(key.slice(at + 1));
+  };
+  const nameOf = (key) => key.slice(0, key.indexOf("#")).toLowerCase();
+  const lists = [...v.projects.map((p) => p.members ?? []), v.hidden ?? []];
+  const held = (s) => lists.some((keys) => keys.some((k) => names(k, s)));
+  const out = lists.map((keys) => [...keys]);
+  let moved = false;
+  for (const s of live) {
+    if (held(s)) continue;
+    const want = spaceKey(s).toLowerCase();
+    const owners = out.map((keys, i) => [i, keys.findIndex((k) => dead(k) && nameOf(k) === want)]).filter(([, j]) => j >= 0);
+    if (owners.length !== 1) continue;
+    const [i, j] = owners[0];
+    out[i][j] = spaceRef(s);
+    moved = true;
+  }
+  if (!moved) return null;
+  return {
+    projects: v.projects.map((p, i) => ({ ...p, members: out[i] })),
+    hidden: out[out.length - 1],
+  };
+}
+
+// relink:end
+
+// Saves what relinked() moved, if anything.
+function relink() {
+  const ready = new Set(machines().filter((m) => m.layout === "ready").map((m) => m.name ?? "local"));
+  const patch = relinked(view(), spaces(), ready);
+  if (patch) saveView(patch);
 }
 
 // The agent menu's height: room for every project (28 px a line, plus mark,
@@ -271,7 +318,9 @@ function closedRows(projects) {
       const id = raw ? (machine === "local" ? raw : `${machine}/${raw}`) : null;
       const space = id ? bySpace.get(id) : null;
       const member = id ? projects.flatMap((x) => (x.members ?? []).map((m) => [x.name, m])).find(([, m]) => m.endsWith(`#${id}`)) : null;
-      const project = (space ? projectOf(space, projects)?.name : null) ?? member?.[0] ?? rec.project ?? null;
+      // Imported from history (`cards import-sessions`): no space ever held it, so its folder decides.
+      const byFolder = () => projectOf({ id: null, machine: machine === "local" ? null : machine, name: "", folder: rec.cwd ?? "" }, projects)?.name;
+      const project = (space ? projectOf(space, projects)?.name : null) ?? member?.[0] ?? rec.project ?? byFolder() ?? null;
       const spaceName = space?.name ?? (member ? member[1].replace(/^[^/]*\//, "").replace(/#[^#]*$/, "") : null) ?? rec.space_name ?? null;
       rows.push({ machine, rec, project, spaceName, spaceAlive: Boolean(space) });
     }
@@ -471,7 +520,10 @@ export default class SheprdSidebar extends View {
     cx.spawn(async (cx) => {
       try {
         const r = await exec("cards", ["view"]);
-        if (r.code === 0) setShared("sheprd.view", JSON.parse(r.stdout));
+        if (r.code === 0) {
+          setShared("sheprd.view", JSON.parse(r.stdout));
+          relink();
+        }
         else this.problem = "cards is not installed here (see herdr-app/README.md)";
       } catch {
         this.problem = "cards is not installed here (see herdr-app/README.md)";
@@ -497,7 +549,7 @@ export default class SheprdSidebar extends View {
     };
     loadStartable();
     cx.timer.every(60000, () => { loadStartable(); });
-    cx.timer.every(30000, (cx) => cx.notify());
+    cx.timer.every(30000, (cx) => { relink(); cx.notify(); });
   }
 
   loadFacts(machine, cx) {
@@ -611,7 +663,7 @@ export default class SheprdSidebar extends View {
       const name = rec.name || rec.title || rec.terminal;
       const closedAt = Date.parse(rec.closed_at ?? "");
       const when = Number.isFinite(closedAt) ? `${duration(now - closedAt)} ago` : "";
-      const how = rec.superseded ? "replaced by a newer session" : rec.closed_by === "closed" ? "closed" : rec.closed_by === "exited" ? "exited" : "gone";
+      const how = rec.superseded ? "replaced by a newer session" : rec.closed_by === "closed" ? "closed" : rec.closed_by === "imported" ? "from history" : rec.closed_by === "exited" ? "exited" : "gone";
       const sub = [row.project ?? "Other", row.spaceName, `${how} ${when}`.trim()].filter(Boolean).join(" · ");
       const tip = [rec.title, rec.cwd, rec.superseded ? `${rec.name} runs a newer session now: only Delete` : rec.resumable ? `Claude session ${rec.session}` : `no session to resume: runs ${rec.program || "its command"} again`,
         row.spaceAlive ? "back into its space" : "into a new space in its project"].filter(Boolean).join("\n");

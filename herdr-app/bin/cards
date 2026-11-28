@@ -31,6 +31,8 @@ For the app and Conductore (not agents):
   cards close <terminal> [--save]    close an agent, keep it in that list
   cards bring-back <key>             resume it (same session, name, space)
   cards forget <key>                 drop it from the list
+  cards import-sessions [--days 14] [--write]
+                                     past Claude sessions into the list (dry run without --write)
 """
 
 import argparse
@@ -39,6 +41,7 @@ import json
 import os
 import base64
 import contextlib
+import glob
 import hashlib
 import re
 import shutil
@@ -1510,6 +1513,183 @@ def cmd_bring_back(args):
                       "space": (rec.get("labels") or {}).get("herdr.space")}))
 
 
+IMPORT_SKIP = ("You are a Claude Code orchestrator session",)  # the board dispatcher's lanes
+IMPORT_MIN_PROMPTS = 3
+PASTED = re.compile(r"</?pasted_content[^>]*>")
+IMPORT_HEAD = 400       # lines read from the top of a transcript (entrypoint, first prompt)
+IMPORT_TAIL = 200_000   # bytes read from its end (latest title, permission mode)
+
+
+def first_prompt(entry):
+    """The text of a user prompt typed by a person, or None (meta, commands, notifications)."""
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
+        return None
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(x, dict) and x.get("type") == "tool_result" for x in content):
+            return None
+        content = " ".join(x.get("text", "") for x in content if isinstance(x, dict))
+    text = " ".join(PASTED.sub(" ", content or "").split())
+    if not text or text.startswith(("<command-", "<local-command", "<task-notification", "Caveat:")):
+        return None
+    return text
+
+
+def transcript_facts(path):
+    """What import-sessions needs from a transcript, reading only its head and tail."""
+    facts = {"entrypoint": None, "cwd": None, "prompts": 0, "first": None, "title": None, "mode": None, "session": None, "last": None}
+    try:
+        with open(path, "rb") as handle:
+            for i, line in enumerate(handle):
+                if i >= IMPORT_HEAD:
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                facts["entrypoint"] = facts["entrypoint"] or entry.get("entrypoint")
+                facts["cwd"] = facts["cwd"] or entry.get("cwd")
+                facts["session"] = facts["session"] or entry.get("sessionId")
+                text = first_prompt(entry)
+                if text:
+                    facts["prompts"] += 1
+                    facts["first"] = facts["first"] or text
+            handle.seek(max(0, os.path.getsize(path) - IMPORT_TAIL))
+            tail = handle.read().decode("utf-8", "replace").splitlines()[1:]
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if facts["title"] and facts["mode"] and facts["last"]:
+            break
+        if not facts["last"] and '"timestamp"' in line:
+            try:
+                facts["last"] = dt.datetime.fromisoformat(json.loads(line)["timestamp"].replace("Z", "+00:00")).timestamp()
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
+        if '"custom-title"' not in line and '"agent-name"' not in line and '"permission-mode"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") in ("custom-title", "agent-name") and not facts["title"]:
+            facts["title"] = entry.get("customTitle") or entry.get("agentName")
+        elif entry.get("type") == "permission-mode" and not facts["mode"]:
+            facts["mode"] = entry.get("permissionMode")
+    return facts
+
+
+def live_claude_sessions():
+    """Session ids of the Claude processes running now (~/.claude/sessions/<pid>.json)."""
+    out = set()
+    folder = os.path.expanduser("~/.claude/sessions")
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json") or not name[:-5].isdigit():
+            continue
+        try:
+            os.kill(int(name[:-5]), 0)
+        except (OSError, ValueError):
+            continue
+        sid = session_of_pid(name[:-5])
+        if sid:
+            out.add(sid)
+    return out
+
+
+def agent_of(facts):
+    return ("title", facts["title"]) if facts["title"] else ("prompt", (facts["first"] or "")[:200])
+
+
+def import_candidates(days):
+    """Interactive Claude sessions of the last [days] that run nowhere and have no record, one per
+    agent: its title, else its first prompt, names the agent (a team agent or chief of staff
+    restarted 70 times is one agent), and only its newest session counts, none when that agent
+    runs now. Untitled ones need IMPORT_MIN_PROMPTS prompts. Not subagents (they live under
+    <session>/subagents/), not `claude -p` runs, not the board dispatcher's lanes."""
+    live = live_claude_sessions()
+    recorded = {r.get("session") for r in read_records()}
+    since = time.time() - days * 86400
+    found = []
+    live_agents = set()
+    for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        sid = os.path.basename(path)[:-6]
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if sid in live:
+            facts = transcript_facts(path)
+            if facts:
+                live_agents.add(agent_of(facts))
+            continue
+        if mtime < since:
+            continue
+        facts = transcript_facts(path)
+        if facts and facts["last"]:
+            mtime = facts["last"]
+        if mtime < since or sid in recorded:
+            continue
+        if not facts or facts["entrypoint"] != "cli" or (facts["session"] or sid) != sid:
+            continue
+        if not facts["title"] and (facts["prompts"] < IMPORT_MIN_PROMPTS or (facts["first"] or "").startswith(IMPORT_SKIP)):
+            continue
+        found.append({**facts, "session": sid, "transcript": path, "mtime": mtime})
+    newest = {}
+    for f in found:
+        key = agent_of(f)
+        if key not in newest or f["mtime"] > newest[key]["mtime"]:
+            newest[key] = f
+    out = [f for key, f in newest.items() if key not in live_agents]
+    out.sort(key=lambda f: f["mtime"], reverse=True)
+    return out
+
+
+def imported_record(f):
+    born = int(f["mtime"] * 1000)
+    argv = ["claude"]
+    if f["title"]:
+        argv += ["--name", f["title"]]
+    if f["mode"]:
+        argv += ["--permission-mode", f["mode"]]
+    closed = dt.datetime.fromtimestamp(f["mtime"], dt.timezone.utc).isoformat(timespec="seconds")
+    title = f["title"] or (f["first"] or "")[:80] or None
+    return {
+        "terminal": "imp-" + f["session"].replace("-", "")[:32],
+        "born": born,
+        "name": None,
+        # A space of its own when brought back; the sidebar moves it into its project.
+        "labels": {"herdr.space": "sp" + os.urandom(16).hex()},
+        "title": title,
+        "tab_name": f["title"],
+        "argv": argv,
+        "cwd": f["cwd"],
+        "session": f["session"],
+        "transcript": f["transcript"],
+        "app": "claude-code",
+        "seen_at": closed,
+        "closed_at": closed,
+        "closed_by": "imported",
+    }
+
+
+def cmd_import_sessions(args):
+    found = import_candidates(args.days)
+    for f in found:
+        when = dt.datetime.fromtimestamp(f["mtime"]).strftime("%d/%m %H:%M")
+        what = f["title"] or (f["first"] or "")[:60]
+        print(f"{when}  {what:<60}  {f['cwd'] or ''}")
+    if not args.write:
+        print(f"{len(found)} sessions would be added to Closed (run again with --write)")
+        return
+    for f in found:
+        write_record(imported_record(f))
+    print(f"{len(found)} sessions added to Closed")
+
+
 def cmd_forget(args):
     try:
         os.remove(record_file(args.key))
@@ -1651,6 +1831,11 @@ def main():
     p.add_argument("key")
     p.add_argument("--force", action="store_true", help="even when its name runs a newer session")
     p.set_defaults(func=cmd_bring_back)
+
+    p = sub.add_parser("import-sessions", help="add past Claude sessions that run nowhere to the closed list")
+    p.add_argument("--days", type=int, default=14)
+    p.add_argument("--write", action="store_true", help="add them (without it: only list them)")
+    p.set_defaults(func=cmd_import_sessions)
 
     p = sub.add_parser("forget", help="drop a closed agent from the list (for apps)")
     p.add_argument("key")
