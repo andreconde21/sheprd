@@ -765,15 +765,17 @@ def cards_paused():
 SEEN_EVERY = 600  # seconds between `cards seen` records of one session (closed-agents list)
 
 
-def note_seen(cache, session, transcript, cwd):
+def note_seen(cache, terminal, session, transcript, cwd):
     """Herdr app: let `cards seen` remember this agent (name, labels, cwd, session), so it can be
-    brought back after it is closed. Detached and at most every SEEN_EVERY seconds: it never
-    delays the turn."""
+    brought back after it is closed. Detached and at most every SEEN_EVERY seconds per terminal
+    (a session resumed in a new terminal is recorded on its first turn there): it never delays
+    the turn."""
     cards = cards_bin()
     if (not cards or os.environ.get("SHEPRD_HOOK_DRY") or os.environ.get("SHEPRD_HOOK_NO_SEEN")
-            or time.time() - cache.get("seen_at", 0) < SEEN_EVERY):
+            or (cache.get("seen_in") == terminal and time.time() - cache.get("seen_at", 0) < SEEN_EVERY)):
         return
     cache["seen_at"] = time.time()
+    cache["seen_in"] = terminal
     args = [cards, "seen", "--session", session, "--transcript", transcript, "--app", "claude-code"]
     if cwd:
         args += ["--cwd", cwd]
@@ -1186,7 +1188,7 @@ def main():
 
     event = hook.get("hook_event_name", "")
     if terminal:
-        note_seen(cache, session, transcript, hook.get("cwd"))
+        note_seen(cache, terminal, session, transcript, hook.get("cwd"))
     if event == "UserPromptSubmit":
         # Cheap path: no transcript work, just remember which questions were open and tell
         # the agent about them (only the Herdr app has `cards`).

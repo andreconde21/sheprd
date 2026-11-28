@@ -796,6 +796,14 @@ class WritebackEdgeTests(unittest.TestCase):
 
 
 
+def itertools_count(start=0.0, step=1.0):
+    """A clock that moves one second per call: waits time out without sleeping."""
+    t = start
+    while True:
+        yield t
+        t += step
+
+
 class ClosedAgentTests(unittest.TestCase):
     """The closed-agents list: records from `cards seen`, liveness from the core's terminal list."""
 
@@ -841,12 +849,89 @@ class ClosedAgentTests(unittest.TestCase):
         self.assertEqual(got["t1@5"]["closed_by"], "gone")
         self.assertTrue(got["t1@5"]["resumable"])
 
-    def test_a_session_resumed_in_another_terminal_drops_the_old_record(self):
+    def test_a_session_resumed_elsewhere_keeps_its_old_record_until_the_new_one_lands(self):
         key = self.record("t1", 5, "s1")
         self.sessions[9] = "s1"
         moved = {"address": "t9", "created_ms": 99, "state": "live", "foreground": {"pid": 9, "argv": ["/x/claude"]}}
         self.assertEqual(self.closed([moved]), [])
+        self.assertTrue(os.path.exists(os.path.join(self.dir, f"{key}.json")))  # t9 has no record yet
+        self.record("t9", 99, "s1")
+        self.assertEqual(self.closed([moved]), [])
         self.assertFalse(os.path.exists(os.path.join(self.dir, f"{key}.json")))
+
+    def test_a_brought_back_record_waits_out_the_start_then_returns_if_it_failed(self):
+        self.record("t1", 5, "s1", brought_back_at=cards.now())
+        self.assertEqual(self.closed([]), [])
+        self.record("t1", 5, "s1", brought_back_at="2026-01-01T00:00:00+00:00", brought_back_to="t7")
+        self.assertEqual([r["key"] for r in self.closed([])], ["t1@5"])
+        again = {"address": "t7", "created_ms": 9, "state": "live", "foreground": {"pid": 70, "argv": ["pi"]}}
+        self.assertEqual(self.closed([again]), [])
+
+    def test_a_name_running_a_newer_session_supersedes_the_closed_one(self):
+        self.record("t1", 5, "s-old")
+        self.sessions[4] = "s-new"
+        fresh = {"address": "t4", "created_ms": 8, "state": "live", "name": "n-t1", "foreground": {"pid": 4, "argv": ["/x/claude"]}}
+        (got,) = self.closed([fresh])
+        self.assertTrue(got["superseded"])
+        with unittest.mock.patch.object(cards, "closed_records", return_value=[got]), \
+                self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cards.cmd_bring_back(argparse.Namespace(key="t1@5", force=False))
+
+    def test_a_second_bring_back_of_the_same_record_is_refused(self):
+        with cards.claimed("t1@5"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                with cards.claimed("t1@5"):
+                    pass
+        with cards.claimed("t1@5"):
+            pass  # released
+
+    def test_no_launch_prompt_is_stored_and_no_command_line_leaves_the_machine(self):
+        argv = ["/x/claude", "--permission-mode", "auto", "do the secret thing", "--name", "LF · QA", "--model", "opus"]
+        self.assertEqual(cards.stored_argv(argv, "claude-code"),
+                         ["/x/claude", "--permission-mode", "auto", "--name", "LF · QA", "--model", "opus"])
+        self.record("t1", 5, "s1", argv=argv)
+        (got,) = self.closed([])
+        self.assertNotIn("argv", cards.public(got))
+        self.assertEqual(cards.public(got)["program"], "claude")
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    def close(self, states, sent=0, jobs=(), force=False, save=True, start="idle"):
+        """cmd_close against a fake terminal whose status goes through `states` on each hc get."""
+        seq = iter([start, *states])
+        last = {"v": start}
+        def get(*_a, **_k):
+            last["v"] = next(seq, last["v"])
+            return {"address": "t1", "created_ms": 5, "state": "live", "status": {"state": last["v"]},
+                    "foreground": {"pid": 42, "argv": ["/x/claude"]}, "labels": {"herdr.space": "sp"}}
+        runs = []
+        def run(cmd, **_k):
+            runs.append(cmd[1])
+            return subprocess.CompletedProcess(cmd, sent if cmd[1] == "send" else 0, "", "refused" if sent else "")
+        args = argparse.Namespace(terminal_ref="t1", force=force, save=save, save_timeout=4, space_name=None, tab_name=None, project=None)
+        with unittest.mock.patch.object(cards, "hc_json", side_effect=get), \
+                unittest.mock.patch.object(cards.subprocess, "run", side_effect=run), \
+                unittest.mock.patch.object(cards, "running_jobs", return_value=list(jobs)), \
+                unittest.mock.patch.object(cards.time, "sleep"), \
+                unittest.mock.patch.object(cards.time, "time", side_effect=itertools_count()), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cards.cmd_close(args)
+                return "closed", runs
+            except SystemExit:
+                return "refused", runs
+
+    def test_close_kills_only_after_the_agent_saved(self):
+        self.assertEqual(self.close(["working", "working", "idle"]), ("closed", ["send", "kill", "rm"]))
+
+    def test_close_leaves_alone_a_blocked_agent_a_refused_send_or_a_save_never_seen(self):
+        self.assertEqual(self.close([], start="blocked")[0], "refused")
+        self.assertEqual(self.close(["working", "idle"], sent=1), ("refused", ["send"]))
+        self.assertEqual(self.close(["idle"] * 500), ("refused", ["send"]))
+
+    def test_close_leaves_alone_an_agent_still_working_or_running_jobs(self):
+        self.assertEqual(self.close(["working"] * 500), ("refused", ["send"]))
+        self.assertEqual(self.close(["working", "idle"], jobs=["pid 9: npm test"]), ("refused", ["send"]))
+        self.assertEqual(self.close([], jobs=["pid 9: npm test"], force=True)[0], "closed")
 
     def test_a_terminal_id_reused_after_a_core_restart_is_another_agent(self):
         self.record("t1", 5, "s1")
@@ -856,13 +941,13 @@ class ClosedAgentTests(unittest.TestCase):
 
     def test_resume_keeps_mode_and_name_and_drops_the_old_resume(self):
         argv = cards.resume_argv({"argv": ["claude", "--permission-mode", "auto", "--resume", "old", "--name", "LF · QA", "hi"],
-                                  "session": "S", "app": "claude-code"}, None)
+                                  "session": "S", "app": "claude-code"})
         self.assertEqual(argv[:7], ["claude", "--permission-mode", "auto", "--name", "LF · QA", "--resume", "S"])
         self.assertNotIn("old", argv)
         self.assertNotIn("hi", argv)
 
     def test_a_non_claude_agent_runs_its_command_again(self):
-        self.assertEqual(cards.resume_argv({"argv": ["pi", "--x"], "session": None, "app": "pi"}, None), ["pi", "--x"])
+        self.assertEqual(cards.resume_argv({"argv": ["pi", "--x"], "session": None, "app": "pi"}), ["pi", "--x"])
 
     def test_only_record_keys_name_files(self):
         for bad in ("../x@1", "t1@1/../../etc", "t1", "t1@x", ""):

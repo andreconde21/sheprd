@@ -38,6 +38,7 @@ import datetime as dt
 import json
 import os
 import base64
+import contextlib
 import hashlib
 import re
 import shutil
@@ -1069,11 +1070,12 @@ def add_decisions(text, entries):
 # Claude session. A record whose terminal is gone, or no longer runs that agent, is a
 # closed agent: `cards closed` lists them until `cards forget`, and `cards bring-back`
 # resumes the same session with the same name in the same space. `cards close` ends one
-# on purpose (after asking it to save its notes), so it uses no memory while parked.
+# on purpose, only after it saved its notes and with nothing left running under it.
 # Files, not a core document: they survive core restarts and cost nothing per turn.
 
 AGENTS_DIR = os.path.expanduser(os.environ.get("CARDS_AGENTS_DIR", "~/.local/state/sheprd/agents"))
 SEEN_EVERY = 600  # seconds before a seen record is refreshed from hc
+BACK_GRACE = 120  # seconds a brought-back record stays out of the list while its new session starts
 RECORD_KEY = re.compile(r"^[A-Za-z0-9_-]{1,40}@\d{1,20}$")
 SAVE_NOTE = ("You are being closed to free memory and will be brought back later into this same session. "
              "Save what you need now (your state file, if you have one: current cards, next steps, running "
@@ -1081,6 +1083,11 @@ SAVE_NOTE = ("You are being closed to free memory and will be brought back later
 BACK_NOTE = ("You were closed and are now brought back: this is the same session resumed in a new terminal. "
              "Foreground commands you had running were stopped. Re-read your state file if you have one and "
              "continue.")
+# Claude flags worth keeping for a resume; nothing else of the command line is stored
+# (a launch prompt may carry anything).
+KEEP_FLAGS = ("--permission-mode", "--name", "--model")
+KEEP_SWITCHES = ("--dangerously-skip-permissions",)
+SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
 
 
 def hc_json(*args, timeout=10):
@@ -1122,11 +1129,17 @@ def read_records():
     return out
 
 
-def write_record(rec):
+def agents_dir():
     os.makedirs(AGENTS_DIR, mode=0o700, exist_ok=True)
+    os.chmod(AGENTS_DIR, 0o700)  # mode= only applies when it is created
+    return AGENTS_DIR
+
+
+def write_record(rec):
+    agents_dir()
     key = f"{rec['terminal']}@{rec.get('born') or 0}"
-    data = {k: v for k, v in rec.items() if k != "key"}
-    fd, tmp = tempfile.mkstemp(dir=AGENTS_DIR, prefix=".rec-")
+    data = {k: v for k, v in rec.items() if k not in ("key", "resumable", "superseded")}
+    fd, tmp = tempfile.mkstemp(dir=AGENTS_DIR, prefix=".rec-")  # 0600
     with os.fdopen(fd, "w") as handle:
         json.dump(data, handle, ensure_ascii=False)
     os.replace(tmp, os.path.join(AGENTS_DIR, f"{key}.json"))
@@ -1148,27 +1161,47 @@ def worth_keeping(t):
     return bool(labels.get("herdr.space") or t.get("name"))
 
 
+def is_claude(argv, app=None):
+    return app == "claude-code" or os.path.basename((argv or [""])[0] or "") == "claude"
+
+
+def stored_argv(argv, app=None):
+    """What a record keeps of the command line: for Claude the program and the flags a resume
+    reuses, never a launch prompt; for other agents the command, to run it again."""
+    argv = list(argv or [])
+    if not is_claude(argv, app):
+        return argv
+    out = argv[:1]
+    for i, a in enumerate(argv[1:], 1):
+        if a in KEEP_FLAGS and i + 1 < len(argv):
+            out += [a, argv[i + 1]]
+        elif a.startswith(tuple(f + "=" for f in KEEP_FLAGS)) or a in KEEP_SWITCHES:
+            out.append(a)
+    return out
+
+
 def record_from(t, session=None, cwd=None, transcript=None, app=None, old=None):
     fg = t.get("foreground") or {}
     rec = dict(old or {})
+    app = app or ((t.get("status") or {}).get("app")) or rec.get("app")
     rec.update({
         "terminal": t["address"],
         "born": t.get("created_ms") or 0,
         "name": t.get("name"),
         "labels": t.get("labels") or {},
         "title": t.get("title") or rec.get("title"),
-        "argv": fg.get("argv") or t.get("argv") or rec.get("argv") or [],
+        "argv": stored_argv(fg.get("argv") or t.get("argv") or rec.get("argv") or [], app),
         "cwd": t.get("cwd") or fg.get("cwd") or cwd or rec.get("cwd"),
         "session": session or rec.get("session") or session_of_pid(fg.get("pid")),
         "transcript": transcript or rec.get("transcript"),
-        "app": app or ((t.get("status") or {}).get("app")) or rec.get("app"),
+        "app": app,
         "seen_at": now(),
     })
     return rec
 
 
 def cmd_seen(args):
-    """(hook) remember this agent, at most every SEEN_EVERY seconds per session."""
+    """(hook) remember this agent, at most every SEEN_EVERY seconds per terminal and session."""
     terminal = my_terminal(args)
     for rec in read_records():
         if rec.get("terminal") == terminal and rec.get("session") == args.session and not args.force:
@@ -1184,9 +1217,16 @@ def cmd_seen(args):
     key = f"{terminal}@{t.get('created_ms') or 0}"
     old = next((r for r in read_records() if r["key"] == key), None)
     rec = record_from(t, args.session, args.cwd, args.transcript, args.app or "claude-code", old)
-    rec.pop("closed_at", None)
-    rec.pop("closed_by", None)
+    for field in ("closed_at", "closed_by", "brought_back_at", "brought_back_to"):
+        rec.pop(field, None)
     write_record(rec)
+    # The session now runs here: a record it was brought back from has done its job.
+    for other in read_records():
+        if other["key"] != key and other.get("session") == args.session and other.get("brought_back_at"):
+            try:
+                os.remove(record_file(other["key"]))
+            except OSError:
+                pass
 
 
 def runs_agent(t, rec):
@@ -1199,6 +1239,13 @@ def runs_agent(t, rec):
     return bool(want) and argv0 == want
 
 
+def age_seconds(stamp):
+    try:
+        return time.time() - dt.datetime.fromisoformat(stamp).timestamp()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 def closed_records():
     core = Core()
     try:
@@ -1209,47 +1256,68 @@ def closed_records():
         core.close()
     terms = listed if isinstance(listed, list) else listed.get("terminals", [])
     live_sessions = {}
+    live_names = {}
     by_key = {}
+    live_addresses = {t.get("address"): t for t in terms if t.get("state") == "live"}
     for t in terms:
         by_key[f"{t.get('address')}@{t.get('created_ms') or 0}"] = t
         if t.get("state") == "live":
             sid = session_of_pid((t.get("foreground") or {}).get("pid"))
             if sid:
                 live_sessions[sid] = t.get("address")
+            if t.get("name"):
+                live_names[t["name"]] = sid
+    records = read_records()
+    recorded = {(r.get("terminal"), r.get("session")) for r in records}
     out = []
-    for rec in read_records():
+    for rec in records:
         t = by_key.get(rec["key"])
         if t and t.get("state") == "live" and runs_agent(t, rec):
             continue
         moved = live_sessions.get(rec.get("session"))
         if moved and moved != rec.get("terminal"):
-            # Resumed elsewhere (team relaunch, bring-back): the new terminal has its own record.
-            try:
-                os.remove(record_file(rec["key"]))
-            except OSError:
-                pass
+            # Resumed elsewhere (team relaunch, bring-back). Its old record goes only once the new
+            # terminal has its own, so a crash in between does not lose it.
+            if (moved, rec.get("session")) in recorded:
+                try:
+                    os.remove(record_file(rec["key"]))
+                except OSError:
+                    pass
             continue
+        if rec.get("brought_back_at"):
+            if age_seconds(rec["brought_back_at"]) < BACK_GRACE:
+                continue  # its new session is starting
+            if (live_addresses.get(rec.get("brought_back_to")) or {}).get("state") == "live":
+                continue  # running again (an agent without a session has no record of its own)
         if not rec.get("closed_at"):
             finished = (t or {}).get("finished_ms")
             rec["closed_at"] = (dt.datetime.fromtimestamp(finished / 1000, dt.timezone.utc).isoformat(timespec="seconds")
                                 if finished else rec.get("seen_at"))
             rec["closed_by"] = "exited" if t else "gone"
         rec["resumable"] = bool(rec.get("session") and rec.get("transcript") and os.path.exists(rec["transcript"]))
+        # Its name now runs another session (a fresh restart): resuming this one would act on old state.
+        name = rec.get("name")
+        rec["superseded"] = bool(name and name in live_names and live_names[name] != rec.get("session"))
         out.append(rec)
     out.sort(key=lambda r: r.get("closed_at") or "", reverse=True)
     return out
 
 
+def public(rec):
+    """What leaves the machine for the app: no command line."""
+    return {k: v for k, v in rec.items() if k != "argv"} | {"program": os.path.basename((rec.get("argv") or [""])[0] or "")}
+
+
 def cmd_closed(args):
     recs = closed_records()
     if args.json:
-        print(json.dumps({"agents": recs}, ensure_ascii=False))
+        print(json.dumps({"agents": [public(r) for r in recs]}, ensure_ascii=False))
         return
     if not recs:
         print("no closed agents")
     for r in recs:
-        print(f"{r['key']:<24} {r.get('name') or '-':<20} {(r.get('closed_at') or '')[:16]:<17} "
-              f"{'resume' if r['resumable'] else 'rerun':<7} {r.get('cwd') or ''}")
+        how = "replaced" if r["superseded"] else "resume" if r["resumable"] else "rerun"
+        print(f"{r['key']:<24} {r.get('name') or '-':<20} {(r.get('closed_at') or '')[:16]:<17} {how:<8} {r.get('cwd') or ''}")
 
 
 def wait_state(terminal, done, timeout):
@@ -1262,23 +1330,87 @@ def wait_state(terminal, done, timeout):
     return None
 
 
+def agent_state(t):
+    return ((t or {}).get("status") or {}).get("state")
+
+
+def children_of(pid):
+    out = {}
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat") as handle:
+                    stat_line = handle.read()
+                ppid = int(stat_line.rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            out.setdefault(ppid, []).append(int(entry))
+    except OSError:
+        pass
+    return out
+
+
+def job_text(cmdline):
+    """The command a Bash-tool shell runs, without Claude's snapshot preamble."""
+    text = cmdline.split("eval ", 1)[-1] if "eval " in cmdline else cmdline
+    return re.sub(r"\s+", " ", text).strip()[:80]
+
+
+def running_jobs(pid):
+    """Shells the agent left running (background jobs, watchers and what they run): killing
+    the agent would end them. MCP servers and other helpers are not counted."""
+    if not pid:
+        return []
+    tree = children_of(int(pid))
+    jobs = []
+    for child in tree.get(int(pid), []):
+        try:
+            with open(f"/proc/{child}/comm") as handle:
+                comm = handle.read().strip()
+            with open(f"/proc/{child}/cmdline", "rb") as handle:
+                cmdline = handle.read().replace(b"\0", b" ").decode("utf8", "replace").strip()
+        except OSError:
+            continue
+        # Claude's Bash tool runs each command as `bash -c 'source …/shell-snapshots/…'`; a
+        # finished turn leaves only background ones. Hooks (the hc-inbox waiter) are not jobs.
+        if comm in SHELLS and "/shell-snapshots/" in cmdline:
+            jobs.append(f"pid {child}: {job_text(cmdline)}")
+    return jobs
+
+
 def cmd_close(args):
     terminal = args.terminal_ref
     t = hc_json("get", terminal, timeout=5) or fail(f"no terminal {terminal}")
     if t.get("state") != "live":
         fail(f"{terminal} is not running")
-    state = (t.get("status") or {}).get("state")
-    if state == "working" and not args.force:
-        fail(f"{terminal} is working; close it when it stops (or --force)", 2)
+    state = agent_state(t)
+    if state in ("working", "blocked") and not args.force:
+        fail(f"{terminal} is {'working' if state == 'working' else 'waiting on you'}; "
+             "close it when it is idle (or --force)", 2)
     key = f"{t['address']}@{t.get('created_ms') or 0}"
     old = next((r for r in read_records() if r["key"] == key), None)
     rec = record_from(t, old=old)
-    if args.save and state in ("idle", "done", "blocked"):
-        subprocess.run([hc_binary(), "send", terminal, "--", SAVE_NOTE], capture_output=True, timeout=15)
-        # It starts working on the note, then stops; give it up to the timeout.
-        wait_state(terminal, lambda x: (x or {}).get("status", {}).get("state") == "working", 20)
-        wait_state(terminal, lambda x: not x or x.get("state") != "live"
-                   or x.get("status", {}).get("state") != "working", args.save_timeout)
+    if args.save and not args.force:
+        sent = subprocess.run([hc_binary(), "send", terminal, "--", SAVE_NOTE], capture_output=True, text=True, timeout=15)
+        if sent.returncode != 0:
+            fail(f"could not ask {terminal} to save: {(sent.stderr or sent.stdout).strip()[:200]}; not closed")
+        # Close only after it was seen working on the note and then stopping; otherwise leave it.
+        if not wait_state(terminal, lambda x: agent_state(x) == "working", 90):
+            fail(f"{terminal} did not start saving within 90 s; not closed")
+        after = wait_state(terminal, lambda x: not x or x.get("state") != "live" or agent_state(x) != "working",
+                           args.save_timeout)
+        if not after:
+            fail(f"{terminal} is still working after {args.save_timeout} s; not closed")
+        if after.get("state") != "live":
+            fail(f"{terminal} ended while saving")
+        if agent_state(after) == "blocked":
+            fail(f"{terminal} is waiting on you after saving; not closed")
+        t = after
+    jobs = running_jobs((t.get("foreground") or {}).get("pid") or t.get("pid"))
+    if jobs and not args.force:
+        fail(f"{terminal} still runs {len(jobs)} job(s) that closing would end: " + "; ".join(jobs[:3]), 3)
     rec["closed_at"] = now()
     rec["closed_by"] = "closed"
     for field in ("space_name", "tab_name", "project"):
@@ -1291,57 +1423,76 @@ def cmd_close(args):
     print(json.dumps({"closed": key}))
 
 
-def resume_argv(rec, address_hint):
-    argv = list(rec.get("argv") or [])
-    exe = argv[0] if argv else ""
-    if rec.get("session") and (rec.get("app") == "claude-code" or os.path.basename(exe) == "claude"):
-        out = [exe if os.path.basename(exe) == "claude" and os.path.exists(exe) else "claude"]
-        for i, a in enumerate(argv[1:], 1):
-            if a == "--permission-mode" and i + 1 < len(argv):
-                out += [a, argv[i + 1]]
-            elif a == "--name" and i + 1 < len(argv):
-                out += [a, argv[i + 1]]
-            elif a.startswith(("--permission-mode=", "--name=")) or a == "--dangerously-skip-permissions":
-                out.append(a)
-        out += ["--resume", rec["session"], BACK_NOTE]
-        return out
+def resume_argv(rec):
+    argv = stored_argv(rec.get("argv"), rec.get("app"))
+    if rec.get("session") and is_claude(argv, rec.get("app")):
+        exe = argv[0] if argv else ""
+        out = [exe if os.path.basename(exe) == "claude" and os.path.exists(exe) else "claude", *argv[1:]]
+        return [*out, "--resume", rec["session"], BACK_NOTE]
     return argv
 
 
-def cmd_bring_back(args):
-    path = record_file(args.key)
-    rec = next((r for r in read_records() if r["key"] == args.key), None) or fail(f"no closed agent {args.key}")
-    if not any(r["key"] == args.key for r in closed_records()):
-        fail(f"{args.key} is still running")
-    argv = resume_argv(rec, rec.get("name") or "a new address")
-    if not argv:
-        fail("nothing to run: the record has no command")
-    labels = dict(rec.get("labels") or {})
-    if labels.get("herdr.space"):
-        labels["herdr.tab"] = "tb" + os.urandom(16).hex()  # a new tab in its old space
-    cmd = [hc_binary(), "run", "--bg", "--json", "--keep", "--no-parent", "--outlive-parent"]
-    name = rec.get("name")
-    if name and (hc_json("get", name, timeout=5) or {}).get("state") == "live":
-        name = None  # someone else has the name now
-    if name:
-        cmd += ["--name", name]
-    if rec.get("cwd") and os.path.isdir(rec["cwd"]):
-        cmd += ["--cwd", rec["cwd"]]
-    for k, v in labels.items():
-        cmd += ["--label", f"{k}={v}"]
-    # A login shell, so the agent gets the same PATH as one started by hand; argv stays argv.
-    cmd += ["--", "bash", "-lc", 'export PATH="$HOME/.local/bin:$PATH"; exec "$@"', "bring-back", *argv]
-    got = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if got.returncode != 0:
-        fail(f"hc run failed: {(got.stderr or got.stdout).strip()[:300]}")
+@contextlib.contextmanager
+def claimed(key):
+    """One bring-back per record at a time (the CLI and two apps may click together)."""
+    lock = os.path.join(agents_dir(), f".{key}.lock")
     try:
-        address = json.loads(got.stdout).get("address")
-    except json.JSONDecodeError:
-        address = None
-    try:
-        os.remove(path)
+        if time.time() - os.path.getmtime(lock) > 300:
+            os.remove(lock)  # left by a crash
     except OSError:
         pass
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        fail(f"{key} is already being brought back")
+    os.close(fd)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+
+
+def cmd_bring_back(args):
+    record_file(args.key)
+    with claimed(args.key):
+        rec = next((r for r in closed_records() if r["key"] == args.key), None)
+        if not rec:
+            fail(f"{args.key} is not a closed agent (running, being brought back, or deleted)")
+        if rec["superseded"] and not args.force:
+            fail(f"{rec.get('name')} now runs a newer session; this one is kept only to delete (or --force)")
+        argv = resume_argv(rec)
+        if not argv:
+            fail("nothing to run: the record has no command")
+        labels = dict(rec.get("labels") or {})
+        if labels.get("herdr.space"):
+            labels["herdr.tab"] = "tb" + os.urandom(16).hex()  # a new tab in its old space
+        cmd = [hc_binary(), "run", "--bg", "--json", "--keep", "--no-parent", "--outlive-parent"]
+        name = rec.get("name")
+        if name and (hc_json("get", name, timeout=5) or {}).get("state") == "live":
+            name = None  # someone else has the name now
+        if name:
+            cmd += ["--name", name]
+        if rec.get("cwd") and os.path.isdir(rec["cwd"]):
+            cmd += ["--cwd", rec["cwd"]]
+        for k, v in labels.items():
+            cmd += ["--label", f"{k}={v}"]
+        # A login shell, so the agent gets the same PATH as one started by hand; argv stays argv.
+        cmd += ["--", "bash", "-lc", 'export PATH="$HOME/.local/bin:$PATH"; exec "$@"', "bring-back", *argv]
+        got = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if got.returncode != 0:
+            fail(f"hc run failed: {(got.stderr or got.stdout).strip()[:300]}")
+        try:
+            address = json.loads(got.stdout).get("address")
+        except json.JSONDecodeError:
+            address = None
+        # Kept until the new session's own record lands (`cards seen`), so nothing is lost if it
+        # dies first; out of the list meanwhile. A resume that failed comes back after BACK_GRACE.
+        rec["brought_back_at"] = now()
+        rec["brought_back_to"] = address
+        write_record(rec)
     print(json.dumps({"address": address, "name": name, "resumed": "--resume" in argv,
                       "tab_name": rec.get("tab_name"), "project": rec.get("project"),
                       "space": (rec.get("labels") or {}).get("herdr.space")}))
@@ -1476,7 +1627,7 @@ def main():
 
     p = sub.add_parser("close", help="close an agent and keep it in the closed list (for apps)")
     p.add_argument("terminal_ref", metavar="terminal")
-    p.add_argument("--force", action="store_true", help="even while it works")
+    p.add_argument("--force", action="store_true", help="even while it works, waits on you or runs jobs; no save")
     p.add_argument("--save", action="store_true", help="ask it to save its notes first and wait")
     p.add_argument("--save-timeout", type=int, default=180)
     p.add_argument("--space-name")
@@ -1486,6 +1637,7 @@ def main():
 
     p = sub.add_parser("bring-back", help="resume a closed agent in a new terminal (for apps)")
     p.add_argument("key")
+    p.add_argument("--force", action="store_true", help="even when its name runs a newer session")
     p.set_defaults(func=cmd_bring_back)
 
     p = sub.add_parser("forget", help="drop a closed agent from the list (for apps)")

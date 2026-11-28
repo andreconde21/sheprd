@@ -56,14 +56,16 @@ class CardLedgerTests(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
-    def test_seen_is_detached_and_at_most_every_ten_minutes(self):
+    def test_seen_is_detached_and_at_most_every_ten_minutes_per_terminal(self):
         cache = {}
         with mock.patch.object(hook, "cards_bin", return_value="/bin/cards"), \
                 mock.patch.dict(os.environ, {"SHEPRD_HOOK_NO_SEEN": ""}), \
                 mock.patch.object(hook.subprocess, "Popen") as popen:
-            hook.note_seen(cache, "s1", "/t.jsonl", "/w")
-            hook.note_seen(cache, "s1", "/t.jsonl", "/w")
-        self.assertEqual(popen.call_count, 1)
+            hook.note_seen(cache, "t1", "s1", "/t.jsonl", "/w")
+            hook.note_seen(cache, "t1", "s1", "/t.jsonl", "/w")
+            self.assertEqual(popen.call_count, 1)
+            hook.note_seen(cache, "t9", "s1", "/t.jsonl", "/w")  # resumed in a new terminal: at once
+        self.assertEqual(popen.call_count, 2)
         args, kw = popen.call_args
         self.assertEqual(args[0][:3], ["/bin/cards", "seen", "--session"])
         self.assertTrue(kw["start_new_session"])

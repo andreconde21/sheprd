@@ -325,12 +325,10 @@ function closeAgent(address, space, tabName, project) {
   }, done);
 }
 
-// What to run by hand for a closed agent: on its machine, in its folder.
+// What to run by hand for a resumable closed agent: on its machine, in its folder.
 function resumeCommand(rec) {
   const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
-  const cd = rec.cwd ? `cd ${q(rec.cwd)} && ` : "";
-  if (rec.session && rec.resumable) return `${cd}claude --resume ${rec.session}`;
-  return `${cd}${(rec.argv ?? []).map(q).join(" ")}`;
+  return `${rec.cwd ? `cd ${q(rec.cwd)} && ` : ""}claude --resume ${rec.session}`;
 }
 
 // Why a machine's cards could not be read: a line to show instead of an empty list.
@@ -591,27 +589,27 @@ export default class SheprdSidebar extends View {
       const name = rec.name || rec.title || rec.terminal;
       const closedAt = Date.parse(rec.closed_at ?? "");
       const when = Number.isFinite(closedAt) ? `${duration(now - closedAt)} ago` : "";
-      const how = rec.closed_by === "closed" ? "closed" : rec.closed_by === "exited" ? "exited" : "gone";
+      const how = rec.superseded ? "replaced by a newer session" : rec.closed_by === "closed" ? "closed" : rec.closed_by === "exited" ? "exited" : "gone";
       const sub = [row.project ?? "Other", row.spaceName, `${how} ${when}`.trim()].filter(Boolean).join(" · ");
-      const tip = [rec.title, rec.cwd, rec.resumable ? `Claude session ${rec.session}` : "no session to resume: runs its command again",
+      const tip = [rec.title, rec.cwd, rec.superseded ? `${rec.name} runs a newer session now: only Delete` : rec.resumable ? `Claude session ${rec.session}` : `no session to resume: runs ${rec.program || "its command"} again`,
         row.spaceAlive ? "back into its space" : "into a new space in its project"].filter(Boolean).join("\n");
       return h_flex().id(`cl-${id}`).px(8).py(4).flex_none().rounded(8).items_center().gap(8)
         .hover((s) => s.bg(t.hover)).tooltip(tip)
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 220, height: 3 * 28 + 10, props: { menu: { closed: row } } });
+          openOverlay({ mod: "sheprd-sidebar", kind: "popup", width: 220, height: (row.rec.superseded ? 1 : row.rec.resumable ? 3 : 2) * 28 + 10, props: { menu: { closed: row } } });
         })
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(div().truncate().text_color(t.muted).child(name))
           .child(div().truncate().text_size(11).text_color(t.dim).child(sub)))
         .when(row.machine !== "local", (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machineTag(row.machine))))
-        .child(div().id(`cb-${id}`).flex_none().px(6).h(20).rounded(5).flex().items_center().text_size(11)
+        .when(!rec.superseded, (el) => el.child(div().id(`cb-${id}`).flex_none().px(6).h(20).rounded(5).flex().items_center().text_size(11)
           .bg(t.raised).text_color(busy[id] ? t.dim : t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
           .on_click((_e, cx) => {
             cx.stop_propagation();
             bringBack(row);
           })
-          .child(busy[id] ?? "Bring back"));
+          .child(busy[id] ?? "Bring back")));
     };
     return [head, ...crows.map(line)];
   }
@@ -853,9 +851,10 @@ export default class SheprdSidebar extends View {
     }
     if (p.menu.closed) {
       const row = p.menu.closed;
+      // Superseded: its name runs a newer session now; resuming this one would act on old state.
       return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
-        .child(item("m-back", "Bring back", () => bringBack(row)))
-        .child(item("m-cmd", "Copy resume command", () => copyText(resumeCommand(row.rec), "the resume command")))
+        .when(!row.rec.superseded, (el) => el.child(item("m-back", "Bring back", () => bringBack(row))))
+        .when(!row.rec.superseded && Boolean(row.rec.resumable), (el) => el.child(item("m-cmd", "Copy resume command", () => copyText(resumeCommand(row.rec), "the resume command"))))
         .child(item("m-forget", "Delete from this list", () => forgetClosed(row), true));
     }
     if (unhideOnly) {
