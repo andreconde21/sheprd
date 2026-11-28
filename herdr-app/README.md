@@ -6,7 +6,7 @@ Herdr: it survives Herdr updates.
 
 | Piece | What it does |
 |---|---|
-| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / Marked / All, ★ marks, right-click: mark, highlight (a coloured bar; in a project, the other agents fold under its highlighted ones, its chiefs of staff, behind "N agents · M need you"), mark read, move a space to a project, new project, hide. Plays the attention sound when an agent turns blocked or done, and a desktop notification when the app isn't in front; drag a project header onto another project, or right-click it, to reorder; drag an agent onto a project to move its space there, or onto another agent of its project to reorder; right-click also mutes it; hover an agent for its details; agents show their hc name when they have one; hold Shift over the list (or ctrl+space d to switch it on) to show each agent's current card summary and terminal code (t1d) instead (turn Herdr's own sounds off in Settings so you don't hear both). Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
+| `mods/sheprd-sidebar` | Every agent on every machine in one list, grouped by project across machines, filter Needs you / Working / Marked / All, ★ marks, right-click: mark, highlight (a coloured bar; in a project, the other agents fold under its highlighted ones, its chiefs of staff, behind "N agents · M need you"), mark read, move a space to a project, new project, hide. Plays the attention sound when an agent turns blocked or done, and a desktop notification when the app isn't in front; drag a project header onto another project, or right-click it, to reorder; drag an agent onto a project to move its space there, or onto another agent of its project to reorder; right-click also mutes it; right-click an agent > Close, keep for later (it is asked to save its notes, then ended: no memory used) and it waits under **Closed** at the bottom, with every agent whose terminal went away any other way (tab closed, killed, crashed), until you delete it there; Bring back resumes the same Claude session with the same hc name in its old space, or in a new space in its project; hover an agent for its details; agents show their hc name when they have one; hold Shift over the list (or ctrl+space d to switch it on) to show each agent's current card summary and terminal code (t1d) instead (turn Herdr's own sounds off in Settings so you don't hear both). Collapsed (the sidebar button, or under 160 px): a rail of project tags with their most urgent status and a needs-you count, and a dot per agent. |
 | `mods/sheprd-panel` | The focused agent's cards: summary first, then its latest decisions, then open questions with answer buttons (★ = recommended, ✎ = your own text) and Send; its last output folded below. Inbox: every agent's open questions with their context. Click a card id to read the card. |
 | `mods/sheprd-messages` | Messages: what agents sent each other with `hc send`. `hc-inbox` delivers those in the background (nothing typed into the prompt, one line in the agent's transcript), and this panel is where you read them: the focused agent's, or All (every agent on every machine, newest first, unread count). Click a name to focus that agent. The header switch turns background delivery off (typed into prompts, as before) or on, on every machine. |
 | `mods/sheprd-doc` | A document an agent wrote for you (`sheprd-doc <file>`), rendered as markdown in a split right of that agent, opened by the sidebar. It re-reads the file as it changes, the agent's next document replaces it while the split is open, and Edit opens it in your editor below. |
@@ -54,6 +54,19 @@ The `sheprd-card` skill covers it: inside the Herdr app (`$HC_TERMINAL_ID`
 set), agents run `cards …` instead of `sheprd card …`. `cards done` writes the
 card back to its task file with the same `[ledger.writeback]` section of
 `~/.config/herdr/config.toml` that sheprd uses.
+
+## Closed agents
+
+The Claude hook runs `cards seen` (detached, at most every 10 minutes per session), which keeps one
+small file per agent in `~/.local/state/sheprd/agents/` on that agent's machine: hc address and name,
+labels (`herdr.space`/`herdr.tab`: its place in the app), folder, command and Claude session. Files,
+not a herdr-core document: they survive core restarts and cost nothing per turn. A record whose
+terminal is gone, or now runs something else, is listed by `cards closed`; `cards close <t> --save`
+ends one on purpose, `cards bring-back <key>` runs `claude --resume <session>` in a new terminal with
+the old name and labels (a new tab in the old space; a space that is gone comes back as a new one,
+and the sidebar moves it into its project and renames the tab), `cards forget <key>` drops it.
+A session resumed elsewhere (`team relaunch`) drops its old record by itself. Agents that are not
+Claude run their command again in the same folder.
 
 ## Not (yet) like sheprd
 

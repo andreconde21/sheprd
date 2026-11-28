@@ -795,5 +795,92 @@ class WritebackEdgeTests(unittest.TestCase):
         self.assertIn(b"- x\r\n", raw)
 
 
+
+class ClosedAgentTests(unittest.TestCase):
+    """The closed-agents list: records from `cards seen`, liveness from the core's terminal list."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        patcher = unittest.mock.patch.object(cards, "AGENTS_DIR", self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sessions = {}
+        for name, fake in (("session_of_pid", lambda pid: self.sessions.get(pid)),):
+            p = unittest.mock.patch.object(cards, name, fake)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def record(self, terminal, born, session, **extra):
+        transcript = os.path.join(self.dir, f"{session}.jsonl")
+        open(transcript, "w").close()
+        rec = {"terminal": terminal, "born": born, "session": session, "transcript": transcript,
+               "argv": ["/x/claude", "--permission-mode", "auto"], "app": "claude-code", "name": f"n-{terminal}",
+               "labels": {"herdr.space": "sp1", "herdr.tab": "tb1"}, "seen_at": "2026-11-28T09:00:00+00:00", **extra}
+        return cards.write_record(rec)
+
+    def closed(self, terminals):
+        core = unittest.mock.Mock()
+        core.call.return_value = {"terminals": terminals}
+        with unittest.mock.patch.object(cards, "Core", return_value=core):
+            return cards.closed_records()
+
+    def test_a_live_terminal_running_its_session_is_not_closed(self):
+        self.record("t1", 5, "s1")
+        self.sessions[42] = "s1"
+        live = {"address": "t1", "created_ms": 5, "state": "live", "foreground": {"pid": 42, "argv": ["/x/claude"]}}
+        self.assertEqual(self.closed([live]), [])
+
+    def test_a_gone_terminal_or_a_shell_left_behind_is_closed(self):
+        self.record("t1", 5, "s1")
+        self.record("t2", 6, "s2")
+        shell = {"address": "t2", "created_ms": 6, "state": "live", "finished_ms": None,
+                 "foreground": {"pid": 7, "argv": ["bash"]}}
+        got = {r["key"]: r for r in self.closed([shell])}
+        self.assertEqual(set(got), {"t1@5", "t2@6"})
+        self.assertEqual(got["t1@5"]["closed_by"], "gone")
+        self.assertTrue(got["t1@5"]["resumable"])
+
+    def test_a_session_resumed_in_another_terminal_drops_the_old_record(self):
+        key = self.record("t1", 5, "s1")
+        self.sessions[9] = "s1"
+        moved = {"address": "t9", "created_ms": 99, "state": "live", "foreground": {"pid": 9, "argv": ["/x/claude"]}}
+        self.assertEqual(self.closed([moved]), [])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, f"{key}.json")))
+
+    def test_a_terminal_id_reused_after_a_core_restart_is_another_agent(self):
+        self.record("t1", 5, "s1")
+        self.sessions[3] = "other"
+        reused = {"address": "t1", "created_ms": 77, "state": "live", "foreground": {"pid": 3, "argv": ["/x/claude"]}}
+        self.assertEqual([r["key"] for r in self.closed([reused])], ["t1@5"])
+
+    def test_resume_keeps_mode_and_name_and_drops_the_old_resume(self):
+        argv = cards.resume_argv({"argv": ["claude", "--permission-mode", "auto", "--resume", "old", "--name", "LF · QA", "hi"],
+                                  "session": "S", "app": "claude-code"}, None)
+        self.assertEqual(argv[:7], ["claude", "--permission-mode", "auto", "--name", "LF · QA", "--resume", "S"])
+        self.assertNotIn("old", argv)
+        self.assertNotIn("hi", argv)
+
+    def test_a_non_claude_agent_runs_its_command_again(self):
+        self.assertEqual(cards.resume_argv({"argv": ["pi", "--x"], "session": None, "app": "pi"}, None), ["pi", "--x"])
+
+    def test_only_record_keys_name_files(self):
+        for bad in ("../x@1", "t1@1/../../etc", "t1", "t1@x", ""):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cards.record_file(bad)
+        self.assertTrue(cards.record_file("t1@123").endswith("t1@123.json"))
+
+    def test_seen_skips_helpers_without_a_space_or_a_name(self):
+        self.assertFalse(cards.worth_keeping({"labels": {}, "name": None}))
+        self.assertTrue(cards.worth_keeping({"labels": {"herdr.space": "sp"}}))
+        self.assertTrue(cards.worth_keeping({"labels": {}, "name": "lf-qa"}))
+
+    def test_the_sidebar_wires_close_bring_back_and_delete(self):
+        with open(os.path.join(HERE, "..", "mods", "sheprd-sidebar", "main.js")) as f:
+            js = f.read()
+        for needle in ('"close", terminal, "--save"', '"bring-back", row.rec.key', '"forget", row.rec.key',
+                       '"closed", "--json"', "Close, keep for later", "closedSection("):
+            self.assertIn(needle, js)
+
 if __name__ == "__main__":
     unittest.main()
